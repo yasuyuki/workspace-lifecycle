@@ -1,0 +1,406 @@
+[
+  {
+    "name": "private topic without upstream",
+    "decision": "push",
+    "state": {},
+    "inputs": {},
+    "reason": "PUSH_ALLOWED"
+  },
+  {
+    "name": "default branch",
+    "decision": "hold",
+    "state": {
+      "current_branch": "main"
+    },
+    "inputs": {},
+    "reason": "DEFAULT_BRANCH_PROTECTED"
+  },
+  {
+    "name": "topic tracking default",
+    "decision": "hold",
+    "state": {
+      "upstream": {
+        "remote": "origin",
+        "merge": "refs/heads/main"
+      }
+    },
+    "inputs": {},
+    "reason": "DEFAULT_BRANCH_PROTECTED"
+  },
+  {
+    "name": "renamed upstream topic",
+    "decision": "push",
+    "state": {
+      "upstream": {
+        "remote": "origin",
+        "merge": "refs/heads/remote-topic"
+      }
+    },
+    "inputs": {},
+    "destination": "remote-topic",
+    "reason": "PUSH_ALLOWED"
+  },
+  {
+    "name": "detached",
+    "decision": "ask",
+    "state": {
+      "current_branch": null
+    },
+    "inputs": {},
+    "reason": "DETACHED_HEAD"
+  },
+  {
+    "name": "public MIT",
+    "decision": "push",
+    "state": {
+      "repo": {
+        "visibility": "public",
+        "license_spdx_id": "MIT"
+      }
+    },
+    "inputs": {},
+    "reason": "PUSH_ALLOWED"
+  },
+  {
+    "name": "public unknown license",
+    "decision": "ask",
+    "state": {
+      "repo": {
+        "visibility": "public"
+      }
+    },
+    "inputs": {},
+    "reason": "UNKNOWN_OSS_LICENSE"
+  },
+  {
+    "name": "public explicit OSS",
+    "decision": "push",
+    "state": {
+      "repo": {
+        "visibility": "public"
+      }
+    },
+    "inputs": {
+      "oss": "yes"
+    },
+    "reason": "PUSH_ALLOWED"
+  },
+  {
+    "name": "public explicit non OSS",
+    "decision": "hold",
+    "state": {
+      "repo": {
+        "visibility": "public"
+      }
+    },
+    "inputs": {
+      "oss": "no"
+    },
+    "reason": "NON_OSS_PUBLIC_REPOSITORY"
+  },
+  {
+    "name": "metadata authentication failure",
+    "decision": "ask",
+    "state": {
+      "repo": {
+        "metadata_error": true,
+        "visibility": null
+      }
+    },
+    "inputs": {},
+    "reason": "METADATA_UNAVAILABLE"
+  },
+  {
+    "name": "unknown default",
+    "decision": "ask",
+    "state": {
+      "repo": {
+        "default_branch": null
+      }
+    },
+    "inputs": {},
+    "reason": "DEFAULT_BRANCH_UNAVAILABLE"
+  },
+  {
+    "name": "user hold wins",
+    "decision": "hold",
+    "state": {
+      "current_branch": null
+    },
+    "inputs": {
+      "user_intent": "hold"
+    },
+    "reason": "USER_HOLD"
+  },
+  {
+    "name": "temporary",
+    "decision": "hold",
+    "state": {},
+    "inputs": {
+      "temporary": true
+    },
+    "reason": "TEMPORARY_COMMIT"
+  },
+  {
+    "name": "explicit push default",
+    "decision": "push",
+    "state": {
+      "current_branch": "main"
+    },
+    "inputs": {
+      "user_intent": "push",
+      "temporary": true
+    },
+    "destination": "main",
+    "reason": "PUSH_ALLOWED"
+  },
+  {
+    "name": "multiple remotes no selection",
+    "decision": "ask",
+    "state": {
+      "remotes": {
+        "fork": {
+          "fetch_urls": [
+            "git@github.com:person/project.git"
+          ],
+          "push_urls": [],
+          "push_refspecs": [],
+          "mirror": false
+        }
+      }
+    },
+    "inputs": {},
+    "reason": "NO_PUSH_REMOTE"
+  },
+  {
+    "name": "fork branch pushRemote wins",
+    "decision": "push",
+    "state": {
+      "remotes": {
+        "fork": {
+          "fetch_urls": [
+            "git@github.com:person/project.git"
+          ],
+          "push_urls": [],
+          "push_refspecs": [],
+          "mirror": false
+        }
+      },
+      "candidates": {
+        "branch_push_remote": "fork",
+        "remote_push_default": "origin",
+        "branch_remote": "origin"
+      },
+      "upstream": {
+        "remote": "origin",
+        "merge": "refs/heads/main"
+      }
+    },
+    "inputs": {},
+    "remote": "fork",
+    "reason": "PUSH_ALLOWED"
+  },
+  {
+    "name": "pushDefault wins branch remote",
+    "decision": "push",
+    "state": {
+      "remotes": {
+        "fork": {
+          "fetch_urls": [
+            "git@github.com:person/project.git"
+          ],
+          "push_urls": [],
+          "push_refspecs": [],
+          "mirror": false
+        }
+      },
+      "candidates": {
+        "remote_push_default": "fork",
+        "branch_remote": "origin"
+      }
+    },
+    "inputs": {},
+    "remote": "fork",
+    "reason": "PUSH_ALLOWED"
+  },
+  {
+    "name": "branch remote selection",
+    "decision": "push",
+    "state": {
+      "remotes": {
+        "fork": {
+          "fetch_urls": [
+            "git@github.com:person/project.git"
+          ],
+          "push_urls": [],
+          "push_refspecs": [],
+          "mirror": false
+        }
+      },
+      "candidates": {
+        "branch_remote": "fork"
+      }
+    },
+    "inputs": {},
+    "remote": "fork",
+    "reason": "PUSH_ALLOWED"
+  },
+  {
+    "name": "missing configured remote",
+    "decision": "ask",
+    "state": {
+      "candidates": {
+        "branch_push_remote": "missing"
+      }
+    },
+    "inputs": {},
+    "reason": "INVALID_PUSH_REMOTE"
+  },
+  {
+    "name": "local upstream remote",
+    "decision": "ask",
+    "state": {
+      "candidates": {
+        "branch_remote": "."
+      }
+    },
+    "inputs": {},
+    "reason": "INVALID_PUSH_REMOTE"
+  },
+  {
+    "name": "different push repository",
+    "decision": "ask",
+    "state": {
+      "remotes": {
+        "origin": {
+          "fetch_urls": [
+            "https://github.com/example/project.git"
+          ],
+          "push_urls": [
+            "https://github.com/other/project.git"
+          ],
+          "push_refspecs": [],
+          "mirror": false
+        }
+      }
+    },
+    "inputs": {},
+    "reason": "PUSH_REPOSITORY_MISMATCH"
+  },
+  {
+    "name": "multiple push URLs",
+    "decision": "ask",
+    "state": {
+      "remotes": {
+        "origin": {
+          "fetch_urls": [
+            "https://github.com/example/project.git"
+          ],
+          "push_urls": [
+            "https://github.com/example/project.git",
+            "https://github.com/example/project.git"
+          ],
+          "push_refspecs": [],
+          "mirror": false
+        }
+      }
+    },
+    "inputs": {},
+    "reason": "AMBIGUOUS_PUSH_URL"
+  },
+  {
+    "name": "custom refspec",
+    "decision": "ask",
+    "state": {
+      "remotes": {
+        "origin": {
+          "fetch_urls": [
+            "https://github.com/example/project.git"
+          ],
+          "push_urls": [],
+          "push_refspecs": [
+            "refs/heads/*:refs/heads/*"
+          ],
+          "mirror": false
+        }
+      }
+    },
+    "inputs": {},
+    "reason": "CUSTOM_PUSH_REFSPEC"
+  },
+  {
+    "name": "mirror",
+    "decision": "ask",
+    "state": {
+      "remotes": {
+        "origin": {
+          "fetch_urls": [
+            "https://github.com/example/project.git"
+          ],
+          "push_urls": [],
+          "push_refspecs": [],
+          "mirror": true
+        }
+      }
+    },
+    "inputs": {},
+    "reason": "MIRROR_REMOTE"
+  },
+  {
+    "name": "SSH HTTPS same repository",
+    "decision": "push",
+    "state": {
+      "remotes": {
+        "origin": {
+          "fetch_urls": [
+            "https://github.com/example/project.git"
+          ],
+          "push_urls": [
+            "git@github.com:example/project.git"
+          ],
+          "push_refspecs": [],
+          "mirror": false
+        }
+      }
+    },
+    "inputs": {},
+    "reason": "PUSH_ALLOWED"
+  },
+  {
+    "name": "default local branch upstream topic",
+    "state": {
+      "current_branch": "main",
+      "upstream": {
+        "remote": "origin",
+        "merge": "refs/heads/topic"
+      }
+    },
+    "decision": "hold",
+    "reason": "DEFAULT_BRANCH_PROTECTED"
+  },
+  {
+    "name": "configured remote without upstream merge",
+    "state": {
+      "candidates": {
+        "branch_remote": "origin"
+      },
+      "upstream": {
+        "remote": "origin",
+        "merge": null
+      }
+    },
+    "decision": "push",
+    "reason": "PUSH_ALLOWED"
+  },
+  {
+    "name": "CC0 not OSI approval",
+    "state": {
+      "repo": {
+        "visibility": "public",
+        "license_spdx_id": "CC0-1.0"
+      }
+    },
+    "decision": "ask",
+    "reason": "UNKNOWN_OSS_LICENSE"
+  }
+]
