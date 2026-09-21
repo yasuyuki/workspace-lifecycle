@@ -90,7 +90,7 @@ class GitEncodingTests(unittest.TestCase):
              "--launch-cwd", str(self.topic), "--", sys.executable, str(child)],
             env=environment, capture_output=True)
         self.assertEqual(ran.returncode, 0, ran.stderr)
-        self.assertEqual((self.root / "feature.txt").read_bytes(), b"done\n")
+        self.assertEqual((self.root / "feature.txt").read_text(encoding="utf-8"), "done\n")
         retired = subprocess.run(
             [*command, "--repo", str(self.root), "retire", "--task", "encoding",
              "--result-ref", "test/encoding", "--users-released"],
