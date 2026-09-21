@@ -35,10 +35,11 @@ def _lease(repo, task, allow_use=False):
         raise LifecycleError(str(exc)) from exc
 
 
-def _snapshot(repo: Path) -> dict[str, str]:
+def _snapshot(repo: Path, *, optional_locks=True) -> dict[str, str]:
+    environment = None if optional_locks else {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
     process = subprocess.run(['git', '-C', str(repo), 'status', '--porcelain=v1', '-z',
                               '--untracked-files=all', '--ignored=no', '--no-renames'],
-                             capture_output=True, check=True)
+                             capture_output=True, check=True, env=environment)
     result = {os.fsdecode(row[3:]): os.fsdecode(row[:2]) for row in process.stdout.split(b'\0') if row}
     ignored = subprocess.run(['git', '-C', str(repo), 'ls-files', '--others', '--ignored',
                               '--exclude-standard', '-z'], capture_output=True, check=True)

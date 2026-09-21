@@ -32,6 +32,13 @@ def parser():
     begin.add_argument("--parent"); begin.add_argument("--dependency", action="append", default=[])
     begin.add_argument("--validation-json", type=_json_list, default=[])
     begin.add_argument("--preflight-json", type=_json_list, required=True)
+    adopt = commands.add_parser('adopt-existing', help='adopt an existing linked checkout as unaccepted current work')
+    for name in ('task', 'request', 'remote', 'branch', 'worktree', 'expected-head', 'evidence'):
+        adopt.add_argument('--' + name, required=True)
+    adopt.add_argument('--parent'); adopt.add_argument('--dependency', action='append', default=[])
+    adopt.add_argument('--validation-json', type=_json_list, required=True)
+    adopt.add_argument('--preflight-json', type=_json_list, required=True)
+    adopt.add_argument('--hold-reason'); adopt.add_argument('--next-action')
     status = commands.add_parser("status"); status.add_argument("--task")
     hold = commands.add_parser("hold"); hold.add_argument("--task", required=True); hold.add_argument("--reason", required=True); hold.add_argument("--next-action", required=True)
     resume = commands.add_parser('release-hold', help='resolve an explicit hold using a decision reference')
@@ -53,6 +60,13 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         if args.command == "begin": result = service.begin(args.repo, task=args.task, request=args.request, remote=args.remote, branch=args.branch, worktree=args.worktree, parent=args.parent, dependencies=args.dependency, validation=args.validation_json, preflight=args.preflight_json)
+        elif args.command == 'adopt-existing':
+            from .adoption import adopt_existing
+            result = adopt_existing(args.repo, task=args.task, request=args.request, remote=args.remote,
+                branch=args.branch, worktree=args.worktree, expected_head=args.expected_head,
+                evidence=args.evidence, parent=args.parent, dependencies=args.dependency,
+                validation=args.validation_json, preflight=args.preflight_json,
+                hold_reason=args.hold_reason, next_action=args.next_action)
         elif args.command == "status": result = service.status(args.repo, args.task)
         elif args.command == "hold": result = service.hold(args.repo, args.task, args.reason, args.next_action)
         elif args.command == "release-hold": result = service.release_hold(args.repo, args.task, args.evidence)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "workspace-lifecycle"
-version = "0.2.1"
+version = "0.3.0"
 description = "Git-native workspace acceptance, completion and retirement"
 readme = "README.md"
 license = "MIT"
