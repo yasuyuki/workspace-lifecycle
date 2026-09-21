@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.3.0` is not published to PyPI. It imports no agent-rules
+directory; version `0.3.1` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation, branch and HEAD identity, upstream/default discovery,
@@ -27,7 +27,8 @@ validation argv and preflight argv. The preflight must contain the literal
 `hold` records a reason and next action. Parent and dependency tasks must
 already exist and are checked again before integration.
 
-Use `adopt-existing` instead of `begin` to continue an existing linked checkout.
+Use `adopt-existing` instead of `begin` to continue an existing checkout, including a nondefault primary checkout or a
+linked checkout nested below it.
 Supply `--task`, `--request`, `--remote`, `--branch`, absolute `--worktree`,
 the full commit OID as `--expected-head`, `--validation-json`,
 `--preflight-json` (including `{repo}`), and a durable `--evidence` reference
@@ -40,7 +41,11 @@ outstanding product acceptance explicitly in the request and validation.
 Adoption does not run validation or create acceptance/integration receipts.
 Existing dirty, staged, untracked and ignored files remain baseline-owned,
 and `finish` cannot claim them as this task's commit, restore or archive work.
-Git administrative locks are preserved. Default/primary checkouts, conflicting
+Git administrative locks are preserved. Nested repositories remain separate ownership
+boundaries: adoption snapshots their checkout/Git identity and HEAD, without
+traversing or owning their contents. Their dirty state belongs to their own
+contract. Finish plans cannot operate inside a nested Git checkout. Primary
+checkouts can continue and finish, but cannot request or execute retirement. Default branch checkouts, conflicting
 bindings, active Git operations, protected indexes, and unsafe filesystem paths
 are refused. An interrupted adoption retains an exact contract and filesystem,
 index and dirty-content snapshot: retry the same arguments, with the same
@@ -123,8 +128,9 @@ The runtime owner can use the CLI without importing placement or inventory code.
 This repository is the current editing and distribution owner. Initial source
 was extracted from `yasuyuki/agent-rules` revision
 `f6f2b027700a14232c87cc36287387242fa1fddf`, `packages/workspace-lifecycle/`.
-Historical revisions remain in that repository. Version 0.3.0 retains the 0.2.1
-state schema and existing public CLI, adding explicit existing-work adoption.
+Historical revisions remain in that repository. Version 0.3.1 retains the 0.2.1
+state schema and existing public CLI, extending existing-work adoption to
+nondefault primary and nested checkouts with separate repository ownership.
 Empty directories are identified by filesystem
 contents, never names. Nonempty unowned data, links, reparse points, mounts,
 submodules and special files still refuse retirement. A concurrent file creation

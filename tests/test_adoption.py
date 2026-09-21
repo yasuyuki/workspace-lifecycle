@@ -57,6 +57,118 @@ class AdoptionTests(unittest.TestCase):
         self.assertTrue(retire(self.f.root, task='adopt', result_ref='issue/adopt', users_released=True)['retired'])
         self.assertFalse(self.topic.exists())
 
+    def primary(self):
+        test_lifecycle.run(self.f.root, 'switch', '-c', 'topic/primary')
+        integration = Path(self.f.temp.name) / 'integration'
+        test_lifecycle.run(self.f.root, 'worktree', 'add', str(integration), 'trunk')
+        return integration
+
+    def test_primary_dirty_adoption_and_nested_resolution_preserve_ownership(self):
+        self.primary()
+        nested = self.f.root / 'nested'
+        test_lifecycle.run(self.f.root, 'worktree', 'add', '-b', 'topic/nested', str(nested))
+        (self.f.root / '.git' / 'info' / 'exclude').write_text('nested/\n')
+        (self.f.root / 'baseline.txt').write_text('primary dirty')
+        (nested / 'baseline.txt').write_text('nested dirty')
+        self.adopt(task='primary', worktree=str(self.f.root), branch='topic/primary')
+        self.adopt(task='nested', worktree=str(nested), branch='topic/nested')
+        for workspace, task in [(self.f.root, 'primary'), (nested, 'nested')]:
+            result = subprocess.run([sys.executable, '-m', 'workspace_lifecycle', 'resolve-run',
+                '--cwd', str(workspace), '--launch-cwd', str(workspace), '--',
+                sys.executable, '-c', 'import os; print(os.environ["WORKSPACE_LIFECYCLE_TASK"])'],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), task)
+            self.assertNotIn('acceptance', status(workspace, task))
+        self.assertEqual((nested / 'baseline.txt').read_text(), 'nested dirty')
+        plan = self.plan('primary', self.f.root / 'baseline.txt', 'primary dirty')
+        with self.assertRaisesRegex(LifecycleError, 'preexisting dirty'):
+            finish(self.f.root, task='primary', plan_path=str(plan), result_ref='issue/primary')
+
+    def test_clean_primary_can_finish_but_cannot_request_or_execute_retirement(self):
+        integration = self.primary()
+        self.adopt(task='primary', worktree=str(self.f.root), branch='topic/primary')
+        plan = self.plan('primary', self.f.root / 'feature.txt', 'primary feature')
+        completed = finish(self.f.root, task='primary', plan_path=str(plan), result_ref='issue/primary')
+        self.assertTrue(completed['accepted'])
+        for request in [True, False]:
+            with self.assertRaisesRegex(LifecycleError, 'primary checkout cannot retire'):
+                retire(integration, task='primary', result_ref='issue/primary',
+                       users_released=True, request_only=request)
+        self.assertTrue(self.f.root.is_dir())
+        self.assertNotIn('retire', status(self.f.root, 'primary'))
+
+    def test_primary_interrupted_adoption_preserves_intent_without_git_metadata_drift(self):
+        from workspace_lifecycle import adoption
+        self.primary()
+        original = adoption.save_state
+        def crash(directory, state):
+            original(directory, state)
+            raise OSError('interrupted after intent')
+        with patch.object(adoption, 'save_state', side_effect=crash):
+            with self.assertRaises(LifecycleError):
+                self.adopt(task='primary', worktree=str(self.f.root), branch='topic/primary')
+        self.adopt(task='primary', worktree=str(self.f.root), branch='topic/primary')
+        self.assertNotIn('acceptance', status(self.f.root, 'primary'))
+
+    def test_primary_retry_detects_nested_boundary_replacement(self):
+        from workspace_lifecycle import adoption
+        self.primary()
+        nested = self.f.root / 'member'
+        test_lifecycle.run(self.f.root, 'clone', str(self.f.remote), str(nested))
+        (self.f.root / '.git' / 'info' / 'exclude').write_text('member/\n')
+        original = adoption.save_state
+        def crash(directory, state):
+            original(directory, state); raise OSError('interrupt')
+        with patch.object(adoption, 'save_state', side_effect=crash):
+            with self.assertRaises(LifecycleError):
+                self.adopt(task='primary', worktree=str(self.f.root), branch='topic/primary')
+        # A replacement at the same path must not satisfy the saved intent.
+        nested.rename(Path(self.f.temp.name) / 'saved-member')
+        test_lifecycle.run(self.f.root, 'clone', str(self.f.remote), str(nested))
+        with self.assertRaisesRegex(LifecycleError, 'snapshot changed'):
+            self.adopt(task='primary', worktree=str(self.f.root), branch='topic/primary')
+
+    def test_primary_retry_does_not_own_nested_dirty_content(self):
+        from workspace_lifecycle import adoption
+        self.primary()
+        nested = self.f.root / 'member'
+        test_lifecycle.run(self.f.root, 'clone', str(self.f.remote), str(nested))
+        (self.f.root / '.git' / 'info' / 'exclude').write_text('member/\n')
+        original = adoption.save_state
+        def crash(directory, state):
+            original(directory, state); raise OSError('interrupt')
+        with patch.object(adoption, 'save_state', side_effect=crash):
+            with self.assertRaises(LifecycleError):
+                self.adopt(task='primary', worktree=str(self.f.root), branch='topic/primary')
+        (nested / 'private.txt').write_text('member-owned change')
+        self.adopt(task='primary', worktree=str(self.f.root), branch='topic/primary')
+        self.assertEqual((nested / 'private.txt').read_text(), 'member-owned change')
+        self.assertEqual(status(self.f.root, 'primary')['adoption']['protected_paths'], ['member'])
+
+    def test_finish_cannot_archive_files_in_nested_independent_repository(self):
+        self.primary()
+        nested = self.f.root / 'member'
+        test_lifecycle.run(self.f.root, 'clone', str(self.f.remote), str(nested))
+        (self.f.root / '.git' / 'info' / 'exclude').write_text('member/\n')
+        private = nested / 'private.txt'; private.write_text('member data')
+        self.adopt(task='primary', worktree=str(self.f.root), branch='topic/primary')
+        store = Path(self.f.temp.name) / 'store'; store.mkdir()
+        plan = Path(self.f.temp.name) / 'nested-plan.json'
+        plan.write_text(json.dumps({'archive': [{'path': 'member/private.txt',
+            'classification': 'private', 'owner': 'primary', 'evidence': 'invalid parent ownership',
+            'sha256': hashlib.sha256(private.read_bytes()).hexdigest(), 'store': str(store),
+            'approval_evidence': 'invalid parent approval', 'name': 'private.txt'}]}))
+        with self.assertRaisesRegex(LifecycleError, 'nested Git checkout'):
+            finish(self.f.root, task='primary', plan_path=str(plan), result_ref='issue/primary')
+        self.assertEqual(private.read_text(), 'member data')
+        self.assertFalse(list(store.iterdir()))
+        # Losing the live marker does not transfer the member's data to its parent.
+        (nested / '.git').rename(Path(self.f.temp.name) / 'saved-member-git')
+        with self.assertRaisesRegex(LifecycleError, 'preserved nested Git checkout'):
+            finish(self.f.root, task='primary', plan_path=str(plan), result_ref='issue/primary')
+        self.assertEqual(private.read_text(), 'member data')
+
     def test_adoption_is_unaccepted_and_does_not_run_validation(self):
         self.adopt(validation=['this-command-must-never-run-during-adoption'])
         item = status(self.topic, 'adopt')

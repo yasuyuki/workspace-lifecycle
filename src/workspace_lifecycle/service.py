@@ -239,6 +239,12 @@ def _file_path(repo, name):
     _no_links(candidate, repo)
     if repo not in candidate.resolve().parents:
         raise LifecycleError("plan path escapes workspace")
+    for parent in candidate.parents:
+        if parent == repo:
+            break
+        marker = parent / '.git'
+        if marker.exists() or marker.is_symlink():
+            raise LifecycleError('plan path belongs to a nested Git checkout')
     return candidate
 
 
@@ -451,7 +457,12 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 all_paths = commit_paths + restore_paths + archive_paths
                 if len(all_paths) != len(set(all_paths)):
                     raise LifecycleError('plan categories overlap')
-                if any(path in task['baseline_dirty'] for path in all_paths):
+                protected = task.get('adoption', {}).get('protected_paths', [])
+                if any(path == boundary or path.startswith(boundary + '/')
+                       for path in all_paths for boundary in protected):
+                    raise LifecycleError('plan path belongs to a preserved nested Git checkout')
+                if any(path == baseline or (baseline.endswith('/') and path.startswith(baseline))
+                       for path in all_paths for baseline in task['baseline_dirty']):
                     raise LifecycleError('preexisting dirty is not owned by this task')
                 if _index_paths(repo) - set(commit_paths + restore_paths):
                     raise LifecycleError('index contains changes outside the owned finish plan')
@@ -692,6 +703,8 @@ def retire(repo, *, task: str, result_ref: str, users_released: bool = False, re
             if head(repo, 'refs/heads/' + branch) != expected:
                 raise LifecycleError('retire expected accepted HEAD; branch changed')
             workspace = Path(request['path']) if request else task_worktree(repo, branch)
+            if workspace == Path(worktree_records(repo)[0]['worktree']).resolve():
+                raise LifecycleError('primary checkout cannot retire')
             if not request_only and (repo == workspace or workspace in repo.parents or Path.cwd() == workspace or workspace in Path.cwd().parents):
                 raise LifecycleError('retire must run outside its target worktree')
             for dependency in (Path(__file__).resolve(), Path(os.sys.executable).resolve()):
