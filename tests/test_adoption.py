@@ -66,7 +66,8 @@ class AdoptionTests(unittest.TestCase):
 
     def test_mount_and_target_identity_replacement_are_refused(self):
         from workspace_lifecycle import adoption
-        with patch.object(adoption.os.path, 'ismount', side_effect=lambda path: Path(path) == self.topic):
+        canonical_topic = self.topic.resolve()
+        with patch.object(adoption.os.path, 'ismount', side_effect=lambda path: Path(path).resolve() == canonical_topic):
             with self.assertRaisesRegex(LifecycleError, 'mounted'):
                 self.adopt()
         # An interrupted durable intent is tied to this physical checkout, not its path text.
@@ -238,8 +239,13 @@ adoption.adopt_existing(sys.argv[1], task='adopt', request='issue/adopt', remote
         with self.assertRaises(LifecycleError):
             self.adopt(worktree=str(self.f.root), branch='trunk')
         blob = test_lifecycle.run(self.topic, 'hash-object', '-w', 'README')
-        process = subprocess.run(['git', '-C', str(self.topic), 'update-index', '--index-info'],
-                                 input='100644 ' + blob + ' 1\tREADME\n', text=True, check=True)
+        # Binary NUL records avoid Windows text-mode CRLF translation and
+        # explicitly remove stage zero before adding the unresolved entry.
+        records = ('0 ' + '0' * len(blob) + '\tREADME\0'
+                   + '100644 ' + blob + ' 1\tREADME\0').encode()
+        subprocess.run(['git', '-C', str(self.topic), 'update-index', '-z', '--index-info'],
+                       input=records, check=True)
+        self.assertTrue(test_lifecycle.run(self.topic, 'ls-files', '--unmerged'))
         try:
             with self.assertRaisesRegex(LifecycleError, 'unmerged'):
                 self.adopt()
