@@ -17,7 +17,7 @@ import uuid
 
 def _paths(repo, task):
     proc = subprocess.run(['git', '-C', str(repo), 'rev-parse', '--path-format=absolute',
-                           '--git-common-dir'], capture_output=True, text=True, check=True)
+                           '--git-common-dir'], capture_output=True, text=True, encoding="utf-8", check=True)
     common = Path(proc.stdout.strip())
     if (common / 'agent-branches/state.json').exists():
         raise ValueError('legacy registry: explicit consumer migration is required')

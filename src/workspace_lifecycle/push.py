@@ -241,7 +241,7 @@ def load_policy(path: Path) -> dict[str, Any]:
 
 
 def run_git(repo: Path, *args: str, required: bool = True) -> str | None:
-    completed = subprocess.run(["git", "-C", str(repo), *args], text=True,
+    completed = subprocess.run(["git", "-C", str(repo), *args], text=True, encoding="utf-8",
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
     if completed.returncode and required:
         raise RuntimeError("git command failed")
@@ -258,7 +258,7 @@ def github_repo(url: str) -> tuple[str, str] | None:
 
 def default_from_ls_remote(repo: Path, remote: str) -> str | None:
     completed = subprocess.run(["git", "-C", str(repo), "ls-remote", "--symref", remote, "HEAD"],
-                               text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+                               text=True, encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
     if completed.returncode:
         return None
     match = re.search(r"^ref: refs/heads/([^\t\n]+)\tHEAD$", completed.stdout, re.MULTILINE)

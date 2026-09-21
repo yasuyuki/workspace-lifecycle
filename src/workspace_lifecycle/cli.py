@@ -150,7 +150,7 @@ def _resolve_run(effective, launch, argv):
     if not effective.is_dir() or not launch.is_dir():
         raise LifecycleError('resolve-run directories must exist')
     probe = subprocess.run(['git', '-C', str(effective), 'rev-parse', '--show-toplevel'],
-                           text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                           text=True, encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if probe.returncode:
         if _git_marker(effective) is not None:
             raise LifecycleError('effective cwd has an invalid Git workspace')
