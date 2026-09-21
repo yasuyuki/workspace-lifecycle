@@ -8,7 +8,7 @@ from .errors import LifecycleError
 
 
 def git(repo: Path | str, *args: str, optional: bool = False, env=None) -> str | None:
-    process = subprocess.run(["git", "-C", str(repo), *args], text=True,
+    process = subprocess.run(["git", "-C", str(repo), *args], text=True, encoding="utf-8",
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={**(os.environ if env is None else env), "GIT_LITERAL_PATHSPECS": "1"})
     if process.returncode:
         if optional:

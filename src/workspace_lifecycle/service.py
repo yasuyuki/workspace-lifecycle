@@ -212,7 +212,7 @@ def _push(repo: Path, preflight: list[str], expected_branch: str, expected_remot
         raise LifecycleError("preflight push argv is not an exact normal branch push")
     if push_argv[2].startswith('-') or (expected_remote is not None and push_argv[2] != expected_remote):
         raise LifecycleError('preflight selected a different remote than the registered integration contract')
-    subprocess.run(push_argv, cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(push_argv, cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
     remote_tip = git(repo, "ls-remote", push_argv[2], "refs/heads/" + expected_branch) or ""
     if not remote_tip.startswith(head(repo) + "\t"): raise LifecycleError("push did not verify remote branch tip")
     return {"decision": decision["decision"], "reason": decision.get("reason"), "argv": push_argv}

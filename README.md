@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.3.1` is not published to PyPI. It imports no agent-rules
+directory; version `0.3.2` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation, branch and HEAD identity, upstream/default discovery,
@@ -135,3 +135,7 @@ Empty directories are identified by filesystem
 contents, never names. Nonempty unowned data, links, reparse points, mounts,
 submodules and special files still refuse retirement. A concurrent file creation
 or failed Git removal preserves the retirement request for an explicit retry.
+
+Version 0.3.2 decodes Git text output explicitly as UTF-8, including runtime
+root discovery and completion pushes on Windows. It preserves the state schema,
+CLI, supervisor and inherited environment; no encoding wrapper is required.
