@@ -1,0 +1,32 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install build twine
+      - run: python -m build
+      - shell: bash
+        run: python -m twine check --strict dist/*
+      - name: Install and test outside checkout
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/lifecycle-runtime"
+          if [ "$RUNNER_OS" = Windows ]; then
+            runtime="$RUNNER_TEMP/lifecycle-runtime/Scripts"
+          else
+            runtime="$RUNNER_TEMP/lifecycle-runtime/bin"
+          fi
+          "$runtime/python" -m pip install --no-index dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$runtime/workspace-lifecycle" --version
+          "$runtime/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -v
