@@ -27,14 +27,32 @@ def _operation_check(target):
             raise LifecycleError('existing Git operation must be resolved before adoption: ' + name)
 
 
+def _repository_boundary(path):
+    """A nested repository remains owned by its own Git/lifecycle contract."""
+    _no_links(path)
+    marker = path / '.git'
+    _no_links(marker)
+    if top(path) != path:
+        raise LifecycleError('directory baseline must be a distinct Git checkout')
+    admin = Path(git(path, 'rev-parse', '--absolute-git-dir'))
+    _no_links(admin)
+    return {'worktree': _identity(path), 'marker': _identity(marker),
+            'git_file': marker.read_text() if marker.is_file() else None,
+            'git_dir': str(admin), 'git_dir_identity': _identity(admin),
+            'common_dir': str(common_dir(path)), 'head': head(path)}
+
+
 def _directories(target):
-    """Git omits empty directories; preserve their identity across adoption too."""
+    """Preserve directory identities without taking ownership of nested repos."""
     result = {}
     def walk_error(error):
         raise error
     for current, dirs, _ in os.walk(target, followlinks=False, onerror=walk_error):
-        for name in dirs:
+        for name in list(dirs):
             path = Path(current) / name
+            if path == target / '.git':
+                dirs.remove(name)  # Our own state/index/leases are Git metadata.
+                continue
             info = path.lstat()
             if stat.S_ISLNK(info.st_mode):
                 result[path.relative_to(target).as_posix()] = {'link': os.readlink(path)}
@@ -42,7 +60,12 @@ def _directories(target):
             if (getattr(info, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)
                     or os.path.ismount(path)):
                 raise LifecycleError('adoption refuses mounted or reparse directory content')
-            result[path.relative_to(target).as_posix()] = _identity(path)
+            marker = path / '.git'
+            if marker.exists() or marker.is_symlink():
+                result[path.relative_to(target).as_posix()] = _repository_boundary(path)
+                dirs.remove(name)
+            else:
+                result[path.relative_to(target).as_posix()] = _identity(path)
     return result
 
 
@@ -52,8 +75,6 @@ def _capture(repo, target, branch, expected_head):
         raise LifecycleError('adoption refuses a mounted worktree')
     records = worktree_records(repo)
     primary = Path(records[0]['worktree']).resolve()
-    if primary in target.parents:
-        raise LifecycleError('existing worktree must be outside the primary checkout')
     # A filesystem may host both repositories (for example a mounted /work).
     # Below their shared anchor, a mount would redirect the requested checkout.
     try:
@@ -67,11 +88,11 @@ def _capture(repo, target, branch, expected_head):
         if os.path.ismount(component):
             raise LifecycleError('adoption refuses mounted worktree path traversal')
     matches = [r for r in records if Path(r['worktree']).resolve() == target]
-    if (len(matches) != 1 or matches[0] is records[0]
+    if (len(matches) != 1
             or len([r for r in records if r.get('branch') == 'refs/heads/' + branch]) != 1
             or matches[0].get('branch') != 'refs/heads/' + branch
             or 'prunable' in matches[0]):
-        raise LifecycleError('adoption requires exactly one existing linked worktree on the explicit branch')
+        raise LifecycleError('adoption requires exactly one existing worktree on the explicit branch')
     if (top(target) != target or common_dir(target) != common_dir(repo)
             or current_branch(target) != branch
             or head(target) != expected_head
@@ -79,14 +100,22 @@ def _capture(repo, target, branch, expected_head):
         raise LifecycleError('existing branch/worktree/expected-head identity mismatch')
     marker = target / '.git'
     _no_links(marker)
-    if not marker.is_file():
-        raise LifecycleError('adoption requires a linked worktree Git file')
+    if not (marker.is_dir() if target == primary else marker.is_file()):
+        raise LifecycleError('adoption requires the native primary directory or linked Git file')
     admin = Path(git(target, 'rev-parse', '--absolute-git-dir'))
     _no_links(admin)
     _operation_check(target)
     dirty = _snapshot(target, optional_locks=False)
+    directories = _directories(target)
+    boundaries = {name: value for name, value in directories.items()
+                  if isinstance(value, dict) and 'git_dir' in value}
     content = {}
     for name in sorted(dirty):
+        boundary = next((root for root in boundaries
+                         if name.rstrip('/') == root or name.startswith(root + '/')), None)
+        if boundary is not None:
+            content[name] = {'repository_boundary': boundary, 'identity': boundaries[boundary]}
+            continue
         path = target / name
         _no_links(path.parent, target)
         for part in (path, *path.parents):
@@ -126,11 +155,12 @@ def _capture(repo, target, branch, expected_head):
     _no_links(index_path)
     index = index_path.read_bytes()
     snapshot = {'dirty': dirty, 'content': content,
-                'directories': _directories(target),
+                'directories': directories,
                 'index_sha256': hashlib.sha256(index).hexdigest(),
                 'index_identity': _identity(index_path),
                 'worktree': _identity(target), 'git_dir': str(admin),
-                'git_dir_identity': _identity(admin), 'git_file': marker.read_text(),
+                'git_dir_identity': _identity(admin),
+                'git_file': marker.read_text() if marker.is_file() else None,
                 'git_file_identity': _identity(marker),
                 'parents': [[str(p), _identity(p)] for p in target.parents],
                 'record': matches[0],
@@ -226,7 +256,9 @@ def adopt_existing(repo, *, task, request, remote, branch, worktree, expected_he
                     'dependencies': dependencies, 'validation': validation, 'preflight': preflight,
                     'baseline_dirty': snapshot['dirty'], 'created_at': _now(),
                     'adoption': {'evidence': evidence, 'expected_head': expected_head,
-                                 'snapshot_digest': snapshot['digest']}}
+                                 'snapshot_digest': snapshot['digest'],
+                                 'protected_paths': sorted(name for name, value in snapshot['directories'].items()
+                                                           if isinstance(value, dict) and 'git_dir' in value)}}
             if hold_reason:
                 item['hold'] = {'reason': hold_reason, 'next_action': next_action, 'at': _now()}
             state['tasks'][task] = item
