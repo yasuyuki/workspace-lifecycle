@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.2.1` is not published to PyPI. It imports no agent-rules
+directory; version `0.3.0` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation, branch and HEAD identity, upstream/default discovery,
@@ -26,6 +26,37 @@ validation argv and preflight argv. The preflight must contain the literal
 `{repo}` placeholder. `status` reports the selected task and its live Git state;
 `hold` records a reason and next action. Parent and dependency tasks must
 already exist and are checked again before integration.
+
+Use `adopt-existing` instead of `begin` to continue an existing linked checkout.
+Supply `--task`, `--request`, `--remote`, `--branch`, absolute `--worktree`,
+the full commit OID as `--expected-head`, `--validation-json`,
+`--preflight-json` (including `{repo}`), and a durable `--evidence` reference
+explaining why this Git identity belongs to this continuing request. Optional
+`--parent` and repeated `--dependency` refer only to existing current tasks.
+An existing execution hold requires both `--hold-reason` and `--next-action`;
+being unaccepted alone does not require a hold. Preserve fixed source pins and
+outstanding product acceptance explicitly in the request and validation.
+
+Adoption does not run validation or create acceptance/integration receipts.
+Existing dirty, staged, untracked and ignored files remain baseline-owned,
+and `finish` cannot claim them as this task's commit, restore or archive work.
+Git administrative locks are preserved. Default/primary checkouts, conflicting
+bindings, active Git operations, protected indexes, and unsafe filesystem paths
+are refused. An interrupted adoption retains an exact contract and filesystem,
+index and dirty-content snapshot: retry the same arguments, with the same
+identity and content. Changes are refused without discarding the intent or
+silently establishing a new baseline. A binding written before interruption
+is not an accepted task; runtime use remains refused until adoption completes.
+Keep native Git writers and external filesystem users quiescent during adoption:
+the lifecycle lease serializes lifecycle clients, not arbitrary outside writers.
+
+An active `agent-branches/state.json` prevents adoption. Stop the old consumers
+in an explicit maintenance interval, preserve and verify state/hooks/config and
+rollback evidence, then detach the old authority before adopting continuing
+tasks in dependency order. No legacy schema is imported. Historical residue
+without continuing work does not belong in this API. After adoption, use the
+ordinary `status`, `run`, reviewed `finish`, integration and retirement contract;
+unmet acceptance or holds remain unmet, including for already-pushed branches.
 
 Finish from the bound task worktree with a durable result reference and a JSON
 plan. The plan may contain `commit`, `restore`, `archive`, and `exception`
@@ -92,8 +123,9 @@ The runtime owner can use the CLI without importing placement or inventory code.
 This repository is the current editing and distribution owner. Initial source
 was extracted from `yasuyuki/agent-rules` revision
 `f6f2b027700a14232c87cc36287387242fa1fddf`, `packages/workspace-lifecycle/`.
-Historical revisions remain in that repository. Version 0.2.1 retains the 0.2.0
-state schema and public CLI. Empty directories are identified by filesystem
+Historical revisions remain in that repository. Version 0.3.0 retains the 0.2.1
+state schema and existing public CLI, adding explicit existing-work adoption.
+Empty directories are identified by filesystem
 contents, never names. Nonempty unowned data, links, reparse points, mounts,
 submodules and special files still refuse retirement. A concurrent file creation
 or failed Git removal preserves the retirement request for an explicit retry.
