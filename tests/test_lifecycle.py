@@ -338,7 +338,7 @@ class EmptyDirectoryRetirementTests(unittest.TestCase):
     def test_mount_is_refused_before_descent(self):
         from unittest.mock import patch
         from workspace_lifecycle import service
-        path = self.f.topic / 'mount'; path.mkdir()
+        path = self.f.topic / 'mount'; path.mkdir(); path = path.resolve()
         original = service.os.path.ismount
         with patch.object(service.os.path, 'ismount', side_effect=lambda p: Path(p) == path or original(p)):
             with self.assertRaisesRegex(LifecycleError, 'mounted'): self.retire()
@@ -364,7 +364,7 @@ class EmptyDirectoryRetirementTests(unittest.TestCase):
 
     def test_file_appearing_at_rmdir_survives(self):
         from unittest.mock import patch
-        path = self.f.topic / 'race'; path.mkdir()
+        path = self.f.topic / 'race'; path.mkdir(); path = path.resolve()
         original = Path.rmdir
         def create_before_remove(target):
             if target == path: (target / 'new').write_bytes(b'racing payload')
