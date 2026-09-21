@@ -443,3 +443,15 @@ class EmptyDirectoryRetirementTests(unittest.TestCase):
         self.assertEqual([path for path, _ in candidates], [empty])
         service._remove_empty_directories(self.f.topic, candidates)
         self.assertEqual((parent / 'tracked').read_bytes(), b'owned')
+
+    def test_ignored_snapshot_directory_needs_filesystem_proof(self):
+        from unittest.mock import patch
+        from workspace_lifecycle import service
+        empty = self.f.topic / 'arbitrary'; empty.mkdir()
+        original = service._snapshot
+        def ignored_entry(repo):
+            result = original(repo)
+            if empty.exists(): result['arbitrary/'] = '!!'
+            return result
+        with patch.object(service, '_snapshot', side_effect=ignored_entry):
+            self.assertTrue(self.retire()['retired'])
