@@ -497,7 +497,7 @@ class RetainedRetirementTests(unittest.TestCase):
         self.assertEqual((Path(receipt['recovery_path']) / 'feature').read_text(), 'verified')
         self.assertTrue(Path(receipt['admin_archive_path']).is_dir())
         self.assertFalse(self.f.topic.exists())
-        self.assertNotIn(str(Path(receipt['recovery_path'])), run(self.f.root, 'worktree', 'list', '--porcelain'))
+        self.assertNotIn(Path(receipt['recovery_path']).as_posix(), run(self.f.root, 'worktree', 'list', '--porcelain'))
         self.assertEqual(retire(self.f.root, task='boundary', result_ref='issue/boundary')['receipt'], receipt)
         return receipt
 
@@ -599,7 +599,7 @@ class RetainedRetirementTests(unittest.TestCase):
         archive.rename(admin)
         recovery = Path(receipt['recovery_path'])
         self.assertEqual(run(recovery, 'rev-parse', 'HEAD'), receipt['commit'])
-        self.assertIn(str(recovery), run(self.f.root, 'worktree', 'list', '--porcelain'))
+        self.assertIn(recovery.as_posix(), run(self.f.root, 'worktree', 'list', '--porcelain'))
 
     def test_process_exit_at_each_boundary_resumes_same_request(self):
         script = '''
