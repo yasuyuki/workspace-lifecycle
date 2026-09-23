@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.3.3` is not published to PyPI. It imports no agent-rules
+directory; version `0.3.4` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
@@ -26,6 +26,15 @@ validation argv and preflight argv. The preflight must contain the literal
 `{repo}` placeholder. `status` reports the selected task and its live Git state;
 `hold` records a reason and next action. Parent and dependency tasks must
 already exist and are checked again before integration.
+
+`update-preflight` changes one existing current task's preflight argv without
+adopting it again. Supply `--task`, the exact saved argv as
+`--expected-preflight-json`, a nonempty `--preflight-json` containing literal
+`{repo}`, and a durable `--evidence` reference. The command rejects stale argv,
+active use leases and pending operations. It records the latest from/to argv and
+evidence while preserving acceptance, holds, dirty baseline, Git identity and
+all other task fields. Compare old and new policy decisions in the task checkout
+before a migration; this command does not run either preflight or push.
 
 Use `adopt-existing` instead of `begin` to continue an existing checkout, including a nondefault primary checkout or a
 linked checkout nested below it.
@@ -151,3 +160,6 @@ Version 0.3.3 retains the version 1 state schema and existing CLI. Retirement
 holds linked worktree payload and exact Git admin information in recovery,
 including bytes that appear after the initial dirty check. It resumes each
 durable phase without editing state and does not perform physical cleanup.
+
+Version 0.3.4 adds the exact argv compare-and-swap `update-preflight` command
+for current tasks. The version 1 state schema and recovery retirement remain.
