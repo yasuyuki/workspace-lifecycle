@@ -40,6 +40,11 @@ def parser():
     adopt.add_argument('--preflight-json', type=_json_list, required=True)
     adopt.add_argument('--hold-reason'); adopt.add_argument('--next-action')
     status = commands.add_parser("status"); status.add_argument("--task")
+    update = commands.add_parser('update-preflight', help='replace one current task preflight by exact argv CAS')
+    update.add_argument('--task', required=True)
+    update.add_argument('--expected-preflight-json', type=_json_list, required=True)
+    update.add_argument('--preflight-json', type=_json_list, required=True)
+    update.add_argument('--evidence', required=True)
     hold = commands.add_parser("hold"); hold.add_argument("--task", required=True); hold.add_argument("--reason", required=True); hold.add_argument("--next-action", required=True)
     resume = commands.add_parser('release-hold', help='resolve an explicit hold using a decision reference')
     resume.add_argument('--task', required=True); resume.add_argument('--evidence', required=True)
@@ -68,6 +73,10 @@ def main(argv=None):
                 validation=args.validation_json, preflight=args.preflight_json,
                 hold_reason=args.hold_reason, next_action=args.next_action)
         elif args.command == "status": result = service.status(args.repo, args.task)
+        elif args.command == 'update-preflight':
+            result = service.update_preflight(args.repo, task=args.task,
+                expected_preflight=args.expected_preflight_json,
+                preflight=args.preflight_json, evidence=args.evidence)
         elif args.command == "hold": result = service.hold(args.repo, args.task, args.reason, args.next_action)
         elif args.command == "release-hold": result = service.release_hold(args.repo, args.task, args.evidence)
         elif args.command == "finish": result = service.finish(args.repo, task=args.task, plan_path=args.plan, result_ref=args.result_ref, message=args.message, users_released=args.users_released, revision_evidence=args.revise_plan_evidence)

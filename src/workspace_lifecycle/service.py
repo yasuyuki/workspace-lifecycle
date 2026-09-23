@@ -168,6 +168,30 @@ def status(repo, task: str | None = None) -> dict:
         return data
 
 
+def update_preflight(repo, *, task: str, expected_preflight: list[str],
+                     preflight: list[str], evidence: str) -> dict:
+    """Change one current task's push policy command under an exact argv CAS."""
+    for name, argv in (("expected preflight", expected_preflight), ("preflight", preflight)):
+        if not isinstance(argv, list) or not argv or not all(isinstance(x, str) and x for x in argv):
+            raise LifecycleError(name + ' requires a nonempty string argv array')
+    if '{repo}' not in preflight:
+        raise LifecycleError('preflight must explicitly select {repo}')
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise LifecycleError('preflight update requires durable evidence')
+    with _lease(repo, task):
+        with locked_state(repo) as (directory, state):
+            item = _task(state, task)
+            if task in state.get('intents', {}) or item.get('retire'):
+                raise LifecycleError('pending task operation prevents preflight update')
+            if item.get('preflight') != expected_preflight:
+                raise LifecycleError('preflight CAS mismatch')
+            item['preflight'] = list(preflight)
+            item['preflight_update'] = {'from': list(expected_preflight), 'to': list(preflight),
+                                        'evidence': evidence, 'at': _now()}
+            save_state(directory, state)
+    return {'task': task, 'preflight': list(preflight)}
+
+
 def hold(repo, task: str, reason: str, next_action: str) -> dict:
     if not reason or not next_action: raise LifecycleError("hold requires reason and next action")
     with _lease(repo, task, allow_use=True):
