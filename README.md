@@ -2,11 +2,11 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.3.2` is not published to PyPI. It imports no agent-rules
+directory; version `0.3.3` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
-Git owns worktree creation, branch and HEAD identity, upstream/default discovery,
-normal merges, locks and removal. The package records only task identity,
+Git owns worktree creation and relocation, branch and HEAD identity,
+upstream/default discovery, normal merges and locks. The package records only task identity,
 request, parent/dependencies, validation and push preflight, acceptance,
 explicit holds, retirement requests and process-use leases. A legacy registry is
 rejected; there is no automatic migration. Installing the package does not adopt
@@ -89,10 +89,16 @@ changed commit identity. No state editing or discard is needed.
 
 Retirement requires the exact accepted result, completed integration, explicit
 external-user release, unchanged worktree identity and accepted HEAD, and an
-invocation outside the target worktree. It verifies the full filesystem, removes only empty unowned directories with
-empty-only operations, rechecks the target, and asks Git to remove the linked worktree, and preserves
-the branch and receipt. `retire --pending` retries only durable requests; it does
-not scan for cleanup. A lease is separate from Git's administrative lock.
+invocation outside the target worktree. It checks preexisting dirty data, then
+moves the linked worktree to a recovery path on the same filesystem with
+`git worktree move`. It archives only that worktree's Git admin directory under
+`workspace-lifecycle/recovery-admin` in the common Git directory. The payload,
+empty directories, branch, commit and admin directory remain available for
+recovery, while the target leaves the active Git worktree list. The retired
+receipt records both recovery paths and identities; no payload or admin bytes
+are deleted. `retire --pending` retries durable requests after interruption.
+Capacity recovery is a separate explicit operation and is not implemented here.
+A lease is separate from Git's administrative lock.
 
 `run` supervises one task checkout. Linux uses a native subreaper and Windows a
 native job to track descendants. A normal child exit does not prove that an
@@ -131,11 +137,17 @@ was extracted from `yasuyuki/agent-rules` revision
 Historical revisions remain in that repository. Version 0.3.1 retains the 0.2.1
 state schema and existing public CLI, extending existing-work adoption to
 nondefault primary and nested checkouts with separate repository ownership.
-Empty directories are identified by filesystem
-contents, never names. Nonempty unowned data, links, reparse points, mounts,
-submodules and special files still refuse retirement. A concurrent file creation
-or failed Git removal preserves the retirement request for an explicit retry.
+The pre-retirement filesystem scan distinguishes empty unowned directories from
+untracked or ignored files by contents. Nonempty unowned data, links, reparse
+points, mounts, submodules and special files refuse retirement before the move.
+Later bytes are retained in the original or recovery path. A failed move or admin
+archive leaves a durable retirement request for an explicit retry.
 
 Version 0.3.2 decodes Git text output explicitly as UTF-8, including runtime
 root discovery and completion pushes on Windows. It preserves the state schema,
 CLI, supervisor and inherited environment; no encoding wrapper is required.
+
+Version 0.3.3 retains the version 1 state schema and existing CLI. Retirement
+holds linked worktree payload and exact Git admin information in recovery,
+including bytes that appear after the initial dirty check. It resumes each
+durable phase without editing state and does not perform physical cleanup.

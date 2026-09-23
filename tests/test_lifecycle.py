@@ -1,9 +1,13 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from unittest.mock import patch
 
 from workspace_lifecycle.errors import LifecycleError
 from workspace_lifecycle.service import begin, finish, retire, retire_pending, status
@@ -46,6 +50,10 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(status(self.topic, "one")["completion"], "accepted")
         retired = retire(self.root, task="one", result_ref="issue/1", users_released=True)
         self.assertTrue(retired["retired"]); self.assertFalse(self.topic.exists())
+        receipt = retired['receipt']
+        self.assertEqual((Path(receipt['recovery_path']) / 'feature.txt').read_text(), 'done\n')
+        self.assertTrue(Path(receipt['admin_archive_path']).is_dir())
+        self.assertNotIn('topic/one', run(self.root, 'worktree', 'list', '--porcelain'))
 
     def test_finish_rejects_unknown_dirty(self):
         begin(self.root, task="two", request="issue/2", remote="origin", branch="topic/two", worktree=str(self.topic), validation=["git", "diff", "--check"], preflight=self.preflight)
@@ -195,27 +203,28 @@ class RecoveryBoundaryTests(unittest.TestCase):
             with registered_checkout(duplicate):
                 self.fail('duplicate identity admitted')
 
-    def test_absence_before_authorized_remove_is_not_success(self):
+    def test_absence_before_authorized_move_is_not_success(self):
         f = self.fixture
         retire(f.root, task='boundary', result_ref='issue/boundary', users_released=True, request_only=True)
         run(f.root, 'worktree', 'remove', str(f.topic))
-        with self.assertRaisesRegex(LifecycleError, 'disappeared before authorized'):
+        with self.assertRaises(LifecycleError):
             retire(f.root, task='boundary', result_ref='issue/boundary')
         self.assertIn('boundary', [item['task'] for item in status(f.root)['tasks']])
 
-    def test_absence_after_authorized_remove_recovers_receipt(self):
+    def test_move_before_state_save_recovers_receipt(self):
         from unittest.mock import patch
         from workspace_lifecycle import service
         f = self.fixture; original = service.git
         def interrupted(repo, *args, **kwargs):
             result = original(repo, *args, **kwargs)
-            if args[:2] == ('worktree', 'remove'):
-                raise OSError('crash after actual native removal')
+            if args[:2] == ('worktree', 'move'):
+                raise OSError('crash after actual native move')
             return result
         with patch.object(service, 'git', side_effect=interrupted):
             with self.assertRaises(LifecycleError):
                 retire(f.root, task='boundary', result_ref='issue/boundary', users_released=True)
         self.assertFalse(f.topic.exists())
+        self.assertEqual(status(f.root)['tasks'][0]['retire_pending'], True)
         self.assertTrue(retire(f.root, task='boundary', result_ref='issue/boundary')['retired'])
         self.assertEqual(status(f.root)['tasks'], [])
 
@@ -285,13 +294,16 @@ class EmptyDirectoryRetirementTests(unittest.TestCase):
     def test_arbitrary_ignored_empty_directory(self):
         (self.f.root / '.git/info/exclude').write_text('arbitrary/\n')
         (self.f.topic / 'arbitrary').mkdir()
-        self.assertTrue(self.retire()['retired'])
+        receipt = self.retire()['receipt']
+        self.assertTrue((Path(receipt['recovery_path']) / 'arbitrary').is_dir())
 
     def test_nested_empty_directories_and_build_examples(self):
         (self.f.root / '.git/info/exclude').write_text('*.egg-info/\ndist/\n')
         for name in ['random/deep/leaf', 'sample.egg-info', 'dist/empty']:
             (self.f.topic / name).mkdir(parents=True)
-        self.assertTrue(self.retire()['retired'])
+        receipt = self.retire()['receipt']
+        for name in ['random/deep/leaf', 'sample.egg-info', 'dist/empty']:
+            self.assertTrue((Path(receipt['recovery_path']) / name).is_dir())
 
     def payload_refusal(self, name, ignored=False):
         if ignored: (self.f.root / '.git/info/exclude').write_text('ignored/\n')
@@ -310,13 +322,17 @@ class EmptyDirectoryRetirementTests(unittest.TestCase):
     def test_hidden_payload_preserved(self):
         self.payload_refusal('hidden/.payload')
 
-    def test_complete_scan_precedes_any_cleanup(self):
+    def test_complete_scan_precedes_move(self):
         from unittest.mock import patch
         empty = self.f.topic / 'empty'; empty.mkdir()
         (self.f.topic / 'private').write_bytes(b'keep')
-        with patch.object(Path, 'rmdir') as remove:
+        from workspace_lifecycle import service
+        original = service.git
+        def no_move(repo, *args, **kwargs):
+            if args[:2] == ('worktree', 'move'): self.fail('dirty worktree moved')
+            return original(repo, *args, **kwargs)
+        with patch.object(service, 'git', side_effect=no_move):
             with self.assertRaises(LifecycleError): self.retire()
-            remove.assert_not_called()
         self.assertTrue(empty.is_dir())
 
     def test_symlink_is_retained(self):
@@ -362,67 +378,70 @@ class EmptyDirectoryRetirementTests(unittest.TestCase):
             with self.assertRaisesRegex(LifecycleError, 'submodule'): self.retire()
         self.assertTrue(self.f.topic.exists())
 
-    def test_file_appearing_at_rmdir_survives(self):
+    def test_file_appearing_before_move_survives_in_recovery(self):
         from unittest.mock import patch
         path = self.f.topic / 'race'; path.mkdir(); path = path.resolve()
-        original = Path.rmdir
-        def create_before_remove(target):
-            if target == path: (target / 'new').write_bytes(b'racing payload')
-            return original(target)
-        with patch.object(Path, 'rmdir', create_before_remove):
-            with self.assertRaises(LifecycleError): self.retire()
-        self.assertEqual((path / 'new').read_bytes(), b'racing payload')
-        self.assertTrue(status(self.f.root)['tasks'][0]['retire_pending'])
+        from workspace_lifecycle import service
+        original = service.git
+        def create_before_move(repo, *args, **kwargs):
+            if args[:2] == ('worktree', 'move'): (path / 'new').write_bytes(b'racing payload')
+            return original(repo, *args, **kwargs)
+        with patch.object(service, 'git', side_effect=create_before_move):
+            receipt = self.retire()['receipt']
+        self.assertEqual((Path(receipt['recovery_path']) / 'race/new').read_bytes(), b'racing payload')
 
-    def test_cleanup_then_native_remove_failure_can_resume(self):
+    def test_native_move_failure_can_resume_without_cleanup(self):
         from unittest.mock import patch
         from workspace_lifecycle import service
         path = self.f.topic / 'empty'; path.mkdir()
         original = service.git
-        def refuse_remove(repo, *args, **kwargs):
-            if args[:2] == ('worktree', 'remove'): raise LifecycleError('native remove failed')
+        def refuse_move(repo, *args, **kwargs):
+            if args[:2] == ('worktree', 'move'): raise LifecycleError('native move failed')
             return original(repo, *args, **kwargs)
-        with patch.object(service, 'git', side_effect=refuse_remove):
-            with self.assertRaisesRegex(LifecycleError, 'native remove failed'): self.retire()
-        self.assertFalse(path.exists())
+        with patch.object(service, 'git', side_effect=refuse_move):
+            with self.assertRaisesRegex(LifecycleError, 'native move failed'): self.retire()
+        self.assertTrue(path.exists())
         self.assertTrue(status(self.f.root)['tasks'][0]['retire_pending'])
-        self.assertTrue(retire_pending(self.f.root)['pending'][0]['retired'])
+        receipt = retire_pending(self.f.root)['pending'][0]['receipt']
+        self.assertTrue((Path(receipt['recovery_path']) / 'empty').is_dir())
 
-    def test_post_cleanup_new_content_refuses_native_removal(self):
+    def test_new_content_after_move_remains_in_recovery_and_old_path(self):
         from unittest.mock import patch
         from workspace_lifecycle import service
-        (self.f.topic / 'empty').mkdir()
-        original = service._remove_empty_directories
-        def changed(workspace, candidates):
-            original(workspace, candidates)
-            (workspace / 'late').mkdir()
-        with patch.object(service, '_remove_empty_directories', side_effect=changed):
-            with self.assertRaisesRegex(LifecycleError, 'changed after'): self.retire()
-        self.assertTrue((self.f.topic / 'late').is_dir())
+        original = service.git
+        def changed(repo, *args, **kwargs):
+            result = original(repo, *args, **kwargs)
+            if args[:2] == ('worktree', 'move'):
+                (Path(args[3]) / 'later').write_bytes(b'new in recovery')
+                self.f.topic.mkdir()
+                (self.f.topic / 'later').write_bytes(b'new at original')
+            return result
+        with patch.object(service, 'git', side_effect=changed):
+            receipt = self.retire()['receipt']
+        self.assertEqual((Path(receipt['recovery_path']) / 'later').read_bytes(), b'new in recovery')
+        self.assertEqual((self.f.topic / 'later').read_bytes(), b'new at original')
 
-    def test_replaced_directory_identity_is_refused(self):
+    def test_replaced_recovery_identity_is_refused(self):
         from unittest.mock import patch
         from workspace_lifecycle import service
-        path = self.f.topic / 'empty'; path.mkdir()
-        original = service._remove_empty_directories
-        def changed(workspace, candidates):
-            path.rename(workspace / 'moved')
-            path.mkdir()
-            original(workspace, candidates)
-        with patch.object(service, '_remove_empty_directories', side_effect=changed):
-            with self.assertRaisesRegex(LifecycleError, 'identity changed'): self.retire()
-        self.assertTrue(path.is_dir())
+        original = service.git
+        def changed(repo, *args, **kwargs):
+            result = original(repo, *args, **kwargs)
+            if args[:2] == ('worktree', 'move'):
+                moved = Path(args[3]); displaced = moved.with_name(moved.name + '-held')
+                moved.rename(displaced); moved.mkdir()
+            return result
+        with patch.object(service, 'git', side_effect=changed):
+            with self.assertRaisesRegex(LifecycleError, 'recovery payload identity changed'): self.retire()
+        self.assertTrue(status(self.f.root)['tasks'][0]['retire_pending'])
 
-    def test_tracked_ancestors_and_git_identity_untouched_by_cleanup(self):
-        from unittest.mock import patch
-        from workspace_lifecycle import service
+    def test_tracked_content_and_git_identity_preserved(self):
         path = self.f.topic / 'empty'; path.mkdir()
         before = (self.f.topic / '.git').read_bytes()
-        candidates = service._retirement_contents(self.f.topic)
-        self.assertEqual([entry[0] for entry in candidates], [path])
-        service._remove_empty_directories(self.f.topic, candidates)
-        self.assertEqual((self.f.topic / '.git').read_bytes(), before)
-        self.assertEqual((self.f.topic / 'feature').read_text(), 'verified')
+        receipt = self.retire()['receipt']; recovery = Path(receipt['recovery_path'])
+        self.assertEqual((recovery / '.git').read_bytes(), before)
+        self.assertEqual((recovery / 'feature').read_text(), 'verified')
+        self.assertTrue((recovery / 'empty').is_dir())
 
 
     def test_real_submodule_refused(self):
@@ -433,16 +452,15 @@ class EmptyDirectoryRetirementTests(unittest.TestCase):
             service._retirement_contents(self.f.topic)
         self.assertEqual((self.f.topic / 'sub/README').read_text(), 'base\n')
 
-    def test_tracked_nested_parent_not_a_cleanup_candidate(self):
+    def test_tracked_nested_parent_and_empty_child_preserved(self):
         from workspace_lifecycle import service
         parent = self.f.topic / 'owned'; parent.mkdir()
         (parent / 'tracked').write_bytes(b'owned')
         run(self.f.topic, 'add', 'owned/tracked'); run(self.f.topic, 'commit', '-m', 'fixture nested tracked')
         empty = parent / 'empty'; empty.mkdir()
-        candidates = service._retirement_contents(self.f.topic)
-        self.assertEqual([path for path, _ in candidates], [empty])
-        service._remove_empty_directories(self.f.topic, candidates)
+        service._retirement_contents(self.f.topic)
         self.assertEqual((parent / 'tracked').read_bytes(), b'owned')
+        self.assertTrue(empty.is_dir())
 
     def test_ignored_snapshot_directory_needs_filesystem_proof(self):
         from unittest.mock import patch
@@ -455,3 +473,226 @@ class EmptyDirectoryRetirementTests(unittest.TestCase):
             return result
         with patch.object(service, '_snapshot', side_effect=ignored_entry):
             self.assertTrue(self.retire()['retired'])
+
+
+class RetainedRetirementTests(unittest.TestCase):
+    def setUp(self):
+        self.boundary = RecoveryBoundaryTests('runTest')
+        self.boundary.setUp()
+        self.addCleanup(self.boundary.doCleanups)
+        self.f = self.boundary.fixture
+
+    def retire(self):
+        return retire(self.f.root, task='boundary', result_ref='issue/boundary', users_released=True)
+
+    def request(self):
+        from workspace_lifecycle.state import locked_state
+        with locked_state(self.f.root) as (_, state):
+            return dict(state['tasks']['boundary']['retire'])
+
+    def assert_recovered(self):
+        result = retire_pending(self.f.root)['pending'][0]
+        self.assertTrue(result['retired'], result)
+        receipt = result['receipt']
+        self.assertEqual((Path(receipt['recovery_path']) / 'feature').read_text(), 'verified')
+        self.assertTrue(Path(receipt['admin_archive_path']).is_dir())
+        self.assertFalse(self.f.topic.exists())
+        self.assertNotIn(str(Path(receipt['recovery_path'])), run(self.f.root, 'worktree', 'list', '--porcelain'))
+        self.assertEqual(retire(self.f.root, task='boundary', result_ref='issue/boundary')['receipt'], receipt)
+        return receipt
+
+    def test_requested_phase_resumes(self):
+        retire(self.f.root, task='boundary', result_ref='issue/boundary', users_released=True, request_only=True)
+        self.assertEqual(self.request()['phase'], 'requested')
+        self.assert_recovered()
+
+    def test_moving_phase_resumes_before_move(self):
+        from workspace_lifecycle import service
+        original_save = service.save_state
+        def interrupted(directory, state):
+            original_save(directory, state)
+            if state['tasks']['boundary'].get('retire', {}).get('phase') == 'moving':
+                raise OSError('crash before move')
+        with patch.object(service, 'save_state', side_effect=interrupted):
+            with self.assertRaises(LifecycleError): self.retire()
+        self.assertEqual(self.request()['phase'], 'moving')
+        self.assertTrue(self.f.topic.is_dir())
+        self.assert_recovered()
+
+    def test_recovery_held_and_archiving_phase_resume(self):
+        from workspace_lifecycle import service
+        original_save = service.save_state
+        for phase in ('recovery-held', 'archiving-admin'):
+            with self.subTest(phase=phase):
+                fixture = RecoveryBoundaryTests('runTest'); fixture.setUp()
+                try:
+                    f = fixture.fixture
+                    def interrupted(directory, state):
+                        original_save(directory, state)
+                        if state['tasks']['boundary'].get('retire', {}).get('phase') == phase:
+                            raise OSError('crash at ' + phase)
+                    with patch.object(service, 'save_state', side_effect=interrupted):
+                        with self.assertRaises(LifecycleError):
+                            retire(f.root, task='boundary', result_ref='issue/boundary', users_released=True)
+                    self.assertEqual(retire_pending(f.root)['pending'][0]['retired'], True)
+                finally:
+                    fixture.doCleanups()
+
+    def test_admin_rename_after_execution_and_final_receipt_retry(self):
+        from workspace_lifecycle import service
+        original_rename = Path.rename
+        def interrupted(source, target):
+            result = original_rename(source, target)
+            if Path(target).name == 'admin': raise OSError('crash after admin rename')
+            return result
+        with patch.object(Path, 'rename', interrupted):
+            with self.assertRaises(LifecycleError): self.retire()
+        receipt = self.assert_recovered()
+        self.assertEqual(run(self.f.root, 'rev-parse', 'refs/heads/topic/boundary'), receipt['commit'])
+
+    def test_final_receipt_save_interruption_retries_without_binding(self):
+        from workspace_lifecycle import service
+        original_save = service.save_state
+        def interrupted(directory, state):
+            if 'boundary' in state.get('retired', {}):
+                raise OSError('crash before final state save')
+            return original_save(directory, state)
+        with patch.object(service, 'save_state', side_effect=interrupted):
+            with self.assertRaises(LifecycleError): self.retire()
+        binding = subprocess.run(['git', '-C', str(self.f.root), 'config', '--get',
+                                  'branch.topic/boundary.workspaceTask'], capture_output=True)
+        self.assertEqual(binding.returncode, 1)
+        self.assert_recovered()
+
+    def test_bytes_added_after_admin_archive_survive(self):
+        retire(self.f.root, task='boundary', result_ref='issue/boundary', users_released=True, request_only=True)
+        recovery = Path(self.request()['recovery_path'])
+        original_rename = Path.rename
+        def add_after_archive(source, target):
+            result = original_rename(source, target)
+            if Path(target).name == 'admin':
+                (recovery / 'after-admin').write_bytes(b'held bytes')
+            return result
+        with patch.object(Path, 'rename', add_after_archive):
+            receipt = self.retire()['receipt']
+        self.assertEqual((Path(receipt['recovery_path']) / 'after-admin').read_bytes(), b'held bytes')
+
+    def test_recovery_destination_collision_refuses_without_overwrite(self):
+        retire(self.f.root, task='boundary', result_ref='issue/boundary', users_released=True, request_only=True)
+        recovery = Path(self.request()['recovery_path'])
+        recovery.write_bytes(b'foreign')
+        with self.assertRaises(LifecycleError): self.retire()
+        self.assertEqual(recovery.read_bytes(), b'foreign')
+        self.assertTrue(self.f.topic.is_dir())
+
+    def test_admin_archive_collision_refuses_without_overwrite(self):
+        retire(self.f.root, task='boundary', result_ref='issue/boundary', users_released=True, request_only=True)
+        archive = Path(self.request()['admin_archive_path'])
+        archive.write_bytes(b'foreign')
+        with self.assertRaises(LifecycleError): self.retire()
+        self.assertEqual(archive.read_bytes(), b'foreign')
+        self.assertTrue(Path(self.request()['admin_original_path']).is_dir())
+
+    def test_admin_archive_can_restore_exact_registration_in_fixture(self):
+        receipt = self.retire()['receipt']
+        archive = Path(receipt['admin_archive_path']); admin = Path(receipt['admin_original_path'])
+        archive.rename(admin)
+        recovery = Path(receipt['recovery_path'])
+        self.assertEqual(run(recovery, 'rev-parse', 'HEAD'), receipt['commit'])
+        self.assertIn(str(recovery), run(self.f.root, 'worktree', 'list', '--porcelain'))
+
+    def test_process_exit_at_each_boundary_resumes_same_request(self):
+        script = '''
+import os, sys
+from pathlib import Path
+from workspace_lifecycle import service
+point, repo = sys.argv[1:]
+save = service.save_state
+git = service.git
+rename = Path.rename
+def stop_after_save(directory, state):
+    save(directory, state)
+    request = state['tasks'].get('boundary', {}).get('retire', {})
+    if point == request.get('phase') or (point == 'retired' and 'boundary' in state.get('retired', {})):
+        os._exit(37)
+def stop_after_move(path, *args, **kwargs):
+    result = git(path, *args, **kwargs)
+    if point == 'after-move' and args[:2] == ('worktree', 'move'):
+        os._exit(37)
+    return result
+def stop_after_archive(source, target):
+    result = rename(source, target)
+    if point == 'after-archive' and Path(target).name == 'admin':
+        os._exit(37)
+    return result
+service.save_state = stop_after_save
+service.git = stop_after_move
+Path.rename = stop_after_archive
+service.retire(repo, task='boundary', result_ref='issue/boundary', users_released=True)
+'''
+        for point in ('requested', 'moving', 'after-move', 'recovery-held',
+                      'archiving-admin', 'after-archive', 'retired'):
+            with self.subTest(point=point):
+                fixture = RecoveryBoundaryTests('runTest'); fixture.setUp()
+                try:
+                    f = fixture.fixture
+                    exited = subprocess.run([sys.executable, '-c', script, point, str(f.root)],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    self.assertEqual(exited.returncode, 37, exited.stderr)
+                    if point == 'retired':
+                        self.assertEqual(retire(f.root, task='boundary', result_ref='issue/boundary')['receipt']['phase'], 'retired')
+                    else:
+                        result = retire_pending(f.root)['pending'][0]
+                        self.assertTrue(result['retired'], result)
+                        self.assertEqual((Path(result['receipt']['recovery_path']) / 'feature').read_text(), 'verified')
+                finally:
+                    fixture.doCleanups()
+
+    def test_other_worktree_and_read_only_git_overlap(self):
+        from workspace_lifecycle import service
+        other = Path(self.f.temp.name) / 'other'
+        run(self.f.root, 'worktree', 'add', '-b', 'topic/other', str(other))
+        other_admin = Path(run(other, 'rev-parse', '--path-format=absolute', '--git-dir'))
+        before = (run(other, 'rev-parse', 'HEAD'), (other / '.git').read_bytes(),
+                  (other_admin / 'index').read_bytes(), (other_admin / 'config.worktree').read_bytes()
+                  if (other_admin / 'config.worktree').exists() else b'')
+        observed = []; stop = threading.Event(); move_boundary = threading.Event(); admin_boundary = threading.Event()
+        def reader():
+            while not stop.is_set():
+                for location, arguments in ((self.f.root, ('worktree', 'list', '--porcelain')),
+                                            (self.f.topic, ('rev-parse', 'HEAD'))):
+                    process = subprocess.run(['git', '-C', str(location), *arguments],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
+                    observed.append((move_boundary.is_set(), admin_boundary.is_set(), process.returncode, process.stderr))
+        original = service.git
+        def slow_boundary(repo, *args, **kwargs):
+            if args[:2] == ('worktree', 'move'):
+                move_boundary.set(); time.sleep(0.1)
+            return original(repo, *args, **kwargs)
+        original_rename = Path.rename
+        def slow_archive(source, target):
+            if Path(target).name == 'admin':
+                admin_boundary.set(); time.sleep(0.1)
+            return original_rename(source, target)
+        worker = threading.Thread(target=reader); worker.start()
+        try:
+            time.sleep(0.05)
+            with patch.object(service, 'git', side_effect=slow_boundary), patch.object(Path, 'rename', slow_archive):
+                try: result = self.retire()
+                except LifecycleError: result = None
+            time.sleep(0.05)
+        finally:
+            stop.set(); worker.join(timeout=5)
+        receipt = result['receipt'] if result else retire_pending(self.f.root)['pending'][0]['receipt']
+        self.assertGreater(len(observed), 2)
+        self.assertTrue(any(during for during, _, _, _ in observed))
+        if admin_boundary.is_set():
+            self.assertTrue(any(during for _, during, _, _ in observed))
+        self.assertTrue(all(code == 0 or error for _, _, code, error in observed))
+        self.assertEqual((run(other, 'rev-parse', 'HEAD'), (other / '.git').read_bytes(),
+                          (other_admin / 'index').read_bytes(), (other_admin / 'config.worktree').read_bytes()
+                          if (other_admin / 'config.worktree').exists() else b''), before)
+        self.assertEqual(run(self.f.root, 'rev-parse', 'refs/heads/topic/boundary'), receipt['commit'])
+        failed = subprocess.run(['git', '-C', receipt['recovery_path'], 'rev-parse', 'HEAD'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertNotEqual(failed.returncode, 0)
