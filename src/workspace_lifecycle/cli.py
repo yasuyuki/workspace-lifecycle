@@ -51,6 +51,7 @@ def parser():
     finish = commands.add_parser("finish", description="Resolve owned dirty, validate, save, push and normally integrate one task.",
         epilog='Plan: commit/restore/archive arrays of path, owner, evidence, classification and sha256; source requires safe_to_commit=true. Restore requires regeneration.evidence; private archive requires store and approval_evidence. Exception requires reviewed_all_alternatives=true and commit/restore/archive/owner-resolution evidence, irreversible_harm, remaining_owner and next_action.'); finish.add_argument("--task", required=True); finish.add_argument("--plan", required=True); finish.add_argument("--result-ref", required=True); finish.add_argument("--message", default="workspace lifecycle completion"); finish.add_argument("--users-released", action="store_true"); finish.add_argument("--revise-plan-evidence", help="explicit review of a revised finish plan after all pending preservation actions complete")
     retire = commands.add_parser("retire"); retire.add_argument("--task"); retire.add_argument("--result-ref"); retire.add_argument("--pending", action="store_true"); retire.add_argument("--users-released", action="store_true"); retire.add_argument("--request", action="store_true")
+    reclaim = commands.add_parser("reclaim"); reclaim.add_argument("--task", required=True); reclaim.add_argument("--result-ref", required=True); reclaim.add_argument("--preservation-evidence", required=True)
     run = commands.add_parser("run"); run.add_argument("--task", required=True); run.add_argument("--cwd", default="."); run.add_argument("argv", nargs=argparse.REMAINDER)
     resolve = commands.add_parser("resolve-run", help="Run unmanaged work directly or supervise an already managed task.")
     resolve.add_argument("--cwd", required=True, help="effective workspace directory selected by the caller")
@@ -86,6 +87,8 @@ def main(argv=None):
                 result = service.retire_pending(args.repo)
             elif args.task and args.result_ref: result = service.retire(args.repo, task=args.task, result_ref=args.result_ref, users_released=args.users_released, request_only=args.request)
             else: raise LifecycleError("retire requires --task and --result-ref")
+        elif args.command == "reclaim":
+            result = service.reclaim(args.repo, task=args.task, result_ref=args.result_ref, preservation_evidence=args.preservation_evidence)
         elif args.command in {"run", "resolve-run"}:
             argv = args.argv[1:] if args.argv[:1] == ['--'] else args.argv
             if not argv:
@@ -98,6 +101,7 @@ def main(argv=None):
             if cwd != repo and repo not in cwd.parents:
                 raise LifecycleError('run cwd must be inside the selected task worktree')
             service.retire_pending(repo)
+            service.reclaim_pending(repo)
             code = run(repo, args.task, argv, cwd,
                        before_spawn=lambda: service.before_run(repo, args.task))
             # Native output and status pass through; management JSON belongs to
@@ -107,8 +111,9 @@ def main(argv=None):
             control = task_worktree(repo, remote_default(repo, remote))
             os.chdir(control)
             recovered = service.retire_pending(control)
-            if any(not entry.get('retired') for entry in recovered['pending']):
-                print(json.dumps(recovered), file=sys.stderr)
+            reclaimed = service.reclaim_pending(control)
+            if any(not entry.get('retired') for entry in recovered['pending']) or any(not entry.get('reclaimed') for entry in reclaimed['pending']):
+                print(json.dumps({'retire': recovered, 'reclaim': reclaimed}), file=sys.stderr)
                 if code == 0:
                     return 1
             return code if code >= 0 else 128 - code
@@ -183,6 +188,7 @@ def _resolve_run(effective, launch, argv):
                          sort_keys=True, separators=(',', ':'))
     from .leases import run
     service.retire_pending(repo)
+    service.reclaim_pending(repo)
     code = run(repo, task, argv, launch,
                before_spawn=lambda: service.before_run(repo, task),
                child_env={'WORKSPACE_LIFECYCLE_CONTEXT': context,
@@ -193,8 +199,9 @@ def _resolve_run(effective, launch, argv):
     control = task_worktree(repo, remote_default(repo, remote))
     os.chdir(control)
     recovered = service.retire_pending(control)
-    if any(not entry.get('retired') for entry in recovered['pending']):
-        print(json.dumps(recovered), file=sys.stderr)
+    reclaimed = service.reclaim_pending(control)
+    if any(not entry.get('retired') for entry in recovered['pending']) or any(not entry.get('reclaimed') for entry in reclaimed['pending']):
+        print(json.dumps({'retire': recovered, 'reclaim': reclaimed}), file=sys.stderr)
         return 1 if code == 0 else _native_code(code)
     return _native_code(code)
 

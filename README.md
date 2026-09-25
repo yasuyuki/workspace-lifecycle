@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.3.4` is not published to PyPI. It imports no agent-rules
+directory; version `0.3.5` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
@@ -106,7 +106,7 @@ empty directories, branch, commit and admin directory remain available for
 recovery, while the target leaves the active Git worktree list. The retired
 receipt records both recovery paths and identities; no payload or admin bytes
 are deleted. `retire --pending` retries durable requests after interruption.
-Capacity recovery is a separate explicit operation and is not implemented here.
+`reclaim` deletes that payload and its archived admin only when the caller supplies durable preservation evidence, the accepted commit is still on the remote default, and the payload and admin still match the manifests recorded at retirement. A content change, a link, a mount, a nested repository, or a receipt without those manifests keeps the bytes. Retirement alone does not reclaim. An interrupted reclaim resumes from the same receipt.
 A lease is separate from Git's administrative lock.
 
 `run` supervises one task checkout. Linux uses a native subreaper and Windows a
@@ -163,3 +163,7 @@ durable phase without editing state and does not perform physical cleanup.
 
 Version 0.3.4 adds the exact argv compare-and-swap `update-preflight` command
 for current tasks. The version 1 state schema and recovery retirement remain.
+
+Version 0.3.5 adds `reclaim`. It deletes a retired payload and its archived
+admin only when preservation evidence is supplied and both trees still match
+the manifests recorded at retirement. Retirement itself still does not delete.
