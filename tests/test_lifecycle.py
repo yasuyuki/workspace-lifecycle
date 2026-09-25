@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from workspace_lifecycle.errors import LifecycleError
-from workspace_lifecycle.service import begin, finish, retire, retire_pending, status
+from workspace_lifecycle.service import begin, finish, reclaim, retire, retire_pending, status
 
 
 def run(cwd, *args):
@@ -696,3 +696,85 @@ service.retire(repo, task='boundary', result_ref='issue/boundary', users_release
         failed = subprocess.run(['git', '-C', receipt['recovery_path'], 'rev-parse', 'HEAD'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertNotEqual(failed.returncode, 0)
+
+
+class ReclaimTest(unittest.TestCase):
+    def setUp(self):
+        self.host = LifecycleTest()
+        self.host.setUp()
+        self.root = self.host.root
+        self.topic = self.host.topic
+        self.temp = self.host.temp
+        self.preflight = self.host.preflight
+
+    def tearDown(self):
+        self.host.tearDown()
+
+    def source_plan(self, workspace, name):
+        self.host.task = self.task
+        return self.host.source_plan(workspace, name)
+
+    def test_reclaim_removes_matching_payload_and_keeps_commit(self):
+        begin(self.root, task="one", request="issue/1", remote="origin", branch="topic/one", worktree=str(self.topic), validation=["git", "diff", "--check"], preflight=self.preflight)
+        (self.topic / "feature.txt").write_text("done\n")
+        plan = Path(self.temp.name) / "plan-one.json"
+        self.task = "one"; plan.write_text(json.dumps(self.source_plan(self.topic, "feature.txt")))
+        finish(self.topic, task="one", plan_path=str(plan), result_ref="issue/1")
+        retired = retire(self.root, task="one", result_ref="issue/1", users_released=True)
+        receipt = retired['receipt']
+        commit = receipt['commit']
+        result = reclaim(self.root, task="one", result_ref="issue/1", preservation_evidence="issue/1 preservation complete")
+        self.assertTrue(result['reclaimed'])
+        self.assertFalse(result['receipt']['recovery_held'])
+        self.assertFalse(Path(receipt['recovery_path']).exists())
+        self.assertFalse(Path(receipt['admin_archive_path']).exists())
+        self.assertEqual(run(self.root, 'rev-parse', 'refs/heads/topic/one'), commit)
+        again = reclaim(self.root, task="one", result_ref="issue/1", preservation_evidence="issue/1 preservation complete")
+        self.assertTrue(again['reclaimed'])
+
+    def test_reclaim_holds_bytes_added_after_retirement(self):
+        begin(self.root, task="one", request="issue/1", remote="origin", branch="topic/one", worktree=str(self.topic), validation=["git", "diff", "--check"], preflight=self.preflight)
+        (self.topic / "feature.txt").write_text("done\n")
+        plan = Path(self.temp.name) / "plan-one.json"
+        self.task = "one"; plan.write_text(json.dumps(self.source_plan(self.topic, "feature.txt")))
+        finish(self.topic, task="one", plan_path=str(plan), result_ref="issue/1")
+        receipt = retire(self.root, task="one", result_ref="issue/1", users_released=True)['receipt']
+        (Path(receipt['recovery_path']) / 'later').write_text('extra\n')
+        with self.assertRaises(LifecycleError):
+            reclaim(self.root, task="one", result_ref="issue/1", preservation_evidence="issue/1 preservation complete")
+        self.assertTrue((Path(receipt['recovery_path']) / 'later').exists())
+
+    def test_reclaim_resumes_after_authorized_save_before_rename(self):
+        begin(self.root, task="one", request="issue/1", remote="origin", branch="topic/one", worktree=str(self.topic), validation=["git", "diff", "--check"], preflight=self.preflight)
+        (self.topic / "feature.txt").write_text("done\n")
+        plan = Path(self.temp.name) / "plan-one.json"
+        self.task = "one"; plan.write_text(json.dumps(self.source_plan(self.topic, "feature.txt")))
+        finish(self.topic, task="one", plan_path=str(plan), result_ref="issue/1")
+        receipt = retire(self.root, task="one", result_ref="issue/1", users_released=True)['receipt']
+        state_path = Path(run(self.root, 'rev-parse', '--path-format=absolute', '--git-common-dir')) / 'workspace-lifecycle' / 'state.json'
+        state = json.loads(state_path.read_text())
+        recovery = Path(receipt['recovery_path'])
+        state['retired']['one']['preservation_evidence'] = 'issue/1 preservation complete'
+        state['retired']['one']['reclaim_phase'] = 'authorized'
+        state['retired']['one']['reclaim_staging'] = str(recovery.parent / (recovery.name + '.reclaim'))
+        state_path.write_text(json.dumps(state))
+        result = reclaim(self.root, task="one", result_ref="issue/1", preservation_evidence="issue/1 preservation complete")
+        self.assertTrue(result['reclaimed'])
+        self.assertFalse(recovery.exists())
+        self.assertFalse(Path(receipt['admin_archive_path']).exists())
+        self.assertEqual(run(self.root, 'rev-parse', 'refs/heads/topic/one'), receipt['commit'])
+
+    def test_reclaim_refuses_without_manifest(self):
+        begin(self.root, task="one", request="issue/1", remote="origin", branch="topic/one", worktree=str(self.topic), validation=["git", "diff", "--check"], preflight=self.preflight)
+        (self.topic / "feature.txt").write_text("done\n")
+        plan = Path(self.temp.name) / "plan-one.json"
+        self.task = "one"; plan.write_text(json.dumps(self.source_plan(self.topic, "feature.txt")))
+        finish(self.topic, task="one", plan_path=str(plan), result_ref="issue/1")
+        retire(self.root, task="one", result_ref="issue/1", users_released=True)
+        state_path = Path(run(self.root, 'rev-parse', '--path-format=absolute', '--git-common-dir')) / 'workspace-lifecycle' / 'state.json'
+        state = json.loads(state_path.read_text())
+        del state['retired']['one']['content_manifest']
+        state_path.write_text(json.dumps(state))
+        with self.assertRaises(LifecycleError):
+            reclaim(self.root, task="one", result_ref="issue/1", preservation_evidence="issue/1 preservation complete")
+        self.assertTrue(Path(state['retired']['one']['recovery_path']).exists())
