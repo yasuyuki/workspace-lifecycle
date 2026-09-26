@@ -49,8 +49,8 @@ def parser():
     resume = commands.add_parser('release-hold', help='resolve an explicit hold using a decision reference')
     resume.add_argument('--task', required=True); resume.add_argument('--evidence', required=True)
     finish = commands.add_parser("finish", description="Resolve owned dirty, validate, save, push and normally integrate one task.",
-        epilog='Plan: commit/restore/archive arrays of path, owner, evidence, classification and sha256; source requires safe_to_commit=true. Restore requires regeneration.evidence; private archive requires store and approval_evidence. Exception requires reviewed_all_alternatives=true and commit/restore/archive/owner-resolution evidence, irreversible_harm, remaining_owner and next_action.'); finish.add_argument("--task", required=True); finish.add_argument("--plan", required=True); finish.add_argument("--result-ref", required=True); finish.add_argument("--message", default="workspace lifecycle completion"); finish.add_argument("--users-released", action="store_true"); finish.add_argument("--revise-plan-evidence", help="explicit review of a revised finish plan after all pending preservation actions complete")
-    retire = commands.add_parser("retire"); retire.add_argument("--task"); retire.add_argument("--result-ref"); retire.add_argument("--pending", action="store_true"); retire.add_argument("--users-released", action="store_true"); retire.add_argument("--request", action="store_true")
+        epilog='Plan: commit/restore/archive arrays of path, owner, evidence, classification and sha256; source requires safe_to_commit=true. Restore requires regeneration.evidence; private archive requires store and approval_evidence. Exception requires reviewed_all_alternatives=true and commit/restore/archive/owner-resolution evidence, irreversible_harm, remaining_owner and next_action.'); finish.add_argument("--task", required=True); finish.add_argument("--plan", required=True); finish.add_argument("--result-ref", required=True); finish.add_argument("--message", default="workspace lifecycle completion"); finish.add_argument("--users-released", action="store_true"); finish.add_argument("--revise-plan-evidence", help="explicit review of a revised finish plan after all pending preservation actions complete"); finish.add_argument("--reclaim-preservation-evidence", help="durable preservation evidence used to start reclaim after retirement")
+    retire = commands.add_parser("retire"); retire.add_argument("--task"); retire.add_argument("--result-ref"); retire.add_argument("--pending", action="store_true"); retire.add_argument("--users-released", action="store_true"); retire.add_argument("--request", action="store_true"); retire.add_argument("--reclaim-preservation-evidence", help="durable preservation evidence used to start reclaim after retirement")
     reclaim = commands.add_parser("reclaim"); reclaim.add_argument("--task", required=True); reclaim.add_argument("--result-ref", required=True); reclaim.add_argument("--preservation-evidence", required=True)
     run = commands.add_parser("run"); run.add_argument("--task", required=True); run.add_argument("--cwd", default="."); run.add_argument("argv", nargs=argparse.REMAINDER)
     resolve = commands.add_parser("resolve-run", help="Run unmanaged work directly or supervise an already managed task.")
@@ -80,12 +80,13 @@ def main(argv=None):
                 preflight=args.preflight_json, evidence=args.evidence)
         elif args.command == "hold": result = service.hold(args.repo, args.task, args.reason, args.next_action)
         elif args.command == "release-hold": result = service.release_hold(args.repo, args.task, args.evidence)
-        elif args.command == "finish": result = service.finish(args.repo, task=args.task, plan_path=args.plan, result_ref=args.result_ref, message=args.message, users_released=args.users_released, revision_evidence=args.revise_plan_evidence)
+        elif args.command == "finish": result = service.finish(args.repo, task=args.task, plan_path=args.plan, result_ref=args.result_ref, message=args.message, users_released=args.users_released, revision_evidence=args.revise_plan_evidence, preservation_evidence=args.reclaim_preservation_evidence)
         elif args.command == "retire":
             if args.pending:
                 if args.task or args.result_ref: raise LifecycleError("retire --pending takes no task or result reference")
+                if args.reclaim_preservation_evidence: raise LifecycleError("retire --pending rejects --reclaim-preservation-evidence")
                 result = service.retire_pending(args.repo)
-            elif args.task and args.result_ref: result = service.retire(args.repo, task=args.task, result_ref=args.result_ref, users_released=args.users_released, request_only=args.request)
+            elif args.task and args.result_ref: result = service.retire(args.repo, task=args.task, result_ref=args.result_ref, users_released=args.users_released, request_only=args.request, preservation_evidence=args.reclaim_preservation_evidence)
             else: raise LifecycleError("retire requires --task and --result-ref")
         elif args.command == "reclaim":
             result = service.reclaim(args.repo, task=args.task, result_ref=args.result_ref, preservation_evidence=args.preservation_evidence)
@@ -125,7 +126,23 @@ def main(argv=None):
             release(args.repo, args.task, args.token, args.evidence); result = {"task": args.task, "released": True}
     except (LifecycleError, ValueError, OSError, subprocess.CalledProcessError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr); return 2
+    if _reclaim_refused(result):
+        print(json.dumps({"ok": False, **result}, sort_keys=True)); return 1
     print(json.dumps({"ok": True, **result}, sort_keys=True)); return 0
+
+
+def _reclaim_refused(result):
+    if not isinstance(result, dict):
+        return False
+    reclaim = result.get('reclaim')
+    if isinstance(reclaim, dict) and reclaim.get('error'):
+        return True
+    retirement = result.get('retirement')
+    if isinstance(retirement, dict):
+        nested = retirement.get('reclaim')
+        if isinstance(nested, dict) and nested.get('error'):
+            return True
+    return False
 
 
 def _native_code(code):

@@ -423,8 +423,34 @@ def _resolve_files(repo, plan, intent, directory, state):
 
 
 
-def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = 'workspace lifecycle completion', users_released: bool = False, revision_evidence: str | None = None) -> dict:
+
+def _durable_preservation_evidence(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not value or '\n' in value or '\0' in value:
+        raise LifecycleError('reclaim requires durable preservation evidence')
+    return value
+
+
+def _bind_preservation_evidence(stored, incoming: str | None):
+    incoming = _durable_preservation_evidence(incoming)
+    if incoming is None:
+        return stored
+    if stored and stored != incoming:
+        raise LifecycleError('preservation evidence changed')
+    return incoming
+
+
+def _clear_requested_reclaim_phase(receipt, directory, state):
+    if receipt.get('reclaim_phase') != 'requested':
+        return
+    receipt.pop('reclaim_phase', None)
+    save_state(directory, state)
+
+
+def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = 'workspace lifecycle completion', users_released: bool = False, revision_evidence: str | None = None, preservation_evidence: str | None = None) -> dict:
     repo = Path(repo).resolve(); plan = _plan(Path(plan_path)); task_id = task
+    reclaim_evidence = _durable_preservation_evidence(preservation_evidence)
     if not isinstance(result_ref, str) or not result_ref.strip():
         raise LifecycleError('durable result reference is required')
     if result_ref.startswith(str(repo)):
@@ -446,6 +472,10 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 if not accepted or accepted['commit'] != head(repo):
                     raise LifecycleError('pending operation does not match accepted source')
                 commit = accepted['commit']
+                if reclaim_evidence is not None:
+                    task['preservation_evidence'] = _bind_preservation_evidence(
+                        task.get('preservation_evidence'), reclaim_evidence)
+                    save_state(directory, state)
             else:
                 if intent and (intent['plan_digest'] != plan_digest or intent['result_ref'] != result_ref):
                     if not revision_evidence or intent['result_ref'] != result_ref:
@@ -520,6 +550,9 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 task['acceptance'] = {'commit': commit, 'result_ref': result_ref,
                                       'validation': {'precommit': precommit, 'postcommit': evidence},
                                       'push': pushed, 'accepted_at': _now()}
+                if reclaim_evidence is not None:
+                    task['preservation_evidence'] = _bind_preservation_evidence(
+                        task.get('preservation_evidence'), reclaim_evidence)
                 state['intents'].pop(task_id, None); save_state(directory, state)
     integration = _integrate(repo, task_id, result_ref)
     result = {'task': task_id, 'accepted': True, 'commit': commit, 'result_ref': result_ref, 'integration': integration}
@@ -726,152 +759,185 @@ def _retirement_record(records, path):
     return [row for row in records if Path(row['worktree']) == path]
 
 
-def retire(repo, *, task: str, result_ref: str, users_released: bool = False, request_only: bool = False) -> dict:
+def retire(repo, *, task: str, result_ref: str, users_released: bool = False, request_only: bool = False, preservation_evidence: str | None = None) -> dict:
     """End one active worktree while retaining its payload and Git admin entry."""
     repo = Path(repo).resolve()
+    incoming = _durable_preservation_evidence(preservation_evidence)
     with _lease(repo, task, allow_use=request_only):
         with locked_state(repo) as (directory, state):
             if task in state.get('retired', {}):
-                return {'task': task, 'retired': True, 'receipt': state['retired'][task]}
-            item = _task(state, task); request = item.get('retire')
-            acceptance = item.get('acceptance')
-            if item.get('hold') or not acceptance or acceptance.get('result_ref') != result_ref:
-                raise LifecycleError('retire requires exact accepted result and no hold')
-            if not request and not users_released:
-                raise LifecycleError('retire requires explicit external-user release')
-            for other_id, other in state['tasks'].items():
-                if other_id != task and (task in other['dependencies'] or other['integration'].get('task') == task):
-                    raise LifecycleError('another task still depends on this identity: ' + other_id)
-            expected = acceptance['commit']
-            integrated = item.get('integrated')
-            if not integrated or integrated['source'] != expected:
-                raise LifecycleError('retire requires exact accepted integration')
-            if not request:
-                default = remote_default(repo, item['remote'])
-                git(repo, 'fetch', item['remote'], 'refs/heads/' + default)
-                if git(repo, 'merge-base', '--is-ancestor', expected, 'FETCH_HEAD', optional=True) is None:
-                    raise LifecycleError('accepted source has not reached the actual remote default')
-            branch = request['branch'] if request else branch_for_task(repo, task)
-            if head(repo, 'refs/heads/' + branch) != expected:
-                raise LifecycleError('retire expected accepted HEAD; branch changed')
-            workspace = Path(request['path']) if request else task_worktree(repo, branch)
-            if workspace == Path(worktree_records(repo)[0]['worktree']).resolve():
-                raise LifecycleError('primary checkout cannot retire')
-            if not request_only and (repo == workspace or workspace in repo.parents or Path.cwd() == workspace or workspace in Path.cwd().parents):
-                raise LifecycleError('retire must run outside its target worktree')
-            for dependency in (Path(__file__).resolve(), Path(os.sys.executable).resolve()):
-                if workspace == dependency or workspace in dependency.parents:
-                    raise LifecycleError('retire target supplies this lifecycle runtime')
-            if not request:
-                identity = _retirement_identity(workspace)
-                common = directory.parent
-                admin = _retirement_admin(workspace, common)
-                admin_identity = _retirement_identity(admin)
-                _retirement_pointer(workspace, admin, admin)
-                token = uuid.uuid4().hex
-                recovery_root = workspace.parent / '.workspace-lifecycle-recovery'
-                if os.path.lexists(recovery_root):
-                    _no_links(recovery_root)
-                    if _retirement_identity(recovery_root)[0] != identity[0]:
-                        raise LifecycleError('recovery payload root is on another filesystem')
+                result = {'task': task, 'retired': True, 'receipt': state['retired'][task]}
+            else:
+                item = _task(state, task); request = item.get('retire')
+                acceptance = item.get('acceptance')
+                if item.get('hold') or not acceptance or acceptance.get('result_ref') != result_ref:
+                    raise LifecycleError('retire requires exact accepted result and no hold')
+                if not request and not users_released:
+                    raise LifecycleError('retire requires explicit external-user release')
+                for other_id, other in state['tasks'].items():
+                    if other_id != task and (task in other['dependencies'] or other['integration'].get('task') == task):
+                        raise LifecycleError('another task still depends on this identity: ' + other_id)
+                expected = acceptance['commit']
+                integrated = item.get('integrated')
+                if not integrated or integrated['source'] != expected:
+                    raise LifecycleError('retire requires exact accepted integration')
+                if not request:
+                    default = remote_default(repo, item['remote'])
+                    git(repo, 'fetch', item['remote'], 'refs/heads/' + default)
+                    if git(repo, 'merge-base', '--is-ancestor', expected, 'FETCH_HEAD', optional=True) is None:
+                        raise LifecycleError('accepted source has not reached the actual remote default')
+                branch = request['branch'] if request else branch_for_task(repo, task)
+                if head(repo, 'refs/heads/' + branch) != expected:
+                    raise LifecycleError('retire expected accepted HEAD; branch changed')
+                workspace = Path(request['path']) if request else task_worktree(repo, branch)
+                if workspace == Path(worktree_records(repo)[0]['worktree']).resolve():
+                    raise LifecycleError('primary checkout cannot retire')
+                if not request_only and (repo == workspace or workspace in repo.parents or Path.cwd() == workspace or workspace in Path.cwd().parents):
+                    raise LifecycleError('retire must run outside its target worktree')
+                for dependency in (Path(__file__).resolve(), Path(os.sys.executable).resolve()):
+                    if workspace == dependency or workspace in dependency.parents:
+                        raise LifecycleError('retire target supplies this lifecycle runtime')
+                if not request:
+                    identity = _retirement_identity(workspace)
+                    common = directory.parent
+                    admin = _retirement_admin(workspace, common)
+                    admin_identity = _retirement_identity(admin)
+                    _retirement_pointer(workspace, admin, admin)
+                    token = uuid.uuid4().hex
+                    recovery_root = workspace.parent / '.workspace-lifecycle-recovery'
+                    if os.path.lexists(recovery_root):
+                        _no_links(recovery_root)
+                        if _retirement_identity(recovery_root)[0] != identity[0]:
+                            raise LifecycleError('recovery payload root is on another filesystem')
+                    else:
+                        recovery_root.mkdir()
+                    recovery = recovery_root / token
+                    if os.path.lexists(recovery):
+                        raise LifecycleError('recovery payload destination already exists')
+                    admin_root = directory / 'recovery-admin'
+                    if os.path.lexists(admin_root):
+                        _no_links(admin_root)
+                    else:
+                        admin_root.mkdir()
+                    admin_slot = admin_root / token
+                    admin_slot.mkdir()
+                    if _retirement_identity(admin_slot)[0] != admin_identity[0]:
+                        raise LifecycleError('recovery admin is on another filesystem')
+                    bound = _bind_preservation_evidence(item.get('preservation_evidence'), incoming)
+                    request = {'branch': branch, 'path': str(workspace), 'identity': identity,
+                               'recovery_path': str(recovery), 'recovery_identity': identity,
+                               'recovery_root': str(recovery_root), 'recovery_root_identity': _retirement_identity(recovery_root),
+                               'admin_original_path': str(admin), 'admin_identity': admin_identity,
+                               'admin_archive_path': str(admin_slot / 'admin'), 'admin_slot_identity': _retirement_identity(admin_slot),
+                               'expected_head': expected, 'result_ref': result_ref,
+                               'users_released': True, 'phase': 'requested', 'at': _now()}
+                    if bound:
+                        request['preservation_evidence'] = bound
+                    item.pop('preservation_evidence', None)
+                    item['retire'] = request; save_state(directory, state)
                 else:
-                    recovery_root.mkdir()
-                recovery = recovery_root / token
+                    bound = _bind_preservation_evidence(request.get('preservation_evidence') or item.get('preservation_evidence'), incoming)
+                    if bound and request.get('preservation_evidence') != bound:
+                        request['preservation_evidence'] = bound
+                        item.pop('preservation_evidence', None)
+                        save_state(directory, state)
+                    elif bound and 'preservation_evidence' in item:
+                        item.pop('preservation_evidence', None)
+                        save_state(directory, state)
+                if request_only:
+                    return {'task': task, 'pending': True}
+                recovery = Path(request['recovery_path'])
+                admin = Path(request['admin_original_path'])
+                archive = Path(request['admin_archive_path'])
+                if (request['expected_head'] != expected or request['result_ref'] != result_ref
+                        or not request['users_released']):
+                    raise LifecycleError('retirement request identity changed')
+                if _retirement_identity(Path(request['recovery_root'])) != request['recovery_root_identity']:
+                    raise LifecycleError('recovery payload root identity changed')
+                if _retirement_identity(archive.parent) != request['admin_slot_identity']:
+                    raise LifecycleError('recovery admin slot identity changed')
                 if os.path.lexists(recovery):
-                    raise LifecycleError('recovery payload destination already exists')
-                admin_root = directory / 'recovery-admin'
-                if os.path.lexists(admin_root):
-                    _no_links(admin_root)
+                    if _retirement_identity(recovery) != request['recovery_identity']:
+                        raise LifecycleError('recovery payload identity changed')
+                    if os.path.lexists(admin) and os.path.lexists(archive):
+                        raise LifecycleError('both active and archived admin entries exist')
                 else:
-                    admin_root.mkdir()
-                admin_slot = admin_root / token
-                admin_slot.mkdir()
-                if _retirement_identity(admin_slot)[0] != admin_identity[0]:
-                    raise LifecycleError('recovery admin is on another filesystem')
-                request = {'branch': branch, 'path': str(workspace), 'identity': identity,
-                           'recovery_path': str(recovery), 'recovery_identity': identity,
-                           'recovery_root': str(recovery_root), 'recovery_root_identity': _retirement_identity(recovery_root),
-                           'admin_original_path': str(admin), 'admin_identity': admin_identity,
-                           'admin_archive_path': str(admin_slot / 'admin'), 'admin_slot_identity': _retirement_identity(admin_slot),
-                           'expected_head': expected, 'result_ref': result_ref,
-                           'users_released': True, 'phase': 'requested', 'at': _now()}
-                item['retire'] = request; save_state(directory, state)
-            if request_only:
-                return {'task': task, 'pending': True}
-            recovery = Path(request['recovery_path'])
-            admin = Path(request['admin_original_path'])
-            archive = Path(request['admin_archive_path'])
-            if (request['expected_head'] != expected or request['result_ref'] != result_ref
-                    or not request['users_released']):
-                raise LifecycleError('retirement request identity changed')
-            if _retirement_identity(Path(request['recovery_root'])) != request['recovery_root_identity']:
-                raise LifecycleError('recovery payload root identity changed')
-            if _retirement_identity(archive.parent) != request['admin_slot_identity']:
-                raise LifecycleError('recovery admin slot identity changed')
-            if os.path.lexists(recovery):
+                    if request['phase'] not in ('requested', 'moving') or os.path.lexists(archive):
+                        raise LifecycleError('recovery payload disappeared before retirement completed')
+                    if _retirement_identity(workspace) != request['identity']:
+                        raise LifecycleError('retirement filesystem identity changed')
+                    records = worktree_records(repo)
+                    found = _retirement_record(records, workspace)
+                    if len(found) != 1 or found[0].get('branch') != 'refs/heads/' + branch or head(workspace) != expected:
+                        raise LifecycleError('retirement Git identity changed')
+                    if _retirement_admin(workspace, directory.parent) != admin or _retirement_identity(admin) != request['admin_identity']:
+                        raise LifecycleError('retirement admin identity changed')
+                    _retirement_pointer(workspace, admin, admin)
+                    if request['phase'] == 'requested':
+                        _retirement_contents(workspace)
+                        request['phase'] = 'moving'; save_state(directory, state)
+                    git(repo, 'worktree', 'move', str(workspace), str(recovery))
                 if _retirement_identity(recovery) != request['recovery_identity']:
                     raise LifecycleError('recovery payload identity changed')
-                if os.path.lexists(admin) and os.path.lexists(archive):
-                    raise LifecycleError('both active and archived admin entries exist')
-            else:
-                if request['phase'] not in ('requested', 'moving') or os.path.lexists(archive):
-                    raise LifecycleError('recovery payload disappeared before retirement completed')
-                if _retirement_identity(workspace) != request['identity']:
-                    raise LifecycleError('retirement filesystem identity changed')
+                if os.path.lexists(admin):
+                    if _retirement_identity(admin) != request['admin_identity']:
+                        raise LifecycleError('retirement admin identity changed')
+                    found = _retirement_record(worktree_records(repo), recovery)
+                    if len(found) != 1 or found[0].get('branch') != 'refs/heads/' + branch or head(recovery) != expected:
+                        raise LifecycleError('recovery Git identity changed')
+                    _retirement_pointer(recovery, admin, admin)
+                    if request['phase'] != 'recovery-held':
+                        request['phase'] = 'recovery-held'; save_state(directory, state)
+                    if os.path.lexists(archive):
+                        raise LifecycleError('admin archive destination already exists')
+                    request['phase'] = 'archiving-admin'; save_state(directory, state)
+                    admin.rename(archive)
+                elif not os.path.lexists(archive):
+                    raise LifecycleError('retirement admin entry disappeared without archive')
+                if _retirement_identity(recovery) != request['recovery_identity'] or _retirement_identity(archive) != request['admin_identity']:
+                    raise LifecycleError('retirement archive identity changed')
+                _retirement_pointer(recovery, admin, archive)
                 records = worktree_records(repo)
-                found = _retirement_record(records, workspace)
-                if len(found) != 1 or found[0].get('branch') != 'refs/heads/' + branch or head(workspace) != expected:
-                    raise LifecycleError('retirement Git identity changed')
-                if _retirement_admin(workspace, directory.parent) != admin or _retirement_identity(admin) != request['admin_identity']:
-                    raise LifecycleError('retirement admin identity changed')
-                _retirement_pointer(workspace, admin, admin)
-                if request['phase'] == 'requested':
-                    _retirement_contents(workspace)
-                    request['phase'] = 'moving'; save_state(directory, state)
-                git(repo, 'worktree', 'move', str(workspace), str(recovery))
-            if _retirement_identity(recovery) != request['recovery_identity']:
-                raise LifecycleError('recovery payload identity changed')
-            if os.path.lexists(admin):
-                if _retirement_identity(admin) != request['admin_identity']:
-                    raise LifecycleError('retirement admin identity changed')
-                found = _retirement_record(worktree_records(repo), recovery)
-                if len(found) != 1 or found[0].get('branch') != 'refs/heads/' + branch or head(recovery) != expected:
-                    raise LifecycleError('recovery Git identity changed')
-                _retirement_pointer(recovery, admin, admin)
-                if request['phase'] != 'recovery-held':
-                    request['phase'] = 'recovery-held'; save_state(directory, state)
-                if os.path.lexists(archive):
-                    raise LifecycleError('admin archive destination already exists')
-                request['phase'] = 'archiving-admin'; save_state(directory, state)
-                admin.rename(archive)
-            elif not os.path.lexists(archive):
-                raise LifecycleError('retirement admin entry disappeared without archive')
-            if _retirement_identity(recovery) != request['recovery_identity'] or _retirement_identity(archive) != request['admin_identity']:
-                raise LifecycleError('retirement archive identity changed')
-            _retirement_pointer(recovery, admin, archive)
-            records = worktree_records(repo)
-            if _retirement_record(records, recovery) or _retirement_record(records, workspace):
-                raise LifecycleError('target remains registered as an active Git worktree')
-            if head(repo, 'refs/heads/' + branch) != expected:
-                raise LifecycleError('retired branch was not preserved')
-            binding = git(repo, 'config', '--local', '--get', 'branch.' + branch + '.workspaceTask', optional=True)
-            if binding not in (None, task):
-                raise LifecycleError('retired branch binding changed')
-            if binding:
-                git(repo, 'config', '--local', '--unset', 'branch.' + branch + '.workspaceTask')
-            state.setdefault('retired', {})[task] = {'commit': expected, 'result_ref': result_ref,
-                'branch': branch, 'remote': item['remote'], 'phase': 'retired',
-                'users_released': request['users_released'],
-                'removed_from_active_at': _now(), 'recovery_path': str(recovery),
-                'original_identity': request['identity'], 'recovery_identity': request['recovery_identity'],
-                'admin_original_path': str(admin), 'admin_archive_path': str(archive),
-                'admin_identity': request['admin_identity'],
-                'original_path': str(workspace), 'recovery_held': True,
-                'content_manifest': _tree_manifest(recovery),
-                'admin_manifest': _tree_manifest(archive)}
-            del state['tasks'][task]
-            state['intents'].pop(task, None); save_state(directory, state)
-    return {'task': task, 'retired': True, 'branch': branch, 'receipt': state['retired'][task]}
+                if _retirement_record(records, recovery) or _retirement_record(records, workspace):
+                    raise LifecycleError('target remains registered as an active Git worktree')
+                if head(repo, 'refs/heads/' + branch) != expected:
+                    raise LifecycleError('retired branch was not preserved')
+                binding = git(repo, 'config', '--local', '--get', 'branch.' + branch + '.workspaceTask', optional=True)
+                if binding not in (None, task):
+                    raise LifecycleError('retired branch binding changed')
+                if binding:
+                    git(repo, 'config', '--local', '--unset', 'branch.' + branch + '.workspaceTask')
+                receipt = {'commit': expected, 'result_ref': result_ref,
+                    'branch': branch, 'remote': item['remote'], 'phase': 'retired',
+                    'users_released': request['users_released'],
+                    'removed_from_active_at': _now(), 'recovery_path': str(recovery),
+                    'original_identity': request['identity'], 'recovery_identity': request['recovery_identity'],
+                    'admin_original_path': str(admin), 'admin_archive_path': str(archive),
+                    'admin_identity': request['admin_identity'],
+                    'original_path': str(workspace), 'recovery_held': True,
+                    'content_manifest': _tree_manifest(recovery),
+                    'admin_manifest': _tree_manifest(archive)}
+                if request.get('preservation_evidence'):
+                    receipt['preservation_evidence'] = request['preservation_evidence']
+                    receipt['reclaim_phase'] = 'requested'
+                state.setdefault('retired', {})[task] = receipt
+                del state['tasks'][task]
+                state['intents'].pop(task, None); save_state(directory, state)
+                result = {'task': task, 'retired': True, 'branch': branch, 'receipt': receipt}
+    if request_only:
+        return result
+    evidence = result['receipt'].get('preservation_evidence')
+    if evidence:
+        try:
+            reclaimed = reclaim(repo, task=task, result_ref=result_ref, preservation_evidence=evidence)
+            result['reclaim'] = reclaimed
+            result['receipt'] = reclaimed['receipt']
+        except (LifecycleError, ValueError, OSError, subprocess.CalledProcessError) as exc:
+            with locked_state(repo) as (_, state):
+                result['receipt'] = state['retired'][task]
+            result['reclaim'] = {'task': task, 'reclaimed': False, 'error': str(exc)}
+    return result
+
 
 
 def _tree_manifest(root: Path):
@@ -937,7 +1003,8 @@ def _remove_matching_tree(root: Path, manifest):
 def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> dict:
     """Delete one retired payload only after its recorded manifest still matches."""
     repo = Path(repo).resolve()
-    if not preservation_evidence or '\n' in preservation_evidence or '\0' in preservation_evidence:
+    preservation_evidence = _durable_preservation_evidence(preservation_evidence)
+    if preservation_evidence is None:
         raise LifecycleError('reclaim requires durable preservation evidence')
     with _lease(repo, task):
         with locked_state(repo) as (directory, state):
@@ -950,8 +1017,13 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
                 raise LifecycleError('reclaim result reference does not match the retired receipt')
             if receipt.get('reclaim_phase') == 'reclaimed':
                 return {'task': task, 'reclaimed': True, 'receipt': receipt}
+
+            def refuse(message):
+                _clear_requested_reclaim_phase(receipt, directory, state)
+                raise LifecycleError(message)
+
             if not receipt.get('content_manifest') or not receipt.get('remote'):
-                raise LifecycleError('reclaim holds a receipt without a retirement content manifest')
+                refuse('reclaim holds a receipt without a retirement content manifest')
             stored = receipt.get('preservation_evidence')
             if stored and stored != preservation_evidence:
                 raise LifecycleError('reclaim preservation evidence changed')
@@ -961,27 +1033,31 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
             default = remote_default(repo, receipt['remote'])
             git(repo, 'fetch', receipt['remote'], 'refs/heads/' + default)
             if git(repo, 'merge-base', '--is-ancestor', receipt['commit'], 'FETCH_HEAD', optional=True) is None:
-                raise LifecycleError('retired commit is no longer on the remote default')
+                refuse('retired commit is no longer on the remote default')
             if not receipt.get('admin_manifest'):
-                raise LifecycleError('reclaim holds a receipt without a retirement content manifest')
+                refuse('reclaim holds a receipt without a retirement content manifest')
             phase = receipt.get('reclaim_phase')
             recovery = Path(receipt['recovery_path'])
             archive = Path(receipt['admin_archive_path'])
-            if phase in (None, 'authorized'):
+            if phase in (None, 'requested', 'authorized'):
                 staging = Path(receipt['reclaim_staging']) if receipt.get('reclaim_staging') else recovery.parent / (recovery.name + '.reclaim')
-                if phase is None:
-                    if not recovery.exists():
-                        raise LifecycleError('recovery payload disappeared before reclaim')
-                    if staging.exists():
-                        raise LifecycleError('reclaim staging path already exists')
-                    if _retirement_identity(recovery) != receipt['recovery_identity']:
-                        raise LifecycleError('recovery payload identity changed')
-                    if not archive.exists() or _retirement_identity(archive) != receipt['admin_identity']:
-                        raise LifecycleError('recovery admin identity changed')
-                    if _tree_manifest(recovery) != receipt['content_manifest']:
-                        raise LifecycleError('recovery content changed after retirement; holding payload')
-                    if _tree_manifest(archive) != receipt['admin_manifest']:
-                        raise LifecycleError('recovery admin content changed after retirement; holding payload')
+                if phase in (None, 'requested'):
+                    try:
+                        if not recovery.exists():
+                            raise LifecycleError('recovery payload disappeared before reclaim')
+                        if staging.exists():
+                            raise LifecycleError('reclaim staging path already exists')
+                        if _retirement_identity(recovery) != receipt['recovery_identity']:
+                            raise LifecycleError('recovery payload identity changed')
+                        if not archive.exists() or _retirement_identity(archive) != receipt['admin_identity']:
+                            raise LifecycleError('recovery admin identity changed')
+                        if _tree_manifest(recovery) != receipt['content_manifest']:
+                            raise LifecycleError('recovery content changed after retirement; holding payload')
+                        if _tree_manifest(archive) != receipt['admin_manifest']:
+                            raise LifecycleError('recovery admin content changed after retirement; holding payload')
+                    except LifecycleError as exc:
+                        _clear_requested_reclaim_phase(receipt, directory, state)
+                        raise
                     receipt['reclaim_staging'] = str(staging)
                     receipt['reclaim_phase'] = 'authorized'
                     save_state(directory, state)
@@ -1042,6 +1118,7 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
                 receipt['reclaimed_at'] = _now()
                 save_state(directory, state)
             return {'task': task, 'reclaimed': True, 'receipt': receipt}
+
 
 
 def reclaim_pending(repo) -> dict:
