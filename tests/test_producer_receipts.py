@@ -1,8 +1,10 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import unittest
+import venv
 
 from workspace_lifecycle.errors import LifecycleError
 from workspace_lifecycle import producers
@@ -68,6 +70,32 @@ class ProducerReceiptTests(unittest.TestCase):
         self.assertEqual(durable['generation'], 'gen-1')
         self.assertEqual(durable['released_proof'], 'issue/146')
         self.assertEqual(producers.retry(self.root, 'other')['results'], [])
+
+    def test_completion_runs_with_the_registered_virtual_environment(self):
+        environment = Path(self.temp.name) / 'private-owner-environment'
+        venv.EnvBuilder(with_pip=False, symlinks=os.name != 'nt').create(environment)
+        python = environment / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+        site_packages = Path(subprocess.check_output(
+            [str(python), '-I', '-c', 'import sysconfig; print(sysconfig.get_path("purelib"))'],
+            text=True).strip())
+        module = 'lifecycle_test_private_owner'
+        (site_packages / (module + '.py')).write_text('GENERATION = "gen-1"\n')
+        unavailable = subprocess.run(
+            [sys._base_executable, '-I', '-c', 'import ' + module],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertNotEqual(unavailable.returncode, 0)
+        self.assertIn('ModuleNotFoundError', unavailable.stderr)
+        completion = self._provider()
+        script = Path(completion[1])
+        script.write_text('from ' + module + ' import GENERATION\n'
+                          'assert GENERATION == "gen-1"\n' + script.read_text())
+        self._register(completion=[str(python), '-I', *completion[1:]])
+        self.output.write_bytes(b'generated')
+        result = self._finish()
+        self.assertEqual(result['producers']['results'],
+                         [{'generation': 'gen-1', 'reclaimed': True}])
+        self.assertTrue(result['retirement']['retired'])
+        self.assertFalse(self.output.exists())
 
     @unittest.skipUnless(os.name == 'nt', 'Windows short-path aliases')
     def test_provider_confirms_canonical_output_from_short_path(self):
