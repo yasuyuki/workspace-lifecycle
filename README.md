@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.3.5` is not published to PyPI. It imports no agent-rules
+directory; version `0.3.6` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
@@ -106,7 +106,7 @@ empty directories, branch, commit and admin directory remain available for
 recovery, while the target leaves the active Git worktree list. The retired
 receipt records both recovery paths and identities; no payload or admin bytes
 are deleted. `retire --pending` retries durable requests after interruption.
-`reclaim` deletes that payload and its archived admin only when the caller supplies durable preservation evidence, the accepted commit is still on the remote default, and the payload and admin still match the manifests recorded at retirement. A content change, a link, a mount, a nested repository, or a receipt without those manifests keeps the bytes. Retirement alone does not reclaim. An interrupted reclaim resumes from the same receipt.
+`finish` and `retire` accept `--reclaim-preservation-evidence`. Finish may store that evidence without `--users-released`; a later retire reuses it. When retirement completes with evidence, the receipt records `reclaim_phase=requested` and the same call starts reclaim after the no-delete body releases its lock and lease. `reclaim` deletes that payload and its archived admin only when preservation evidence is present, the accepted commit is still on the remote default, and the payload and admin still match the manifests recorded at retirement. A content change, a link, a mount, a nested repository, or a receipt without those manifests keeps the retired state and refuses only reclaim. A pre-authorization refusal clears `requested` so `reclaim_pending` does not retry it; lease busy and fetch failure leave `requested` for resume. An interrupted reclaim resumes from the same receipt. Explicit `reclaim` remains for late evidence.
 A lease is separate from Git's administrative lock.
 
 `run` supervises one task checkout. Linux uses a native subreaper and Windows a
@@ -167,3 +167,7 @@ for current tasks. The version 1 state schema and recovery retirement remain.
 Version 0.3.5 adds `reclaim`. It deletes a retired payload and its archived
 admin only when preservation evidence is supplied and both trees still match
 the manifests recorded at retirement. Retirement itself still does not delete.
+
+Version 0.3.6 lets `finish` and `retire` accept `--reclaim-preservation-evidence`
+and start the same reclaim after a successful retirement when that evidence is
+present. Retirement remains no-delete; safety refusals keep the retired payload.

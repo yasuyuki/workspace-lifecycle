@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from workspace_lifecycle.errors import LifecycleError
-from workspace_lifecycle.service import begin, finish, reclaim, retire, retire_pending, status
+from workspace_lifecycle.service import begin, finish, reclaim, reclaim_pending, retire, retire_pending, status
 
 
 def run(cwd, *args):
@@ -778,3 +778,255 @@ class ReclaimTest(unittest.TestCase):
         with self.assertRaises(LifecycleError):
             reclaim(self.root, task="one", result_ref="issue/1", preservation_evidence="issue/1 preservation complete")
         self.assertTrue(Path(state['retired']['one']['recovery_path']).exists())
+
+
+class FinishRetireReclaimTests(unittest.TestCase):
+    """Issue #4: finish/retire start reclaim with one live evidence location."""
+
+    def setUp(self):
+        self.host = LifecycleTest()
+        self.host.setUp()
+        self.root = self.host.root
+        self.topic = self.host.topic
+        self.temp = self.host.temp
+        self.preflight = self.host.preflight
+        self.task = 'one'
+        self.evidence = 'issue/1 preservation complete'
+
+    def tearDown(self):
+        self.host.tearDown()
+
+    def _accept(self, *, users_released=False, preservation_evidence=None):
+        begin(self.root, task='one', request='issue/1', remote='origin', branch='topic/one',
+              worktree=str(self.topic), validation=['git', 'diff', '--check'], preflight=self.preflight)
+        (self.topic / 'feature.txt').write_text('done\n')
+        plan = Path(self.temp.name) / 'plan-one.json'
+        self.host.task = 'one'
+        plan.write_text(json.dumps(self.host.source_plan(self.topic, 'feature.txt')))
+        return finish(self.topic, task='one', plan_path=str(plan), result_ref='issue/1',
+                      users_released=users_released, preservation_evidence=preservation_evidence)
+
+    def _state(self):
+        common = Path(run(self.root, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
+        return json.loads((common / 'workspace-lifecycle' / 'state.json').read_text())
+
+    def test_finish_with_release_and_evidence_reclaims(self):
+        result = self._accept(users_released=True, preservation_evidence=self.evidence)
+        retirement = result['retirement']
+        self.assertTrue(retirement['retired'])
+        self.assertTrue(retirement['reclaim']['reclaimed'])
+        receipt = retirement['receipt']
+        self.assertFalse(Path(receipt['recovery_path']).exists())
+        self.assertFalse(Path(receipt['admin_archive_path']).exists())
+        self.assertEqual(run(self.root, 'rev-parse', 'refs/heads/topic/one'), receipt['commit'])
+        self.assertEqual(receipt['result_ref'], 'issue/1')
+        self.assertEqual(receipt['reclaim_phase'], 'reclaimed')
+
+    def test_finish_evidence_without_release_defers_delete(self):
+        result = self._accept(users_released=False, preservation_evidence=self.evidence)
+        self.assertNotIn('retirement', result)
+        self.assertTrue(self.topic.exists())
+        state = self._state()
+        self.assertEqual(state['tasks']['one']['preservation_evidence'], self.evidence)
+        self.assertNotIn('retire', state['tasks']['one'])
+        retired = retire(self.root, task='one', result_ref='issue/1', users_released=True)
+        self.assertTrue(retired['retired'])
+        self.assertTrue(retired['reclaim']['reclaimed'])
+        receipt = retired['receipt']
+        self.assertEqual(receipt['preservation_evidence'], self.evidence)
+        self.assertFalse(Path(receipt['recovery_path']).exists())
+        self.assertFalse(Path(receipt['admin_archive_path']).exists())
+
+    def test_retire_without_evidence_holds_payload(self):
+        self._accept()
+        retired = retire(self.root, task='one', result_ref='issue/1', users_released=True)
+        self.assertTrue(retired['retired'])
+        self.assertNotIn('reclaim', retired)
+        receipt = retired['receipt']
+        self.assertNotIn('preservation_evidence', receipt)
+        self.assertNotIn('reclaim_phase', receipt)
+        self.assertTrue(Path(receipt['recovery_path']).exists())
+        self.assertTrue(Path(receipt['admin_archive_path']).exists())
+
+    def test_changed_evidence_is_refused_and_kept(self):
+        self._accept(preservation_evidence=self.evidence)
+        with self.assertRaisesRegex(LifecycleError, 'preservation evidence changed'):
+            retire(self.root, task='one', result_ref='issue/1', users_released=True,
+                   preservation_evidence='other evidence')
+        state = self._state()
+        self.assertEqual(state['tasks']['one']['preservation_evidence'], self.evidence)
+        self.assertTrue(self.topic.exists())
+        retired = retire(self.root, task='one', result_ref='issue/1', users_released=True)
+        self.assertTrue(retired['reclaim']['reclaimed'])
+        self.assertEqual(retired['receipt']['preservation_evidence'], self.evidence)
+
+    def test_safety_refusals_keep_retired_state(self):
+        from workspace_lifecycle import service
+        real_reclaim = service.reclaim
+
+        def mutate_then_reclaim(repo, **kwargs):
+            state = self._state()
+            recovery = Path(state['retired']['one']['recovery_path'])
+            (recovery / 'later').write_text('extra\n')
+            return real_reclaim(repo, **kwargs)
+
+        self._accept()
+        with patch.object(service, 'reclaim', side_effect=mutate_then_reclaim):
+            retired = retire(self.root, task='one', result_ref='issue/1', users_released=True,
+                             preservation_evidence=self.evidence)
+        self.assertTrue(retired['retired'])
+        self.assertFalse(retired['reclaim']['reclaimed'])
+        self.assertIn('holding payload', retired['reclaim']['error'])
+        receipt = retired['receipt']
+        self.assertTrue(Path(receipt['recovery_path']).exists())
+        self.assertNotIn('reclaim_phase', receipt)
+        self.assertEqual(receipt['preservation_evidence'], self.evidence)
+        self.assertEqual(run(self.root, 'rev-parse', 'refs/heads/topic/one'), receipt['commit'])
+
+        # link
+        self.tearDown(); self.setUp()
+        def link_then_reclaim(repo, **kwargs):
+            state = self._state()
+            recovery = Path(state['retired']['one']['recovery_path'])
+            target = recovery / 'link'
+            try:
+                target.symlink_to(recovery / 'feature.txt')
+            except OSError as exc:
+                raise unittest.SkipTest(str(exc))
+            return real_reclaim(repo, **kwargs)
+        self._accept()
+        with patch.object(service, 'reclaim', side_effect=link_then_reclaim):
+            retired = retire(self.root, task='one', result_ref='issue/1', users_released=True,
+                             preservation_evidence=self.evidence)
+        self.assertTrue(retired['retired'])
+        self.assertFalse(retired['reclaim']['reclaimed'])
+        self.assertTrue(Path(retired['receipt']['recovery_path']).exists())
+        self.assertNotIn('reclaim_phase', retired['receipt'])
+
+        # nested repo
+        self.tearDown(); self.setUp()
+        def nest_then_reclaim(repo, **kwargs):
+            state = self._state()
+            recovery = Path(state['retired']['one']['recovery_path'])
+            nested = recovery / 'nested'
+            nested.mkdir()
+            (nested / '.git').mkdir()
+            return real_reclaim(repo, **kwargs)
+        self._accept()
+        with patch.object(service, 'reclaim', side_effect=nest_then_reclaim):
+            retired = retire(self.root, task='one', result_ref='issue/1', users_released=True,
+                             preservation_evidence=self.evidence)
+        self.assertTrue(retired['retired'])
+        self.assertFalse(retired['reclaim']['reclaimed'])
+        self.assertTrue(Path(retired['receipt']['recovery_path']).exists())
+        self.assertNotIn('reclaim_phase', retired['receipt'])
+
+        # mount
+        self.tearDown(); self.setUp()
+        def mount_then_reclaim(repo, **kwargs):
+            state = self._state()
+            recovery = Path(state['retired']['one']['recovery_path'])
+            mounted = recovery / 'mount'
+            mounted.mkdir()
+            original = service.os.path.ismount
+            with patch.object(service.os.path, 'ismount',
+                              side_effect=lambda p: Path(p).resolve() == mounted.resolve() or original(p)):
+                return real_reclaim(repo, **kwargs)
+        self._accept()
+        with patch.object(service, 'reclaim', side_effect=mount_then_reclaim):
+            retired = retire(self.root, task='one', result_ref='issue/1', users_released=True,
+                             preservation_evidence=self.evidence)
+        self.assertTrue(retired['retired'])
+        self.assertFalse(retired['reclaim']['reclaimed'])
+        self.assertTrue(Path(retired['receipt']['recovery_path']).exists())
+        self.assertNotIn('reclaim_phase', retired['receipt'])
+
+        # commit left remote default
+        self.tearDown(); self.setUp()
+        def orphan_then_reclaim(repo, **kwargs):
+            state = self._state()
+            commit = state['retired']['one']['commit']
+            # Move trunk so accepted commit is no longer an ancestor of remote default tip.
+            run(self.root, 'checkout', '--orphan', 'fresh')
+            (self.root / 'README').write_text('other history\n')
+            run(self.root, 'add', 'README')
+            run(self.root, 'commit', '-m', 'fresh root')
+            run(self.root, 'branch', '-M', 'trunk')
+            run(self.root, 'push', '--force', 'origin', 'trunk')
+            run(self.root, 'checkout', 'trunk')
+            return real_reclaim(repo, **kwargs)
+        self._accept()
+        with patch.object(service, 'reclaim', side_effect=orphan_then_reclaim):
+            retired = retire(self.root, task='one', result_ref='issue/1', users_released=True,
+                             preservation_evidence=self.evidence)
+        self.assertTrue(retired['retired'])
+        self.assertFalse(retired['reclaim']['reclaimed'])
+        self.assertIn('no longer on the remote default', retired['reclaim']['error'])
+        self.assertTrue(Path(retired['receipt']['recovery_path']).exists())
+        self.assertNotIn('reclaim_phase', retired['receipt'])
+        self.assertEqual(retired['receipt']['preservation_evidence'], self.evidence)
+
+    def test_crash_after_receipt_resumes_via_reclaim_pending(self):
+        from workspace_lifecycle import service
+        self._accept()
+        real_reclaim = service.reclaim
+        calls = {'n': 0}
+
+        def crash_once(repo, **kwargs):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                # Receipt already saved by retire before this call.
+                state = self._state()
+                self.assertEqual(state['retired']['one']['reclaim_phase'], 'requested')
+                raise OSError('crash after receipt')
+            return real_reclaim(repo, **kwargs)
+
+        with patch.object(service, 'reclaim', side_effect=crash_once):
+            retired = retire(self.root, task='one', result_ref='issue/1', users_released=True,
+                             preservation_evidence=self.evidence)
+        self.assertTrue(retired['retired'])
+        self.assertEqual(retired['reclaim']['error'], 'crash after receipt')
+        self.assertEqual(self._state()['retired']['one']['reclaim_phase'], 'requested')
+        resumed = reclaim_pending(self.root)
+        self.assertTrue(resumed['pending'][0]['reclaimed'])
+        receipt = resumed['pending'][0]['receipt']
+        self.assertFalse(Path(receipt['recovery_path']).exists())
+        self.assertEqual(receipt['reclaim_phase'], 'reclaimed')
+
+    def test_explicit_reclaim_cli_accepts_late_evidence(self):
+        from workspace_lifecycle.cli import main
+        self._accept()
+        receipt = retire(self.root, task='one', result_ref='issue/1', users_released=True)['receipt']
+        self.assertNotIn('preservation_evidence', receipt)
+        argv = ['--repo', str(self.root), 'reclaim', '--task', 'one', '--result-ref', 'issue/1',
+                '--preservation-evidence', self.evidence]
+        with patch('sys.stdout', new_callable=lambda: __import__('io').StringIO()) as out:
+            code = main(argv)
+            body = json.loads(out.getvalue())
+        self.assertEqual(code, 0, body)
+        self.assertTrue(body['ok'])
+        self.assertTrue(body['reclaimed'])
+        self.assertFalse(Path(receipt['recovery_path']).exists())
+
+    def test_cli_safety_refusal_exit_one(self):
+        from workspace_lifecycle import service
+        from workspace_lifecycle.cli import main
+        self._accept()
+        real_reclaim = service.reclaim
+
+        def mutate_then_reclaim(repo, **kwargs):
+            state = self._state()
+            (Path(state['retired']['one']['recovery_path']) / 'later').write_text('extra\n')
+            return real_reclaim(repo, **kwargs)
+
+        argv = ['--repo', str(self.root), 'retire', '--task', 'one', '--result-ref', 'issue/1',
+                '--users-released', '--reclaim-preservation-evidence', self.evidence]
+        with patch.object(service, 'reclaim', side_effect=mutate_then_reclaim):
+            with patch('sys.stdout', new_callable=lambda: __import__('io').StringIO()) as out:
+                code = main(argv)
+                body = json.loads(out.getvalue())
+        self.assertEqual(code, 1, body)
+        self.assertFalse(body['ok'])
+        self.assertTrue(body['retired'])
+        self.assertIn('error', body['reclaim'])
+        self.assertTrue(Path(body['receipt']['recovery_path']).exists())
