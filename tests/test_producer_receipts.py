@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -36,7 +37,9 @@ class ProducerReceiptTests(unittest.TestCase):
                 'receipt.write_text(json.dumps({"generation": str(generation), "owner": "funkot-wav", "output": str(output), "receipt": str(receipt), "state": "reclaimed", "hold": False, "source_revision": "test", "inputs": [], "identity": {}, "sha256": "a" * 64, "accepted_proof": str(result), "released_proof": str(result)}))\n'
                 'print(json.dumps({"reclaimed": True, "generation": str(generation), "receipt": str(receipt)}))\n')
         script.write_text(body)
-        return [sys.executable, str(script), str(self.receipt), 'gen-1', '{result_ref}', str(self.output)]
+        # Registration stores the canonical output. Windows TEMP can contain
+        # an 8.3 alias, which must not leak into the provider's exact receipt.
+        return [sys.executable, str(script), str(self.receipt), 'gen-1', '{result_ref}', str(self.output.resolve())]
 
     def _register(self, *, completion=None):
         return producers.register(self.topic, 'one', 'funkot-wav', 'gen-1', str(self.receipt),
@@ -65,6 +68,27 @@ class ProducerReceiptTests(unittest.TestCase):
         self.assertEqual(durable['generation'], 'gen-1')
         self.assertEqual(durable['released_proof'], 'issue/146')
         self.assertEqual(producers.retry(self.root, 'other')['results'], [])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows short-path aliases')
+    def test_provider_confirms_canonical_output_from_short_path(self):
+        import ctypes
+        short_path = ctypes.windll.kernel32.GetShortPathNameW
+        short_path.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+        short_path.restype = ctypes.c_uint32
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = short_path(str(self.output.parent), buffer, len(buffer))
+        if not length or length >= len(buffer):
+            self.skipTest('native short path unavailable')
+        alias = Path(buffer.value) / self.output.name
+        if str(alias) == str(alias.resolve()):
+            self.skipTest('filesystem did not provide a distinct short-path alias')
+        self.output = alias
+        registered = self._register()
+        self.output.write_bytes(b'generated')
+        result = self._finish()
+        self.assertTrue(result['producers']['results'][0]['reclaimed'])
+        durable = json.loads(self.receipt.read_text())
+        self.assertEqual(durable['output'], registered['outputs'][0])
 
     def test_held_or_accepted_task_cannot_register(self):
         hold(self.topic, 'one', 'review needed', 'release explicitly')
