@@ -29,7 +29,9 @@ def _absolute(value, name: str, *, reject_links: bool = True) -> Path:
     if reject_links:
         from .service import _no_links
         _no_links(path)
-    return path.resolve(strict=False)
+    # An executable's invocation path selects its environment (for example a
+    # venv Python symlink). Outputs and receipts still require canonical paths.
+    return path.resolve(strict=False) if reject_links else path
 
 
 def _inside(path: Path, root: Path) -> bool:

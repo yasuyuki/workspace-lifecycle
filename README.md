@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.4.0` is not published to PyPI. It imports no agent-rules
+directory; version `0.4.1` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
@@ -221,3 +221,6 @@ Version 0.4.0 adds resumable member deletion intents, task-scoped reclamation
 transactions, pending-request durability across finish callbacks, and exact
 producer completion receipts on existing tasks. Older retirement manifests
 are preserved; they are never rebuilt from a partially deleted tree.
+
+Version 0.4.1 preserves the registered callback executable path so a virtual
+environment keeps its own Python modules during completion and reclamation.
