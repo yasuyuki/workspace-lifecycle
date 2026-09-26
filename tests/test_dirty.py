@@ -155,7 +155,7 @@ finish(repo, task=os.environ['WORKSPACE_LIFECYCLE_TASK'], plan_path=str(plan),
         with self.assertRaises(LifecycleError): finish(self.topic, task=task, plan_path=str(ignored), result_ref="issue/dirty")
 
     def test_restore_tracked_generated_file_with_regeneration_evidence(self):
-        task = self.start(); (self.topic / "generated.txt").write_text("generated changed\n")
+        task = self.start(); (self.topic / "generated.txt").write_bytes(b"generated changed\n")
         plan = self.plan("restore.json", {"restore": [self.entry(task, "generated.txt", "reproducible", regeneration={"evidence": "rebuild command verified"})]})
         result = finish(self.topic, task=task, plan_path=str(plan), result_ref="issue/dirty")
         self.assertTrue(result["accepted"])

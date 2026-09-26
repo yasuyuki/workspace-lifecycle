@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.3.6` is not published to PyPI. It imports no agent-rules
+directory; version `0.4.0` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
@@ -106,7 +106,32 @@ empty directories, branch, commit and admin directory remain available for
 recovery, while the target leaves the active Git worktree list. The retired
 receipt records both recovery paths and identities; no payload or admin bytes
 are deleted. `retire --pending` retries durable requests after interruption.
-`finish` and `retire` accept `--reclaim-preservation-evidence`. Finish may store that evidence without `--users-released`; a later retire reuses it. When retirement completes with evidence, the receipt records `reclaim_phase=requested` and the same call starts reclaim after the no-delete body releases its lock and lease. `reclaim` deletes that payload and its archived admin only when preservation evidence is present, the accepted commit is still on the remote default, and the payload and admin still match the manifests recorded at retirement. A content change, a link, a mount, a nested repository, or a receipt without those manifests keeps the retired state and refuses only reclaim. A pre-authorization refusal clears `requested` so `reclaim_pending` does not retry it; lease busy and fetch failure leave `requested` for resume. An interrupted reclaim resumes from the same receipt. Explicit `reclaim` remains for late evidence.
+`finish` and `retire` accept `--reclaim-preservation-evidence`. Finish may
+store that evidence before external users are released. Acceptance and an
+explicit final-user release persist a pending request in the same state change,
+so interruption before the retirement callback does not lose the request.
+Retirement with preservation evidence immediately attempts reclamation.
+
+`reclaim --pending` resumes only recorded requests; it neither discovers targets
+nor authorizes new deletions. The original retirement manifests and captured
+member identities remain unchanged. Each exact removal intent is persisted
+before its filesystem effect. Missing members are accepted only when that
+member's removal was intended. Changed objects, unknown bytes, links, mounts,
+nested repositories and files with multiple hard links remain held. Failure
+reasons and the original request survive for the next ordinary owner entry.
+An already absent intended member is never counted as newly removed.
+
+Retirement and reclamation retain a task lease while network, hashing and
+filesystem operations run outside the common state lock. Short compare-and-swap
+updates re-read current state and replace only the selected task's records.
+Linux disposal uses pinned directory descriptors, no-follow opens and mount
+identities, with a private quarantine namespace. Windows verifies and deletes
+through the same restrictive file handle; sharing conflicts leave requests
+pending. Both require every producer and external user to obey the owner lease
+and release contract. Arbitrary writers into the private quarantine namespace
+are not made safe by hashing or renaming. Unsupported filesystem capabilities
+fail closed. Explicit `reclaim` also remains available for late evidence.
+
 A lease is separate from Git's administrative lock.
 
 `run` supervises one task checkout. Linux uses a native subreaper and Windows a
@@ -137,6 +162,26 @@ an explicit migration verifies task bindings, accepted identities, pending
 operations, leases and a rollback source. This version neither installs replacement
 Git hooks nor intercepts arbitrary direct Git commands or forced process exits.
 The runtime owner can use the CLI without importing placement or inventory code.
+
+## Producer completion receipts
+
+Managed `run` and `resolve-run` children receive `owner_receipt_argv` and an
+external `owner_receipt_dir` in `WORKSPACE_LIFECYCLE_CONTEXT`. A producer registers
+its exact generation, durable receipt, absent output paths and completion argv
+before writing output. These are receipts on the existing task record, not a
+filesystem discovery service. `register-owner-receipt` rejects tracked source,
+preexisting data and changes to an already bound generation.
+
+A reviewed finish may accept source while these exact declared outputs remain.
+After validation, push and integration, acceptance plus explicit user release
+makes the registered owner callbacks pending. Callbacks receive the same exact
+generation and result reference on every retry and must preserve their own
+identity/hash/provenance evidence outside the retiring tree. Reclamation must
+be confirmed both by the owner result and by its durable receipt before the
+task can retire. Failures remain pending and normal owner startup/completion
+retries them. Unaccepted tasks, held tasks and unfinished output use do not
+invoke deletion. The lifecycle package never infers artifact ownership from
+mtime, ignored files or directory names.
 
 ## Source ownership
 
@@ -171,3 +216,8 @@ the manifests recorded at retirement. Retirement itself still does not delete.
 Version 0.3.6 lets `finish` and `retire` accept `--reclaim-preservation-evidence`
 and start the same reclaim after a successful retirement when that evidence is
 present. Retirement remains no-delete; safety refusals keep the retired payload.
+
+Version 0.4.0 adds resumable member deletion intents, task-scoped reclamation
+transactions, pending-request durability across finish callbacks, and exact
+producer completion receipts on existing tasks. Older retirement manifests
+are preserved; they are never rebuilt from a partially deleted tree.
