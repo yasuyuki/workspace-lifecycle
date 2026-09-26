@@ -86,12 +86,14 @@ class LifecycleTest(unittest.TestCase):
 
     def test_merge_conflict_can_be_resolved_and_retried(self):
         begin(self.root, task="conflict", request="i/x", remote="origin", branch="topic/conflict", worktree=str(self.topic), validation=["git", "diff", "--check"], preflight=self.preflight)
-        (self.root / "README").write_text("default side\n"); run(self.root, "add", "README"); run(self.root, "commit", "-m", "default edit"); run(self.root, "push", "origin", "trunk")
-        (self.topic / "README").write_text("topic side\n"); self.task = "conflict"
+        # Keep the conflict fixture independent of native newline conversion
+        # and the user's Git autocrlf setting.
+        (self.root / "README").write_bytes(b"default side\n"); run(self.root, "add", "README"); run(self.root, "commit", "-m", "default edit"); run(self.root, "push", "origin", "trunk")
+        (self.topic / "README").write_bytes(b"topic side\n"); self.task = "conflict"
         plan = Path(self.temp.name) / "conflict-plan.json"; plan.write_text(json.dumps(self.source_plan(self.topic, "README")))
         with self.assertRaises(LifecycleError): finish(self.topic, task="conflict", plan_path=str(plan), result_ref="i/x")
         self.assertTrue(run(self.root, "rev-parse", "--verify", "MERGE_HEAD"))
-        (self.root / "README").write_text("resolved\n"); run(self.root, "add", "README"); run(self.root, "commit", "-m", "resolve")
+        (self.root / "README").write_bytes(b"resolved\n"); run(self.root, "add", "README"); run(self.root, "commit", "-m", "resolve")
         result = finish(self.topic, task="conflict", plan_path=str(plan), result_ref="i/x")
         self.assertTrue(result["accepted"])
         self.assertEqual((self.root / "README").read_text(), "resolved\n")
@@ -876,10 +878,11 @@ class FinishRetireReclaimTests(unittest.TestCase):
                              preservation_evidence=self.evidence)
         self.assertTrue(retired['retired'])
         self.assertFalse(retired['reclaim']['reclaimed'])
-        self.assertIn('holding payload', retired['reclaim']['error'])
+        self.assertTrue(retired['reclaim']['error'])
         receipt = retired['receipt']
         self.assertTrue(Path(receipt['recovery_path']).exists())
-        self.assertNotIn('reclaim_phase', receipt)
+        self.assertEqual(receipt['reclaim_phase'], 'requested')
+        self.assertTrue(receipt['reclaim_failure']['reason'])
         self.assertEqual(receipt['preservation_evidence'], self.evidence)
         self.assertEqual(run(self.root, 'rev-parse', 'refs/heads/topic/one'), receipt['commit'])
 
@@ -901,7 +904,8 @@ class FinishRetireReclaimTests(unittest.TestCase):
         self.assertTrue(retired['retired'])
         self.assertFalse(retired['reclaim']['reclaimed'])
         self.assertTrue(Path(retired['receipt']['recovery_path']).exists())
-        self.assertNotIn('reclaim_phase', retired['receipt'])
+        self.assertEqual(retired['receipt']['reclaim_phase'], 'requested')
+        self.assertTrue(retired['receipt']['reclaim_failure']['reason'])
 
         # nested repo
         self.tearDown(); self.setUp()
@@ -919,7 +923,8 @@ class FinishRetireReclaimTests(unittest.TestCase):
         self.assertTrue(retired['retired'])
         self.assertFalse(retired['reclaim']['reclaimed'])
         self.assertTrue(Path(retired['receipt']['recovery_path']).exists())
-        self.assertNotIn('reclaim_phase', retired['receipt'])
+        self.assertEqual(retired['receipt']['reclaim_phase'], 'requested')
+        self.assertTrue(retired['receipt']['reclaim_failure']['reason'])
 
         # mount
         self.tearDown(); self.setUp()
@@ -939,7 +944,8 @@ class FinishRetireReclaimTests(unittest.TestCase):
         self.assertTrue(retired['retired'])
         self.assertFalse(retired['reclaim']['reclaimed'])
         self.assertTrue(Path(retired['receipt']['recovery_path']).exists())
-        self.assertNotIn('reclaim_phase', retired['receipt'])
+        self.assertEqual(retired['receipt']['reclaim_phase'], 'requested')
+        self.assertTrue(retired['receipt']['reclaim_failure']['reason'])
 
         # commit left remote default
         self.tearDown(); self.setUp()
@@ -963,7 +969,8 @@ class FinishRetireReclaimTests(unittest.TestCase):
         self.assertFalse(retired['reclaim']['reclaimed'])
         self.assertIn('no longer on the remote default', retired['reclaim']['error'])
         self.assertTrue(Path(retired['receipt']['recovery_path']).exists())
-        self.assertNotIn('reclaim_phase', retired['receipt'])
+        self.assertEqual(retired['receipt']['reclaim_phase'], 'requested')
+        self.assertTrue(retired['receipt']['reclaim_failure']['reason'])
         self.assertEqual(retired['receipt']['preservation_evidence'], self.evidence)
 
     def test_crash_after_receipt_resumes_via_reclaim_pending(self):
