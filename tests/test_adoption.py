@@ -98,6 +98,41 @@ class AdoptionTests(unittest.TestCase):
         self.assertTrue(self.f.root.is_dir())
         self.assertNotIn('retire', status(self.f.root, 'primary'))
 
+    def test_primary_keeps_ignored_and_unchanged_baseline_data_after_acceptance(self):
+        self.primary()
+        (self.f.root / '.git' / 'info' / 'exclude').write_text('workspace-data/\n')
+        (self.f.root / 'workspace-data').mkdir()
+        (self.f.root / 'workspace-data' / 'kept.txt').write_text('operator data')
+        (self.f.root / 'README').write_text('primary baseline edit\n')
+        self.adopt(task='primary', worktree=str(self.f.root), branch='topic/primary')
+        (self.f.root / 'workspace-data' / 'later.txt').write_text('ignored after adoption')
+        plan = self.plan('primary', self.f.root / 'feature.txt', 'primary feature')
+        completed = finish(self.f.root, task='primary', plan_path=str(plan), result_ref='issue/primary')
+        self.assertTrue(completed['accepted'])
+        self.assertEqual(status(self.f.root, 'primary')['acceptance']['waived_workspace_data']['count'], 3)
+        self.assertEqual((self.f.root / 'README').read_text(), 'primary baseline edit\n')
+        self.assertTrue((self.f.root / 'workspace-data' / 'later.txt').exists())
+
+    def test_primary_new_untracked_or_changed_baseline_status_still_blocks(self):
+        for case in ('untracked', 'staged'):
+            with self.subTest(case=case):
+                fixture = test_lifecycle.LifecycleTest('runTest'); fixture.setUp(); self.addCleanup(fixture.tearDown)
+                self.f = fixture
+                test_lifecycle.run(fixture.root, 'worktree', 'add', '-b', 'topic/adopt', str(fixture.topic))
+                self.primary()
+                (fixture.root / 'README').write_text('primary baseline edit\n')
+                self.adopt(task='primary', worktree=str(fixture.root), branch='topic/primary')
+                if case == 'untracked':
+                    (fixture.root / 'stray.txt').write_text('not planned')
+                else:
+                    test_lifecycle.run(fixture.root, 'add', 'README')
+                plan = self.plan('primary', fixture.root / 'feature.txt', 'primary feature')
+                try:
+                    result = finish(fixture.root, task='primary', plan_path=str(plan), result_ref='issue/primary')
+                except LifecycleError:
+                    continue
+                self.assertEqual(result['completion'], 'exception')
+
     def test_primary_interrupted_adoption_preserves_intent_without_git_metadata_drift(self):
         from workspace_lifecycle import adoption
         self.primary()

@@ -442,6 +442,19 @@ def _bind_preservation_evidence(stored, incoming: str | None):
     return incoming
 
 
+def _primary_workspace_data(repo: Path, task: dict, dirty: dict[str, str]) -> set[str]:
+    """Dirt an adopted primary checkout may keep after acceptance.
+
+    The primary checkout is never retired, so ignored workspace data and
+    entries unchanged since adoption are not leftovers of this task. Linked
+    worktrees and anything the task changed keep blocking acceptance.
+    """
+    if not task.get('adoption') or repo != Path(worktree_records(repo)[0]['worktree']).resolve():
+        return set()
+    baseline = task['baseline_dirty']
+    return {name for name, kind in dirty.items() if kind == '!!' or baseline.get(name) == kind}
+
+
 def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = 'workspace lifecycle completion', users_released: bool = False, revision_evidence: str | None = None, preservation_evidence: str | None = None) -> dict:
     repo = Path(repo).resolve(); plan = _plan(Path(plan_path)); task_id = task
     reclaim_evidence = _durable_preservation_evidence(preservation_evidence)
@@ -542,6 +555,8 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     from .producers import owned_dirty_paths
                     owned_outputs = owned_dirty_paths(repo, task)
                     final_dirty = {name: kind for name, kind in final_dirty.items() if name not in owned_outputs}
+                waived = _primary_workspace_data(repo, task, final_dirty)
+                final_dirty = {name: kind for name, kind in final_dirty.items() if name not in waived}
                 if final_dirty:
                     exception = _exception(plan, final_dirty)
                     task['exception'] = exception
@@ -553,6 +568,10 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 task['acceptance'] = {'commit': commit, 'result_ref': result_ref,
                                       'validation': {'precommit': precommit, 'postcommit': evidence},
                                       'push': pushed, 'accepted_at': _now()}
+                if waived:
+                    task['acceptance']['waived_workspace_data'] = {
+                        'count': len(waived),
+                        'sha256': hashlib.sha256('\0'.join(sorted(waived)).encode()).hexdigest()}
                 if reclaim_evidence is not None:
                     task['preservation_evidence'] = _bind_preservation_evidence(
                         task.get('preservation_evidence'), reclaim_evidence)

@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.4.2` is not published to PyPI. It imports no agent-rules
+directory; version `0.4.3` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
@@ -54,7 +54,9 @@ Git administrative locks are preserved. Nested repositories remain separate owne
 boundaries: adoption snapshots their checkout/Git identity and HEAD, without
 traversing or owning their contents. Their dirty state belongs to their own
 contract. Finish plans cannot operate inside a nested Git checkout. Primary
-checkouts can continue and finish, but cannot request or execute retirement. Default branch checkouts, conflicting
+checkouts can continue and finish, but cannot request or execute retirement. Because a primary
+checkout is never retired, its finish does not block on ignored data or on baseline entries whose
+status is unchanged; the acceptance records their count and digest. Default branch checkouts, conflicting
 bindings, active Git operations, protected indexes, and unsafe filesystem paths
 are refused. An interrupted adoption retains an exact contract and filesystem,
 index and dirty-content snapshot: retry the same arguments, with the same
@@ -232,3 +234,6 @@ environment keeps its own Python modules during completion and reclamation.
 Version 0.4.2 lets Windows descendants safely share one supervised task use.
 The owner remains responsible for normal receipt cleanup; abnormal recovery
 still requires explicit review.
+
+Version 0.4.3 lets an adopted primary checkout finish while it keeps ignored
+workspace data and unchanged baseline entries.
