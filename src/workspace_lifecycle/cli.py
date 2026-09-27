@@ -12,7 +12,7 @@ from . import __version__
 from .errors import LifecycleError
 from . import service
 from .git import bound_task, common_dir, remote_default, task_worktree, top
-from .state import locked_state
+from .state import locked_state, save_state
 
 
 def _json_list(value: str):
@@ -40,6 +40,11 @@ def parser():
     adopt.add_argument('--preflight-json', type=_json_list, required=True)
     adopt.add_argument('--hold-reason'); adopt.add_argument('--next-action')
     status = commands.add_parser("status"); status.add_argument("--task")
+    producer = commands.add_parser('register-owner-receipt', help='bind an exact producer generation before it writes outputs')
+    for name in ('task', 'owner', 'generation', 'receipt'):
+        producer.add_argument('--' + name, required=True)
+    producer.add_argument('--output', action='append', required=True)
+    producer.add_argument('--completion-json', type=_json_list, required=True)
     update = commands.add_parser('update-preflight', help='replace one current task preflight by exact argv CAS')
     update.add_argument('--task', required=True)
     update.add_argument('--expected-preflight-json', type=_json_list, required=True)
@@ -51,7 +56,7 @@ def parser():
     finish = commands.add_parser("finish", description="Resolve owned dirty, validate, save, push and normally integrate one task.",
         epilog='Plan: commit/restore/archive arrays of path, owner, evidence, classification and sha256; source requires safe_to_commit=true. Restore requires regeneration.evidence; private archive requires store and approval_evidence. Exception requires reviewed_all_alternatives=true and commit/restore/archive/owner-resolution evidence, irreversible_harm, remaining_owner and next_action.'); finish.add_argument("--task", required=True); finish.add_argument("--plan", required=True); finish.add_argument("--result-ref", required=True); finish.add_argument("--message", default="workspace lifecycle completion"); finish.add_argument("--users-released", action="store_true"); finish.add_argument("--revise-plan-evidence", help="explicit review of a revised finish plan after all pending preservation actions complete"); finish.add_argument("--reclaim-preservation-evidence", help="durable preservation evidence used to start reclaim after retirement")
     retire = commands.add_parser("retire"); retire.add_argument("--task"); retire.add_argument("--result-ref"); retire.add_argument("--pending", action="store_true"); retire.add_argument("--users-released", action="store_true"); retire.add_argument("--request", action="store_true"); retire.add_argument("--reclaim-preservation-evidence", help="durable preservation evidence used to start reclaim after retirement")
-    reclaim = commands.add_parser("reclaim"); reclaim.add_argument("--task", required=True); reclaim.add_argument("--result-ref", required=True); reclaim.add_argument("--preservation-evidence", required=True)
+    reclaim = commands.add_parser("reclaim"); reclaim.add_argument("--task"); reclaim.add_argument("--result-ref"); reclaim.add_argument("--preservation-evidence"); reclaim.add_argument("--pending", action="store_true")
     run = commands.add_parser("run"); run.add_argument("--task", required=True); run.add_argument("--cwd", default="."); run.add_argument("argv", nargs=argparse.REMAINDER)
     resolve = commands.add_parser("resolve-run", help="Run unmanaged work directly or supervise an already managed task.")
     resolve.add_argument("--cwd", required=True, help="effective workspace directory selected by the caller")
@@ -78,6 +83,10 @@ def main(argv=None):
             result = service.update_preflight(args.repo, task=args.task,
                 expected_preflight=args.expected_preflight_json,
                 preflight=args.preflight_json, evidence=args.evidence)
+        elif args.command == 'register-owner-receipt':
+            from . import producers
+            result = producers.register(args.repo, args.task, args.owner, args.generation,
+                                        args.receipt, args.output, args.completion_json)
         elif args.command == "hold": result = service.hold(args.repo, args.task, args.reason, args.next_action)
         elif args.command == "release-hold": result = service.release_hold(args.repo, args.task, args.evidence)
         elif args.command == "finish": result = service.finish(args.repo, task=args.task, plan_path=args.plan, result_ref=args.result_ref, message=args.message, users_released=args.users_released, revision_evidence=args.revise_plan_evidence, preservation_evidence=args.reclaim_preservation_evidence)
@@ -89,7 +98,14 @@ def main(argv=None):
             elif args.task and args.result_ref: result = service.retire(args.repo, task=args.task, result_ref=args.result_ref, users_released=args.users_released, request_only=args.request, preservation_evidence=args.reclaim_preservation_evidence)
             else: raise LifecycleError("retire requires --task and --result-ref")
         elif args.command == "reclaim":
-            result = service.reclaim(args.repo, task=args.task, result_ref=args.result_ref, preservation_evidence=args.preservation_evidence)
+            if args.pending:
+                if args.task or args.result_ref or args.preservation_evidence:
+                    raise LifecycleError('reclaim --pending takes no task, result reference or evidence')
+                result = service.reclaim_pending(args.repo)
+            elif args.task and args.result_ref and args.preservation_evidence:
+                result = service.reclaim(args.repo, task=args.task, result_ref=args.result_ref, preservation_evidence=args.preservation_evidence)
+            else:
+                raise LifecycleError('reclaim requires --task, --result-ref and --preservation-evidence, or --pending')
         elif args.command in {"run", "resolve-run"}:
             argv = args.argv[1:] if args.argv[:1] == ['--'] else args.argv
             if not argv:
@@ -101,10 +117,11 @@ def main(argv=None):
             cwd = Path(args.cwd).resolve()
             if cwd != repo and repo not in cwd.parents:
                 raise LifecycleError('run cwd must be inside the selected task worktree')
-            service.retire_pending(repo)
-            service.reclaim_pending(repo)
+            if _recover_before_spawn(repo, args.task):
+                return 0
             code = run(repo, args.task, argv, cwd,
-                       before_spawn=lambda: service.before_run(repo, args.task))
+                       before_spawn=lambda: service.before_run(repo, args.task),
+                       child_env=_managed_context(repo, args.task))
             # Native output and status pass through; management JSON belongs to
             # status/finish, not the program's stdout stream.
             with locked_state(repo) as (_, state):
@@ -134,6 +151,11 @@ def main(argv=None):
 def _reclaim_refused(result):
     if not isinstance(result, dict):
         return False
+    if any(isinstance(entry, dict) and entry.get('error')
+           for entry in result.get('pending', [])):
+        return True
+    if any(not entry.get('reclaimed') for entry in result.get('producers', {}).get('results', [])):
+        return True
     reclaim = result.get('reclaim')
     if isinstance(reclaim, dict) and reclaim.get('error'):
         return True
@@ -143,6 +165,49 @@ def _reclaim_refused(result):
         if isinstance(nested, dict) and nested.get('error'):
             return True
     return False
+
+
+def _managed_context(repo, task):
+    from .producers import task_receipt_dir
+    receipt_dir = task_receipt_dir(repo, task)
+    service._no_links(receipt_dir)
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    prefix = [sys.executable, '-m', 'workspace_lifecycle', '--repo', str(repo)]
+    context = json.dumps({'version': 1, 'repo': str(repo), 'task': task,
+                          'finish_argv': [*prefix, 'finish', '--task', task],
+                          'owner_receipt_argv': [*prefix, 'register-owner-receipt', '--task', task],
+                          'owner_receipt_dir': str(receipt_dir)},
+                         sort_keys=True, separators=(',', ':'))
+    return {'WORKSPACE_LIFECYCLE_CONTEXT': context,
+            'WORKSPACE_LIFECYCLE_REPO': str(repo), 'WORKSPACE_LIFECYCLE_TASK': task}
+
+
+def _recover_before_spawn(repo, task):
+    """Replay a released task from its control checkout before admitting use."""
+    with locked_state(repo) as (_, state):
+        item = state['tasks'].get(task)
+        if item is None:
+            return True
+        release = item.get('completion_release')
+        remote = item['remote']
+    if release:
+        from . import leases
+        lease = leases.status(repo, task)['receipt']
+        if lease is not None:
+            try:
+                leases.release(repo, task, lease['token'], release['result_ref'])
+            except (ValueError, OSError) as exc:
+                with locked_state(repo) as (directory, state):
+                    current = state['tasks'].get(task)
+                    if current and current.get('completion_release') == release:
+                        current['completion_release']['lease_recovery_failure'] = str(exc)
+                        save_state(directory, state)
+    control = task_worktree(repo, remote_default(repo, remote))
+    os.chdir(control)
+    service.retire_pending(control)
+    service.reclaim_pending(control)
+    with locked_state(control) as (_, state):
+        return task not in state['tasks']
 
 
 def _native_code(code):
@@ -198,19 +263,12 @@ def _resolve_run(effective, launch, argv):
     if not lifecycle.is_dir():
         raise LifecycleError('workspace lifecycle state is not a directory')
     task = bound_task(repo)
-    finish_argv = [sys.executable, '-m', 'workspace_lifecycle', '--repo', str(repo),
-                   'finish', '--task', task]
-    context = json.dumps({'version': 1, 'repo': str(repo), 'task': task,
-                          'finish_argv': finish_argv},
-                         sort_keys=True, separators=(',', ':'))
     from .leases import run
-    service.retire_pending(repo)
-    service.reclaim_pending(repo)
+    if _recover_before_spawn(repo, task):
+        return 0
     code = run(repo, task, argv, launch,
                before_spawn=lambda: service.before_run(repo, task),
-               child_env={'WORKSPACE_LIFECYCLE_CONTEXT': context,
-                          'WORKSPACE_LIFECYCLE_REPO': str(repo),
-                          'WORKSPACE_LIFECYCLE_TASK': task})
+               child_env=_managed_context(repo, task))
     with locked_state(repo) as (_, state):
         remote = state['tasks'][task]['remote']
     control = task_worktree(repo, remote_default(repo, remote))

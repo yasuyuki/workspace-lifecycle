@@ -155,6 +155,67 @@ class LeaseTests(unittest.TestCase):
         child.communicate(timeout=10)
         self.assertEqual(child.returncode, 0)
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows named Job reentry')
+    def test_job_member_joins_one_use_but_copied_token_does_not(self):
+        gate = self.repo / 'join-gate'
+        gate.write_text('hold')
+        ready = self.repo / 'joined-ready'
+        joined = ('from workspace_lifecycle import leases; import os,sys,pathlib; '
+                  'repo=os.getcwd(); '
+                  'with_guard=leases.guard(repo,"task",allow_use=True); '
+                  'with_guard.__enter__(); with_guard.__exit__(None,None,None); '
+                  'sys.exit(leases.run(repo,"task",[sys.executable,"-c",'
+                  '"import pathlib; pathlib.Path(\'joined-child\').write_text(\'ok\')"],repo))')
+        leader = ('import pathlib,subprocess,sys,time; '
+                  'subprocess.run([sys.executable,"-c",%r],check=True); '
+                  'pathlib.Path("joined-ready").write_text("ok"); '
+                  'gate=pathlib.Path("join-gate"); '
+                  '\nwhile gate.exists(): time.sleep(.02)' % joined)
+        child = self.supervisor(leader)
+        try:
+            self.until(ready.exists)
+            self.assertEqual((self.repo / 'joined-child').read_text(), 'ok')
+            receipt = leases.status(self.repo, 'task')['receipt']
+            self.assertTrue(leases.status(self.repo, 'task')['busy'])
+            with patch.dict(os.environ, {'WORKSPACE_LIFECYCLE_USE': receipt['token']}):
+                with self.assertRaises(ValueError):
+                    leases.run(self.repo, 'task', [sys.executable, '-c', 'pass'], self.repo)
+                with self.assertRaises(ValueError):
+                    with leases.guard(self.repo, 'task', allow_use=True):
+                        self.fail('copied token entered mutation guard')
+            self.assertEqual(leases.status(self.repo, 'task')['receipt'], receipt)
+        finally:
+            gate.unlink(missing_ok=True)
+        _, stderr = child.communicate(timeout=15)
+        self.assertEqual(child.returncode, 0, stderr.decode())
+        self.assertIsNone(leases.status(self.repo, 'task')['receipt'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows named Job reentry')
+    def test_join_rejects_mismatched_or_uncertain_identity(self):
+        gate = self.repo / 'join-gate'
+        child = self.supervisor('import pathlib,time; p=pathlib.Path("join-gate"); '
+                                'p.write_text("ready");\nwhile p.exists(): time.sleep(.02)')
+        self.until(gate.exists)
+        try:
+            receipt = leases.status(self.repo, 'task')['receipt']
+            with patch.dict(os.environ, {'WORKSPACE_LIFECYCLE_USE': receipt['token']}):
+                with patch.object(leases, '_windows_job_member', return_value=True):
+                    self.assertTrue(leases._own_use(receipt, 'task'))
+                    for change in ({'task': 'other'}, {'token': 'stale'},
+                                   {'owner_identity': 'reused PID'},
+                                   {'owner_pid': None}, {'windows_job': 'other'}):
+                        self.assertFalse(leases._own_use({**receipt, **change}, 'task'), change)
+                    with patch.object(leases, '_identity', return_value=None):
+                        self.assertFalse(leases._own_use(receipt, 'task'))
+                with patch.object(leases, '_windows_job_member', return_value=False):
+                    self.assertFalse(leases._own_use(receipt, 'task'))
+            with patch.dict(os.environ, {'WORKSPACE_LIFECYCLE_USE': 'stale'}):
+                self.assertFalse(leases._own_use(receipt, 'task'))
+        finally:
+            gate.unlink(missing_ok=True)
+        child.communicate(timeout=15)
+        self.assertEqual(child.returncode, 0)
+
 
 if __name__ == '__main__':
     unittest.main()

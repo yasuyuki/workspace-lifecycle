@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from workspace_lifecycle.errors import LifecycleError
+from workspace_lifecycle import leases
 from workspace_lifecycle.service import begin, finish, hold
 
 
@@ -96,6 +97,26 @@ class DirtyLifecycleTest(unittest.TestCase):
         self.assertEqual(refused.returncode, 2)
         self.assertIn('held', refused.stderr)
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows Job reentry')
+    def test_nested_resolve_run_shares_one_managed_use(self):
+        task = self.start('joined')
+        inner = ('import os; assert os.environ["WORKSPACE_LIFECYCLE_TASK"] == "joined"; '
+                 'print("joined child")')
+        leader = ('import os,subprocess,sys; from workspace_lifecycle import leases; '
+                  'repo=os.environ["WORKSPACE_LIFECYCLE_REPO"]; '
+                  'task=os.environ["WORKSPACE_LIFECYCLE_TASK"]; '
+                  'before=leases.status(repo,task)["receipt"]; '
+                  'result=subprocess.run([sys.executable,"-m","workspace_lifecycle.cli",'
+                  '"resolve-run","--cwd",repo,"--launch-cwd",repo,"--",'
+                  'sys.executable,"-c",%r],capture_output=True,text=True); '
+                  'assert result.returncode == 0, result.stderr; '
+                  'assert leases.status(repo,task)["receipt"] == before; '
+                  'print(result.stdout.strip())' % inner)
+        result = self.resolve_run(self.topic, self.topic, sys.executable, '-c', leader)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'joined child')
+        self.assertIsNone(leases.status(self.topic, task)['receipt'])
+
     def test_resolve_run_refuses_legacy_and_managed_unbound(self):
         common = Path(git(self.root, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
         legacy = common / 'agent-branches'; legacy.mkdir()
@@ -155,7 +176,7 @@ finish(repo, task=os.environ['WORKSPACE_LIFECYCLE_TASK'], plan_path=str(plan),
         with self.assertRaises(LifecycleError): finish(self.topic, task=task, plan_path=str(ignored), result_ref="issue/dirty")
 
     def test_restore_tracked_generated_file_with_regeneration_evidence(self):
-        task = self.start(); (self.topic / "generated.txt").write_text("generated changed\n")
+        task = self.start(); (self.topic / "generated.txt").write_bytes(b"generated changed\n")
         plan = self.plan("restore.json", {"restore": [self.entry(task, "generated.txt", "reproducible", regeneration={"evidence": "rebuild command verified"})]})
         result = finish(self.topic, task=task, plan_path=str(plan), result_ref="issue/dirty")
         self.assertTrue(result["accepted"])
