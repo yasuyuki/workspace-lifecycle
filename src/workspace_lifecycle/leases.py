@@ -92,9 +92,7 @@ def guard(repo, task, allow_use=False):
     lock, receipt = _paths(repo, task)
     with _lock(lock.with_suffix('.mutation.lock')):
         record = _read(receipt)
-        own_use = (allow_use and record is not None
-                   and os.environ.get('WORKSPACE_LIFECYCLE_USE') == record['token']
-                   and _identity(record['owner_pid']) == record['owner_identity'])
+        own_use = allow_use and _own_use(record, task)
         if own_use:
             yield
         else:
@@ -270,6 +268,62 @@ def _windows_job(token):
     return name, active, lambda: kernel.CloseHandle(handle)
 
 
+def _windows_job_member(name):
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenJobObjectW.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+    kernel.OpenJobObjectW.restype = wintypes.HANDLE
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.IsProcessInJob.argtypes = (wintypes.HANDLE, wintypes.HANDLE,
+                                     ctypes.POINTER(wintypes.BOOL))
+    kernel.IsProcessInJob.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel.OpenJobObjectW(4, False, name)  # JOB_OBJECT_QUERY
+    if not handle:
+        return False  # A missing or inaccessible Job cannot prove membership.
+    try:
+        member = wintypes.BOOL()
+        if not kernel.IsProcessInJob(kernel.GetCurrentProcess(), handle,
+                                     ctypes.byref(member)):
+            raise ValueError('cannot inspect Windows use job membership')
+        return bool(member.value)
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _own_use(record, task):
+    if not isinstance(record, dict) or record.get('task') != task:
+        return False
+    token = record.get('token')
+    owner = record.get('owner_identity')
+    owner_pid = record.get('owner_pid')
+    if (not isinstance(token, str) or not token
+            or os.environ.get('WORKSPACE_LIFECYCLE_USE') != token
+            or not isinstance(owner, str) or not owner
+            or not isinstance(owner_pid, int) or owner_pid <= 0
+            or _identity(owner_pid) != owner):
+        return False
+    if os.name == 'nt':
+        name = 'Local\\workspace-lifecycle-' + token
+        return record.get('windows_job') == name and _windows_job_member(name)
+    return True
+
+
+def _joined_run(argv, cwd, token, child_env):
+    # The caller is already in the owner's Job. Its child inherits that Job;
+    # only the outer supervisor owns the receipt and waits for all descendants.
+    env = {**os.environ, **(child_env or {}), 'WORKSPACE_LIFECYCLE_USE': token}
+    child = subprocess.Popen(argv, cwd=str(cwd), env=env)
+    while True:
+        try:
+            return child.wait()
+        except KeyboardInterrupt:
+            # Console input also reaches the child. Keep the joiner alive until
+            # that child reports its own exit status.
+            continue
+
+
 def run(repo, task, argv, cwd, before_spawn=None, child_env=None):
     """Dedicated supervisor entry, preserving signals and holding descendants.
 
@@ -277,6 +331,12 @@ def run(repo, task, argv, cwd, before_spawn=None, child_env=None):
     No kill-on-close job, process reap or implicit termination is used.
     """
     lock, receipt = _paths(repo, task)
+    if os.name == 'nt':
+        record = _read(receipt)
+        if _own_use(record, task):
+            if before_spawn is not None:
+                before_spawn()
+            return _joined_run(argv, cwd, record['token'], child_env)
     with _lock(lock):
         if receipt.exists():
             raise ValueError('unreleased task use; inspect lease before restarting')

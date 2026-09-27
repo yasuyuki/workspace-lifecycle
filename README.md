@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.4.1` is not published to PyPI. It imports no agent-rules
+directory; version `0.4.2` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
@@ -142,6 +142,10 @@ inside the task still holds a directory handle; `--users-released` cannot turn
 that use into a removable worktree. Release that caller before retrying pending
 retirement. `lease-status` inspects a lease and
 `lease-release` recovers exactly one dead-owner lease after review.
+On Windows, another process in that use's Job can start a managed agent with
+the inherited exact use token. It shares the existing receipt; the outer
+supervisor releases it after all Job members exit. A process outside the Job
+cannot join by copying the token.
 
 Runtime launchers use `resolve-run` with the already selected effective cwd and
 the original invocation cwd. It runs unmanaged work without creating lifecycle
@@ -224,3 +228,7 @@ are preserved; they are never rebuilt from a partially deleted tree.
 
 Version 0.4.1 preserves the registered callback executable path so a virtual
 environment keeps its own Python modules during completion and reclamation.
+
+Version 0.4.2 lets Windows descendants safely share one supervised task use.
+The owner remains responsible for normal receipt cleanup; abnormal recovery
+still requires explicit review.
