@@ -9,22 +9,13 @@ import stat
 
 from .errors import LifecycleError
 from .git import common_dir, current_branch, git, head, remote_default, top, worktree_records
-from .service import _index_protection, _lease, _no_links, _now, _snapshot
+from .service import _index_protection, _lease, _no_links, _now, _operation_check, _snapshot
 from .state import locked_state, save_state
 
 
 def _identity(path):
     info = path.lstat()
     return [info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)]
-
-
-def _operation_check(target):
-    _index_protection(target)
-    for name in ('MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD',
-                 'rebase-merge', 'rebase-apply', 'sequencer', 'BISECT_START', 'BISECT_LOG', 'index.lock'):
-        path = Path(git(target, 'rev-parse', '--path-format=absolute', '--git-path', name))
-        if path.exists() or path.is_symlink():
-            raise LifecycleError('existing Git operation must be resolved before adoption: ' + name)
 
 
 def _repository_boundary(path):

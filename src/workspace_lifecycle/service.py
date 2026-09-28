@@ -224,7 +224,7 @@ def _validate(repo: Path, argv: list[str]) -> dict:
     return evidence
 
 
-def _push(repo: Path, preflight: list[str], expected_branch: str, expected_remote=None) -> dict:
+def _push(repo: Path, preflight: list[str], expected_branch: str, expected_remote=None, expected_head=None) -> dict:
     argv = [str(repo) if value == "{repo}" else value for value in preflight]
     if "{repo}" not in preflight: raise LifecycleError("preflight argv must contain literal {repo}")
     result = subprocess.run(argv, cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -237,9 +237,13 @@ def _push(repo: Path, preflight: list[str], expected_branch: str, expected_remot
         raise LifecycleError("preflight push argv is not an exact normal branch push")
     if push_argv[2].startswith('-') or (expected_remote is not None and push_argv[2] != expected_remote):
         raise LifecycleError('preflight selected a different remote than the registered integration contract')
+    if expected_head is not None and (head(repo) != expected_head or current_branch(repo) != expected_branch):
+        raise LifecycleError('HEAD or branch changed before pushing the revised finish')
     subprocess.run(push_argv, cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
     remote_tip = git(repo, "ls-remote", push_argv[2], "refs/heads/" + expected_branch) or ""
-    if not remote_tip.startswith(head(repo) + "\t"): raise LifecycleError("push did not verify remote branch tip")
+    if expected_head is not None and head(repo) != expected_head:
+        raise LifecycleError('HEAD changed while pushing the revised finish')
+    if not remote_tip.startswith((expected_head or head(repo)) + "\t"): raise LifecycleError("push did not verify remote branch tip")
     return {"decision": decision["decision"], "reason": decision.get("reason"), "argv": push_argv}
 
 
@@ -328,6 +332,25 @@ def _index_protection(repo):
         raise LifecycleError('index assume-unchanged/skip-worktree flags require explicit owner resolution')
     if git(repo, 'ls-files', '--unmerged'):
         raise LifecycleError('unmerged index must be resolved in its existing worktree')
+
+
+def _operation_check(target, operation='adoption'):
+    _index_protection(target)
+    for name in ('MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD',
+                 'rebase-merge', 'rebase-apply', 'sequencer', 'BISECT_START', 'BISECT_LOG', 'index.lock'):
+        path = Path(git(target, 'rev-parse', '--path-format=absolute', '--git-path', name))
+        if path.exists() or path.is_symlink():
+            raise LifecycleError('existing Git operation must be resolved before ' + operation + ': ' + name)
+
+
+def _finish_identity(repo, task_id, branch):
+    if (branch_for_task(repo, task_id) != branch or top(repo) != task_worktree(repo, branch)
+            or current_branch(repo) != branch or bound_task(repo) != task_id):
+        raise LifecycleError('finish must run in the bound task worktree')
+    admin = Path(git(repo, 'rev-parse', '--absolute-git-dir')).resolve()
+    return {'task': task_id, 'branch': branch, 'worktree': str(repo), 'git_dir': str(admin),
+            'worktree_id': [repo.stat().st_dev, repo.stat().st_ino],
+            'git_dir_id': [admin.stat().st_dev, admin.stat().st_ino]}
 
 
 def _sync_file(path):
@@ -455,24 +478,84 @@ def _primary_workspace_data(repo: Path, task: dict, dirty: dict[str, str]) -> se
     return {name for name, kind in dirty.items() if kind == '!!' or baseline.get(name) == kind}
 
 
-def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = 'workspace lifecycle completion', users_released: bool = False, revision_evidence: str | None = None, preservation_evidence: str | None = None) -> dict:
+def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = 'workspace lifecycle completion', users_released: bool = False, revision_evidence: str | None = None, preservation_evidence: str | None = None, revision_head: str | None = None) -> dict:
     repo = Path(repo).resolve(); plan = _plan(Path(plan_path)); task_id = task
     reclaim_evidence = _durable_preservation_evidence(preservation_evidence)
     if not isinstance(result_ref, str) or not result_ref.strip():
         raise LifecycleError('durable result reference is required')
     if result_ref.startswith(str(repo)):
         raise LifecycleError('result must be preserved outside the retiring workspace')
+    if revision_evidence is not None and (not isinstance(revision_evidence, str) or not revision_evidence.strip()):
+        raise LifecycleError('finish revision requires nonempty durable evidence')
+    if revision_head is not None and (not revision_evidence or not isinstance(revision_head, str)
+                                     or not revision_head or any(c not in '0123456789abcdef' for c in revision_head)):
+        raise LifecycleError('HEAD revision requires a full commit OID and durable evidence')
     plan_digest = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
     with _lease(repo, task_id, allow_use=True):
         with locked_state(repo) as (directory, state):
             task = _task(state, task_id); branch = branch_for_task(repo, task_id)
-            if top(repo) != task_worktree(repo, branch) or current_branch(repo) != branch or bound_task(repo) != task_id:
-                raise LifecycleError('finish must run in the bound task worktree')
+            identity = _finish_identity(repo, task_id, branch)
             if task.get('hold'):
                 raise LifecycleError('task is held: ' + json.dumps(task['hold']))
             _index_protection(repo)
             intent = state['intents'].get(task_id)
-            if intent and intent['kind'] != 'finish':
+            if intent and intent.get('identity', identity) != identity:
+                raise LifecycleError('finish intent task or worktree identity changed')
+            accepted_revision_retry = False
+            if revision_head is not None:
+                if not intent or intent['kind'] != 'finish':
+                    # Acceptance may have been saved before an interrupted
+                    # integration. Repeating the recovery arguments still joins
+                    # that ordinary integration; it never starts a new revision.
+                    receipts = task.get('finish_receipts', [])
+                    previous = receipts[-1] if receipts else {}
+                    if (previous.get('new_initial_head') != revision_head
+                            or previous.get('revision_evidence') != revision_evidence
+                            or previous.get('revised_plan_digest') != plan_digest
+                            or previous.get('result_ref') != result_ref
+                            or previous.get('revision_identity') != identity
+                            or task.get('acceptance', {}).get('commit') != head(repo)):
+                        raise LifecycleError('HEAD revision requires a pending finish intent or its exact accepted retry')
+                    accepted_revision_retry = True
+                elif intent.get('head_revision'):
+                    revision = intent['head_revision']
+                    if (revision['head'] != revision_head or revision['evidence'] != revision_evidence
+                            or intent['plan_digest'] != plan_digest or intent['result_ref'] != result_ref):
+                        raise LifecycleError('retry HEAD revision with the same head, evidence, plan and result')
+                    _operation_check(repo, 'finish HEAD revision')
+                else:
+                    if intent['actions'] != {} or 'committed' in intent or 'commit_tree' in intent:
+                        raise LifecycleError('HEAD revision requires a finish intent with no started effects')
+                    if intent['result_ref'] != result_ref:
+                        raise LifecycleError('HEAD revision requires the same durable result reference')
+                    old_head = intent['initial_head']
+                    if len(revision_head) != len(old_head) or revision_head == old_head or head(repo) != revision_head:
+                        raise LifecycleError('HEAD changed or does not match the requested revision head')
+                    _operation_check(repo, 'finish HEAD revision')
+                    if git(repo, 'merge-base', '--is-ancestor', old_head, revision_head, optional=True) is None:
+                        raise LifecycleError('revision head must descend from the original finish HEAD')
+                    # The lifecycle lock cannot serialize native Git writers. Pin
+                    # the caller-reviewed OID and compare again before replacement;
+                    # a later move is refused by the ordinary pinned-HEAD check.
+                    if _finish_identity(repo, task_id, branch) != identity or head(repo) != revision_head:
+                        raise LifecycleError('HEAD or identity changed during finish revision')
+                    _operation_check(repo, 'finish HEAD revision')
+                    revised_at = _now()
+                    replacement = {'kind': 'finish', 'initial_head': revision_head,
+                                   'plan_digest': plan_digest, 'result_ref': result_ref,
+                                   'actions': {}, 'at': revised_at, 'identity': identity,
+                                   'head_revision': {'head': revision_head, 'evidence': revision_evidence}}
+                    task.setdefault('finish_receipts', []).append({**intent,
+                        'revision_evidence': revision_evidence, 'revised_at': revised_at,
+                        'old_initial_head': old_head, 'new_initial_head': revision_head,
+                        'revised_plan_digest': plan_digest, 'revision_identity': identity})
+                    state['intents'][task_id] = intent = replacement
+                    save_state(directory, state)
+            elif intent and intent.get('head_revision') and revision_evidence is not None:
+                if (intent['head_revision']['evidence'] != revision_evidence
+                        or intent['plan_digest'] != plan_digest or intent['result_ref'] != result_ref):
+                    raise LifecycleError('retry HEAD revision with the same head, evidence, plan and result')
+            if accepted_revision_retry or (intent and intent['kind'] != 'finish'):
                 # A preserved integration operation belongs to _integrate; do
                 # not replace it or recommit the accepted source on resume.
                 accepted = task.get('acceptance')
@@ -505,9 +588,13 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     intent = None
                 if not intent:
                     intent = {'kind': 'finish', 'initial_head': head(repo), 'plan_digest': plan_digest,
-                              'result_ref': result_ref, 'actions': {}, 'at': _now()}
+                              'result_ref': result_ref, 'actions': {}, 'at': _now(), 'identity': identity}
                     state['intents'][task_id] = intent
                     save_state(directory, state)
+                if intent.get('head_revision'):
+                    if _finish_identity(repo, task_id, branch) != identity:
+                        raise LifecycleError('finish identity changed after HEAD revision')
+                    _operation_check(repo, 'finish HEAD revision')
                 if head(repo) not in {intent['initial_head'], intent.get('committed')}:
                     # Crash after commit but before receipt: prove the exact
                     # planned tree and sole parent from native immutable objects.
@@ -536,9 +623,18 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 uncovered = set(dirty) - set(all_paths)
                 # Safe owned actions run first. Remaining dirt is never waived
                 # merely because it existed before this session.
+                validated_head = head(repo)
+                if intent.get('head_revision') and validated_head not in {intent['initial_head'], intent.get('committed')}:
+                    raise LifecycleError('HEAD changed before finish validation')
                 precommit = _validate(repo, task['validation'])
+                if intent.get('head_revision'):
+                    if _finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head:
+                        raise LifecycleError('HEAD or identity changed during finish validation')
+                    _operation_check(repo, 'finish HEAD revision')
                 _resolve_files(repo, plan, intent, directory, state)
                 _checked_paths(repo, plan.get('commit', []), need='source', owner=task_id)
+                if intent.get('head_revision') and (_finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head):
+                    raise LifecycleError('HEAD or identity changed during finish preservation')
                 if _index_paths(repo) - set(commit_paths):
                     raise LifecycleError('validation or cleanup staged unrelated changes')
                 if commit_paths and not intent.get('committed'):
@@ -547,9 +643,21 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                         raise LifecycleError('index changed before task commit')
                     if _index_paths(repo):
                         intent['commit_tree'] = git(repo, 'write-tree'); save_state(directory, state)
+                        if intent.get('head_revision') and (_finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head):
+                            raise LifecycleError('HEAD or identity changed before finish commit')
                         git(repo, 'commit', '-m', message)
-                        intent['committed'] = head(repo); save_state(directory, state)
+                        committed_head = head(repo)
+                        if intent.get('head_revision'):
+                            parents = (git(repo, 'rev-list', '--parents', '-n', '1', committed_head) or '').split()
+                            if parents[1:] != [validated_head] or git(repo, 'rev-parse', committed_head + '^{tree}') != intent['commit_tree']:
+                                raise LifecycleError('finish commit identity changed during HEAD revision')
+                        intent['committed'] = committed_head; save_state(directory, state)
                 evidence = _validate(repo, task['validation'])
+                expected_finish_head = intent.get('committed') or intent['initial_head']
+                if intent.get('head_revision'):
+                    if _finish_identity(repo, task_id, branch) != identity or head(repo) != expected_finish_head:
+                        raise LifecycleError('HEAD or identity changed during finish validation')
+                    _operation_check(repo, 'finish HEAD revision')
                 final_dirty = _snapshot(repo)
                 if task.get('owner_receipts'):
                     from .producers import owned_dirty_paths
@@ -563,7 +671,12 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     state['intents'].pop(task_id, None); save_state(directory, state)
                     return {'task': task_id, 'completion': 'exception', 'dirty': sorted(final_dirty)}
                 commit = head(repo)
-                pushed = _push(repo, task['preflight'], branch, task['remote'])
+                if intent.get('head_revision'):
+                    if _finish_identity(repo, task_id, branch) != identity or commit != expected_finish_head:
+                        raise LifecycleError('HEAD or identity changed before finish push')
+                    pushed = _push(repo, task['preflight'], branch, task['remote'], expected_head=commit)
+                else:
+                    pushed = _push(repo, task['preflight'], branch, task['remote'])
                 task.pop('exception', None)
                 task['acceptance'] = {'commit': commit, 'result_ref': result_ref,
                                       'validation': {'precommit': precommit, 'postcommit': evidence},
@@ -1013,6 +1126,8 @@ def retire(repo, *, task: str, result_ref: str, users_released: bool = False, re
                         ensure_ascii=True).encode()).hexdigest(),
                     'payload_progress': reclamation.capture(recovery, content_manifest, request['recovery_identity']),
                     'admin_progress': reclamation.capture(archive, admin_manifest, request['admin_identity'])}
+                if item.get('finish_receipts'):
+                    receipt['finish_receipts'] = item['finish_receipts']
                 if request.get('preservation_evidence'):
                     receipt['preservation_evidence'] = request['preservation_evidence']
                     receipt['reclaim_phase'] = 'requested'

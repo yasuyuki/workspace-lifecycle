@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 from workspace_lifecycle.errors import LifecycleError
 from workspace_lifecycle import leases
-from workspace_lifecycle.service import begin, finish, hold
+from workspace_lifecycle.service import begin, finish, hold, reclaim, retire
+from workspace_lifecycle.state import locked_state, save_state
 
 
 def git(cwd, *args):
@@ -303,3 +304,402 @@ finish(repo, task=os.environ['WORKSPACE_LIFECYCLE_TASK'], plan_path=str(plan),
         result = finish(self.topic, task=task, plan_path=str(plan), result_ref='issue/dirty',
                         revision_evidence='ownership investigation confirms task-authored source')
         self.assertTrue(result['accepted'])
+
+
+    def _stale_finish_intent(self, task='stale'):
+        gate = self.base / (task + '-validation-gate')
+        validation = [sys.executable, '-c',
+                      'import pathlib,sys;sys.exit(not pathlib.Path(' + repr(str(gate)) + ').exists())']
+        self.start(task, validation=validation)
+        original = self.plan(task + '-original.json', {'commit': []})
+        with self.assertRaises(LifecycleError):
+            finish(self.topic, task=task, plan_path=str(original), result_ref='issue/' + task)
+        return original, gate
+
+    def _owner_commit(self, name, value):
+        (self.topic / name).write_text(value)
+        git(self.topic, 'add', name)
+        git(self.topic, 'commit', '-m', 'owner ' + name)
+        return git(self.topic, 'rev-parse', 'HEAD')
+
+    def _intent(self, task):
+        with locked_state(self.topic) as (_, state):
+            return json.loads(json.dumps(state['intents'][task]))
+
+    def test_stale_finish_head_revision_recovers_and_preserves_receipt(self):
+        task = 'stale-recovery'
+        original, gate = self._stale_finish_intent(task)
+        old_intent = self._intent(task)
+        self._owner_commit('owner-b.txt', 'B\n')
+        revised_head = self._owner_commit('owner-c.txt', 'C\n')
+        revised = self.plan(task + '-revised.json', {})
+        gate.write_text('open\n')
+
+        result = finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                        revision_head=revised_head,
+                        revision_evidence='issue review records the owner commits B through C')
+
+        self.assertTrue(result['accepted'])
+        self.assertEqual(result['commit'], revised_head)
+        self.assertEqual(result['integration']['destination'], 'trunk')
+        self.assertEqual((self.root / 'owner-c.txt').read_text(), 'C\n')
+        with locked_state(self.topic) as (_, state):
+            item = state['tasks'][task]
+            replacement = item['finish_receipts'][-1]
+            intent = state['intents'].get(task)
+        self.assertIsNone(intent)
+        self.assertEqual(replacement['initial_head'], old_intent['initial_head'])
+        self.assertEqual(replacement['old_initial_head'], old_intent['initial_head'])
+        self.assertEqual(replacement['new_initial_head'], revised_head)
+        self.assertEqual(replacement['revision_evidence'], 'issue review records the owner commits B through C')
+        self.assertEqual(replacement['identity'], old_intent['identity'])
+        self.assertIn('revised_at', replacement)
+        self.assertIn('revised_plan_digest', replacement)
+        self.assertIn('revision_identity', replacement)
+        self.assertEqual(replacement['revision_identity']['task'], task)
+        self.assertEqual(replacement['revision_identity']['branch'], 'topic/' + task)
+        self.assertNotEqual(replacement['plan_digest'], replacement['revised_plan_digest'])
+
+        retired = retire(self.root, task=task, result_ref='issue/' + task, users_released=True)
+        self.assertTrue(retired['retired'])
+        self.assertEqual(retired['receipt']['finish_receipts'][-1], replacement)
+        reclaimed = reclaim(self.root, task=task, result_ref='issue/' + task,
+                            preservation_evidence='issue review preserves the retired receipt')
+        self.assertTrue(reclaimed['reclaimed'])
+        self.assertEqual(reclaimed['receipt']['finish_receipts'][-1], replacement)
+
+
+    def test_stale_finish_head_revision_accepts_legacy_intent_without_identity(self):
+        task = 'stale-legacy'
+        original, gate = self._stale_finish_intent(task)
+        with locked_state(self.topic) as (directory, state):
+            original_digest = state['intents'][task]['plan_digest']
+            state['intents'][task].pop('identity')
+            save_state(directory, state)
+        self._owner_commit('owner-b.txt', 'B\n')
+        revised_head = self._owner_commit('owner-c.txt', 'C\n')
+        gate.write_text('open\n')
+
+        result = finish(self.topic, task=task, plan_path=str(original), result_ref='issue/' + task,
+                        revision_head=revised_head,
+                        revision_evidence='issue review records the exact descendant head')
+
+        self.assertTrue(result['accepted'])
+        self.assertEqual(result['commit'], revised_head)
+        with locked_state(self.topic) as (_, state):
+            receipt = state['tasks'][task]['finish_receipts'][-1]
+        self.assertNotIn('identity', receipt)
+        self.assertEqual(receipt['plan_digest'], original_digest)
+        self.assertEqual(receipt['revised_plan_digest'], original_digest)
+        self.assertEqual(receipt['revision_identity']['task'], task)
+        self.assertEqual(receipt['revision_identity']['branch'], 'topic/' + task)
+
+    def test_stale_finish_head_revision_rejects_started_effects_and_identity_changes(self):
+        task = 'stale-guards'
+        _, _ = self._stale_finish_intent(task)
+        revised_head = self._owner_commit('owner.txt', 'owner\n')
+        revised = self.plan(task + '-revised.json', {})
+        evidence = 'issue review records the exact descendant head'
+
+        with locked_state(self.topic) as (directory, state):
+            state['intents'][task]['actions'] = {'owned.txt': {'phase': 'resolved'}}
+            save_state(directory, state)
+        with self.assertRaisesRegex(LifecycleError, 'no started effects'):
+            finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                   revision_head=revised_head, revision_evidence=evidence)
+        with locked_state(self.topic) as (directory, state):
+            state['intents'][task]['actions'] = {}
+            state['intents'][task]['committed'] = None
+            save_state(directory, state)
+        with self.assertRaisesRegex(LifecycleError, 'no started effects'):
+            finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                   revision_head=revised_head, revision_evidence=evidence)
+        with locked_state(self.topic) as (directory, state):
+            state['intents'][task].pop('committed')
+            state['intents'][task]['commit_tree'] = None
+            save_state(directory, state)
+        with self.assertRaisesRegex(LifecycleError, 'no started effects'):
+            finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                   revision_head=revised_head, revision_evidence=evidence)
+        with locked_state(self.topic) as (_, state):
+            original_identity = json.loads(json.dumps(state['intents'][task]['identity']))
+        for field, value in (('task', 'other-task'), ('branch', 'topic/other'),
+                             ('worktree', str(self.base / 'other-worktree'))):
+            with self.subTest(identity_field=field):
+                with locked_state(self.topic) as (directory, state):
+                    state['intents'][task].pop('commit_tree', None)
+                    state['intents'][task]['identity'] = dict(original_identity, **{field: value})
+                    save_state(directory, state)
+                with self.assertRaisesRegex(LifecycleError, 'identity changed'):
+                    finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                           revision_head=revised_head, revision_evidence=evidence)
+
+    def test_stale_finish_head_revision_requires_current_descendant_and_durable_evidence(self):
+        task = 'stale-inputs'
+        _, _ = self._stale_finish_intent(task)
+        revised_head = self._owner_commit('owner.txt', 'owner\n')
+        revised = self.plan(task + '-revised.json', {})
+        with self.assertRaises(LifecycleError):
+            finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                   revision_head=revised_head, revision_evidence=' ')
+        with self.assertRaises(LifecycleError):
+            finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                   revision_head=revised_head)
+        with self.assertRaises(LifecycleError):
+            finish(self.topic, task=task, plan_path=str(revised), result_ref='other-result',
+                   revision_head=revised_head, revision_evidence='issue review records the exact descendant head')
+
+        old_head = self._intent(task)['initial_head']
+        git(self.root, 'checkout', '--orphan', 'unrelated-' + task)
+        (self.root / 'unrelated.txt').write_text('unrelated\n')
+        git(self.root, 'add', '-A')
+        git(self.root, 'commit', '-m', 'unrelated owner history')
+        unrelated = git(self.root, 'rev-parse', 'HEAD')
+        git(self.topic, 'reset', '--hard', unrelated)
+        with self.assertRaisesRegex(LifecycleError, 'descend'):
+            finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                   revision_head=unrelated, revision_evidence='issue review records an unrelated head')
+        self.assertNotEqual(old_head, unrelated)
+
+    def test_stale_finish_head_revision_refuses_active_operations_and_unmerged_index(self):
+        task = 'stale-operations'
+        _, _ = self._stale_finish_intent(task)
+        revised_head = self._owner_commit('owner.txt', 'owner\n')
+        revised = self.plan(task + '-revised.json', {})
+        evidence = 'issue review records the exact descendant head'
+        for marker in ('MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'rebase-merge'):
+            path = Path(git(self.topic, 'rev-parse', '--path-format=absolute', '--git-path', marker))
+            if marker == 'rebase-merge':
+                path.mkdir()
+            else:
+                path.write_text(revised_head + '\n')
+            with self.assertRaisesRegex(LifecycleError, 'existing Git operation'):
+                finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                       revision_head=revised_head, revision_evidence=evidence)
+            if path.is_dir():
+                path.rmdir()
+            else:
+                path.unlink()
+
+        (self.root / 'base.txt').write_text('root\n')
+        git(self.root, 'add', 'base.txt')
+        git(self.root, 'commit', '-m', 'root conflicts with topic')
+        (self.topic / 'base.txt').write_text('topic\n')
+        git(self.topic, 'add', 'base.txt')
+        git(self.topic, 'commit', '-m', 'topic conflicts with root')
+        merge = subprocess.run(['git', '-C', str(self.topic), 'merge', 'trunk'], text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertNotEqual(merge.returncode, 0)
+        with self.assertRaisesRegex(LifecycleError, 'unmerged'):
+            finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                   revision_head=revised_head, revision_evidence=evidence)
+        git(self.topic, 'merge', '--abort')
+
+    def test_stale_finish_head_revision_refuses_race_and_retries_exact_recovery(self):
+        task = 'stale-race'
+        _, gate = self._stale_finish_intent(task)
+        initial_head = self._intent(task)['initial_head']
+        self._owner_commit('owner-b.txt', 'B\n')
+        revised_head = self._owner_commit('owner-c.txt', 'C\n')
+        revised = self.plan(task + '-revised.json', {})
+        evidence = 'issue review records the exact descendant head'
+        gate.write_text('open\n')
+        import workspace_lifecycle.service as service
+        actual, raced = service.git, {'value': False}
+
+        def move_after_ancestry(repo, *args, **kwargs):
+            outcome = actual(repo, *args, **kwargs)
+            if args[:3] == ('merge-base', '--is-ancestor', initial_head) and not raced['value']:
+                raced['value'] = True
+                (self.topic / 'raced.txt').write_text('race\n')
+                git(self.topic, 'add', 'raced.txt')
+                git(self.topic, 'commit', '-m', 'owner wins revision race')
+            return outcome
+
+        with patch('workspace_lifecycle.service.git', side_effect=move_after_ancestry):
+            with self.assertRaisesRegex(LifecycleError, 'HEAD or identity changed'):
+                finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                       revision_head=revised_head, revision_evidence=evidence)
+        self.assertTrue(raced['value'])
+        intent = self._intent(task)
+        self.assertNotIn('head_revision', intent)
+        self.assertEqual(intent['initial_head'], initial_head)
+
+        current = git(self.topic, 'rev-parse', 'HEAD')
+        result = finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                        revision_head=current, revision_evidence=evidence)
+        self.assertTrue(result['accepted'])
+
+
+
+    def test_stale_finish_head_revision_rejects_late_validation_race(self):
+        task = 'stale-late-race'
+        _, gate = self._stale_finish_intent(task)
+        self._owner_commit('owner-b.txt', 'B\n')
+        revised_head = self._owner_commit('owner-c.txt', 'C\n')
+        revised = self.plan(task + '-revised.json', {})
+        gate.write_text('open\n')
+        import workspace_lifecycle.service as service
+        actual, validations = service._validate, {'count': 0}
+
+        def move_after_postvalidation(repo, argv):
+            outcome = actual(repo, argv)
+            validations['count'] += 1
+            if validations['count'] == 2:
+                self._owner_commit('owner-d.txt', 'D\n')
+            return outcome
+
+        with patch('workspace_lifecycle.service._validate', side_effect=move_after_postvalidation):
+            with self.assertRaises(LifecycleError):
+                finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                       revision_head=revised_head,
+                       revision_evidence='issue review records the exact descendant head')
+        self.assertEqual(validations['count'], 2)
+        with locked_state(self.topic) as (_, state):
+            self.assertNotIn('acceptance', state['tasks'][task])
+            self.assertEqual(state['intents'][task]['initial_head'], revised_head)
+        self.assertFalse((self.root / 'owner-d.txt').exists())
+
+
+    def test_stale_finish_head_revision_rejects_owner_commit_before_lifecycle_commit(self):
+        task = 'stale-commit-race'
+        _, gate = self._stale_finish_intent(task)
+        self._owner_commit('owner-b.txt', 'B\n')
+        revised_head = self._owner_commit('owner-c.txt', 'C\n')
+        (self.topic / 'owned.txt').write_text('owned\n')
+        revised = self.plan(task + '-revised.json', {'commit': [self.entry(task, 'owned.txt')]})
+        gate.write_text('open\n')
+        import workspace_lifecycle.service as service
+        actual, raced = service.git, {'value': False}
+
+        def owner_before_lifecycle_commit(repo, *args, **kwargs):
+            if args[:1] == ('commit',) and not raced['value']:
+                raced['value'] = True
+                (self.topic / 'owner-d.txt').write_text('D\n')
+                git(self.topic, 'add', 'owner-d.txt')
+                git(self.topic, 'commit', '--only', '-m', 'owner commits D first', 'owner-d.txt')
+            return actual(repo, *args, **kwargs)
+
+        with patch('workspace_lifecycle.service.git', side_effect=owner_before_lifecycle_commit):
+            with self.assertRaises(LifecycleError):
+                finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                       revision_head=revised_head,
+                       revision_evidence='issue review records the exact descendant head')
+        self.assertTrue(raced['value'])
+        with locked_state(self.topic) as (_, state):
+            item = state['tasks'][task]
+            intent = state['intents'][task]
+            self.assertNotIn('acceptance', item)
+            self.assertEqual(len(item['finish_receipts']), 1)
+            self.assertEqual(intent['initial_head'], revised_head)
+            self.assertEqual(intent['head_revision']['head'], revised_head)
+            self.assertNotIn('committed', intent)
+        self.assertFalse((self.root / 'owner-d.txt').exists())
+        self.assertFalse((self.root / 'owned.txt').exists())
+
+
+    def test_stale_finish_head_revision_rejects_commit_receipt_race(self):
+        task = 'stale-receipt-race'
+        _, gate = self._stale_finish_intent(task)
+        self._owner_commit('owner-b.txt', 'B\n')
+        revised_head = self._owner_commit('owner-c.txt', 'C\n')
+        (self.topic / 'owned.txt').write_text('owned\n')
+        revised = self.plan(task + '-revised.json', {'commit': [self.entry(task, 'owned.txt')]})
+        gate.write_text('open\n')
+        import workspace_lifecycle.service as service
+        actual, raced = service.git, {'value': False}
+
+        def owner_after_commit_verification(repo, *args, **kwargs):
+            outcome = actual(repo, *args, **kwargs)
+            if (args[:1] == ('rev-parse',) and args[1].endswith('^{tree}')
+                    and not raced['value']):
+                raced['value'] = True
+                (self.topic / 'owner-d.txt').write_text('D\n')
+                git(self.topic, 'add', 'owner-d.txt')
+                git(self.topic, 'commit', '-m', 'owner commits D after receipt verification')
+            return outcome
+
+        with patch('workspace_lifecycle.service.git', side_effect=owner_after_commit_verification):
+            with self.assertRaises(LifecycleError):
+                finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                       revision_head=revised_head,
+                       revision_evidence='issue review records the exact descendant head')
+        self.assertTrue(raced['value'])
+        with locked_state(self.topic) as (_, state):
+            item = state['tasks'][task]
+            intent = state['intents'][task]
+            self.assertNotIn('acceptance', item)
+            self.assertEqual(len(item['finish_receipts']), 1)
+            self.assertEqual(intent['initial_head'], revised_head)
+            self.assertEqual(intent['head_revision']['head'], revised_head)
+            self.assertEqual(intent['committed'], git(self.topic, 'rev-parse', 'HEAD~1'))
+        self.assertFalse((self.root / 'owner-d.txt').exists())
+        self.assertFalse((self.root / 'owned.txt').exists())
+
+    def test_stale_finish_head_revision_retries_interrupted_integration(self):
+        task = 'stale-integration'
+        _, gate = self._stale_finish_intent(task)
+        self._owner_commit('owner-b.txt', 'B\n')
+        revised_head = self._owner_commit('owner-c.txt', 'C\n')
+        revised = self.plan(task + '-revised.json', {})
+        evidence = 'issue review records the exact descendant head'
+        gate.write_text('open\n')
+        import workspace_lifecycle.service as service
+        actual, interrupted = service._integrate, {'value': False}
+
+        def fail_once(*args, **kwargs):
+            if not interrupted['value']:
+                interrupted['value'] = True
+                raise LifecycleError('simulated interruption after acceptance')
+            return actual(*args, **kwargs)
+
+        with patch('workspace_lifecycle.service._integrate', side_effect=fail_once):
+            with self.assertRaisesRegex(LifecycleError, 'after acceptance'):
+                finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                       revision_head=revised_head, revision_evidence=evidence)
+        with locked_state(self.topic) as (_, state):
+            self.assertNotIn(task, state['intents'])
+            receipt_count = len(state['tasks'][task]['finish_receipts'])
+            receipt = state['tasks'][task]['finish_receipts'][-1]
+            self.assertEqual(state['tasks'][task]['acceptance']['commit'], revised_head)
+        result = finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                        revision_head=revised_head, revision_evidence=evidence)
+        self.assertTrue(result['accepted'])
+        self.assertEqual(result['integration']['destination'], 'trunk')
+        with locked_state(self.topic) as (_, state):
+            self.assertEqual(len(state['tasks'][task]['finish_receipts']), receipt_count)
+            self.assertEqual(state['tasks'][task]['finish_receipts'][-1], receipt)
+
+    def test_stale_finish_head_revision_retries_and_resumes_after_own_commit(self):
+        task = 'stale-resume'
+        _, gate = self._stale_finish_intent(task)
+        self._owner_commit('owner-b.txt', 'B\n')
+        revised_head = self._owner_commit('owner-c.txt', 'C\n')
+        (self.topic / 'owned.txt').write_text('owned\n')
+        revised = self.plan(task + '-revised.json', {'commit': [self.entry(task, 'owned.txt')]})
+        evidence = 'issue review records the exact descendant head'
+        gate.write_text('open\n')
+        import workspace_lifecycle.service as service
+        actual, interrupted = service.git, {'value': False}
+
+        def crash_after_own_commit(repo, *args, **kwargs):
+            outcome = actual(repo, *args, **kwargs)
+            if args[:1] == ('commit',) and not interrupted['value']:
+                interrupted['value'] = True
+                raise KeyboardInterrupt('crash after lifecycle commit')
+            return outcome
+
+        with patch('workspace_lifecycle.service.git', side_effect=crash_after_own_commit):
+            with self.assertRaises(KeyboardInterrupt):
+                finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                       revision_head=revised_head, revision_evidence=evidence)
+        with self.assertRaises(LifecycleError):
+            finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                   revision_head=git(self.topic, 'rev-parse', 'HEAD'), revision_evidence=evidence)
+        with self.assertRaises(LifecycleError):
+            finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                   revision_head=revised_head, revision_evidence='different evidence')
+        result = finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
+                        revision_head=revised_head, revision_evidence=evidence)
+        self.assertTrue(result['accepted'])
+        self.assertEqual(git(self.topic, 'show', 'HEAD:owned.txt'), 'owned')
