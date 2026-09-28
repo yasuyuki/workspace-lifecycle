@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.4.3` is not published to PyPI. It imports no agent-rules
+directory; version `0.4.4` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
@@ -96,7 +96,15 @@ or failed validation remains a refusal to resolve in the existing task. Retry th
 same plan after repairing the operation. If the ownership review or required
 cleanup changes, `--revise-plan-evidence` explicitly records that decision and
 retains completed effects; it cannot replace an unresolved archive/restore or a
-changed commit identity. No state editing or discard is needed.
+changed commit identity. For an untouched pending finish whose owner added
+commits, supply `--revise-plan-head` with the exact descendant commit OID and
+`--revise-plan-evidence` with the durable review. The old intent and old/new
+HEADs remain in the task's finish receipts, including after retirement. The
+review can also replace the plan; the result reference stays the same. Once
+this revision is saved, retries must use that HEAD, evidence and reviewed plan.
+Active Git operations, changed task/worktree identity, preservation actions,
+and lifecycle-generated commits prevent this recovery. No state editing or
+discard is needed.
 
 Retirement requires the exact accepted result, completed integration, explicit
 external-user release, unchanged worktree identity and accepted HEAD, and an
@@ -235,5 +243,5 @@ Version 0.4.2 lets Windows descendants safely share one supervised task use.
 The owner remains responsible for normal receipt cleanup; abnormal recovery
 still requires explicit review.
 
-Version 0.4.3 lets an adopted primary checkout finish while it keeps ignored
+Version 0.4.4 lets an adopted primary checkout finish while it keeps ignored
 workspace data and unchanged baseline entries.
