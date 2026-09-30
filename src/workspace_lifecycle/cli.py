@@ -50,6 +50,9 @@ def parser():
     update.add_argument('--expected-preflight-json', type=_json_list, required=True)
     update.add_argument('--preflight-json', type=_json_list, required=True)
     update.add_argument('--evidence', required=True)
+    sync = commands.add_parser('sync', help='resume the same task by an exact same-name remote merge; does not accept or integrate work')
+    for name in ('task', 'expected-head', 'remote-head', 'evidence'):
+        sync.add_argument('--' + name, required=True)
     hold = commands.add_parser("hold"); hold.add_argument("--task", required=True); hold.add_argument("--reason", required=True); hold.add_argument("--next-action", required=True)
     resume = commands.add_parser('release-hold', help='resolve an explicit hold using a decision reference')
     resume.add_argument('--task', required=True); resume.add_argument('--evidence', required=True)
@@ -78,6 +81,9 @@ def main(argv=None):
                 evidence=args.evidence, parent=args.parent, dependencies=args.dependency,
                 validation=args.validation_json, preflight=args.preflight_json,
                 hold_reason=args.hold_reason, next_action=args.next_action)
+        elif args.command == 'sync':
+            result = service.synchronize(args.repo, task=args.task, expected_head=args.expected_head,
+                                         remote_head=args.remote_head, evidence=args.evidence)
         elif args.command == "status": result = service.status(args.repo, args.task)
         elif args.command == 'update-preflight':
             result = service.update_preflight(args.repo, task=args.task,
