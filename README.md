@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.4.4` is not published to PyPI. It imports no agent-rules
+directory; version `0.4.5` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
@@ -105,6 +105,49 @@ this revision is saved, retries must use that HEAD, evidence and reviewed plan.
 Active Git operations, changed task/worktree identity, preservation actions,
 and lifecycle-generated commits prevent this recovery. No state editing or
 discard is needed.
+
+### Continuing the same remote topic
+
+A task denotes one deliverable, not one agent session. Resume its existing
+branch and worktree. Across clones and hosts, the request must identify one
+current update owner for that same remote topic; handing over ownership requires
+quiescing the previous writer and recording the handover in that request. Local
+leases serialize lifecycle users of one clone, not writers on other hosts.
+Separate only independent deliverables that actually need concurrent updates.
+
+`sync --task TASK --expected-head LOCAL_OID --remote-head REMOTE_OID --evidence REF`
+repairs the existing task using its registered remote and same-name branch.
+Both OIDs are full commit IDs; the durable evidence identifies the continuing
+request, update owner and reviewed merge. Inspect the current local/remote OIDs
+and dirty ownership before invoking it. Equal or locally ahead histories stay
+unchanged; lagging history fast-forwards; divergence uses an ordinary merge.
+Synchronization does not push, accept a task, or integrate it into its parent.
+Use normal push or the existing `finish` afterward, as required by the task.
+Git 2.38+ is required for synchronization's native `merge-tree` contract.
+
+A manually started merge can be adopted when its HEAD and MERGE_HEAD are those
+exact local/source OIDs. The source must still be preserved in the actual
+same-name remote, including when that remote advanced after the merge began.
+The native expected merge tree and conflict paths are pinned: resolve conflicts
+in the same checkout and stage only those resolutions, then repeat the identical
+sync arguments. Unrelated dirty/staged paths, nonconflict changes, wrong sources,
+rewritten remote history, other operations and changing identities are refused.
+Completed or interrupted merges retain their exact parents/tree and are resumed
+without creating another merge commit. If the remote advances during validation,
+retry the pinned synchronization, then synchronize its result with the new tip.
+Native writers must remain quiescent during these operations.
+
+After `finish` commits but its push is rejected, use this same task's `sync`,
+then repeat the same finish plan and result reference. The original finish
+commit, plan and completed preservation actions remain intact. Revalidation
+covers the new merged HEAD; already committed source entries are not committed
+again even if a reviewed conflict resolution changed their contents. A push with
+an uncertain response or an immediately advanced remote succeeds only after
+Git proves that remote preserves the exact validated commit. The third-party
+remote tip is recorded as observed, never substituted for the accepted commit.
+Integration uses the same synchronization operation to resume its own target;
+parent acceptance changes only after the complete child/parent validation and
+normal push. Conflicts and interruptions remain in the existing task.
 
 Retirement requires the exact accepted result, completed integration, explicit
 external-user release, unchanged worktree identity and accepted HEAD, and an

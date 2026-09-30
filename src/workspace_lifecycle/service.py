@@ -225,6 +225,7 @@ def _validate(repo: Path, argv: list[str]) -> dict:
 
 
 def _push(repo: Path, preflight: list[str], expected_branch: str, expected_remote=None, expected_head=None) -> dict:
+    remote_url = git(repo, 'remote', 'get-url', expected_remote) if expected_remote else None
     argv = [str(repo) if value == "{repo}" else value for value in preflight]
     if "{repo}" not in preflight: raise LifecycleError("preflight argv must contain literal {repo}")
     result = subprocess.run(argv, cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -239,12 +240,30 @@ def _push(repo: Path, preflight: list[str], expected_branch: str, expected_remot
         raise LifecycleError('preflight selected a different remote than the registered integration contract')
     if expected_head is not None and (head(repo) != expected_head or current_branch(repo) != expected_branch):
         raise LifecycleError('HEAD or branch changed before pushing the revised finish')
-    subprocess.run(push_argv, cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
-    remote_tip = git(repo, "ls-remote", push_argv[2], "refs/heads/" + expected_branch) or ""
-    if expected_head is not None and head(repo) != expected_head:
-        raise LifecycleError('HEAD changed while pushing the revised finish')
-    if not remote_tip.startswith((expected_head or head(repo)) + "\t"): raise LifecycleError("push did not verify remote branch tip")
-    return {"decision": decision["decision"], "reason": decision.get("reason"), "argv": push_argv}
+    if remote_url is not None and git(repo, 'remote', 'get-url', expected_remote) != remote_url:
+        raise LifecycleError('remote URL changed during push preflight')
+    expected = expected_head or head(repo)
+    failure = None
+    try:
+        subprocess.run(push_argv, cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+    except subprocess.CalledProcessError as exc:
+        failure = exc  # The remote may have accepted before the response vanished.
+    if remote_url is not None and git(repo, 'remote', 'get-url', expected_remote) != remote_url:
+        raise LifecycleError('remote URL changed while pushing finish')
+    remote_tip = _remote_tip(repo, push_argv[2], expected_branch)
+    if head(repo) != expected or current_branch(repo) != expected_branch:
+        raise LifecycleError('HEAD or branch changed while pushing finish')
+    if remote_tip != expected:
+        git(repo, 'fetch', push_argv[2], 'refs/heads/' + expected_branch)
+        fetched = head(repo, 'FETCH_HEAD')
+        if fetched != remote_tip or git(repo, 'merge-base', '--is-ancestor', expected, fetched, optional=True) is None:
+            if failure:
+                raise failure
+            raise LifecycleError('push did not verify remote preservation of the expected commit')
+    return {"decision": decision["decision"], "reason": decision.get("reason"), "argv": push_argv,
+            "commit": expected, "remote_observed": remote_tip,
+            "response_recovered": failure is not None}
+
 
 
 def _plan(path: Path):
@@ -595,7 +614,10 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     if _finish_identity(repo, task_id, branch) != identity:
                         raise LifecycleError('finish identity changed after HEAD revision')
                     _operation_check(repo, 'finish HEAD revision')
-                if head(repo) not in {intent['initial_head'], intent.get('committed')}:
+                synchronized_head = intent.get('synchronization', {}).get('commit')
+                if intent.get('synchronization') and not synchronized_head:
+                    raise LifecycleError('resume the pending synchronization before finish')
+                if head(repo) not in {intent['initial_head'], intent.get('committed'), synchronized_head}:
                     # Crash after commit but before receipt: prove the exact
                     # planned tree and sole parent from native immutable objects.
                     expected_tree = intent.get('commit_tree')
@@ -604,7 +626,8 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                         raise LifecycleError('HEAD changed outside this finish intent')
                     intent['committed'] = head(repo); save_state(directory, state)
                 resolved = {name for name, action in intent['actions'].items() if action['phase'] in ('resolved', 'preserved', 'restoring')}
-                commit_paths = _checked_paths(repo, plan.get('commit', []), need='source', owner=task_id)
+                commit_paths = _checked_paths(repo, plan.get('commit', []), need='source', owner=task_id,
+                    completed={entry['path'] for entry in plan.get('commit', [])} if synchronized_head and intent.get('committed') else None)
                 restore_paths = _checked_paths(repo, plan.get('restore', []), need='reproducible', owner=task_id, completed=resolved)
                 archive_paths = _checked_paths(repo, plan.get('archive', []), need='private', owner=task_id, completed=resolved)
                 all_paths = commit_paths + restore_paths + archive_paths
@@ -624,16 +647,16 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 # Safe owned actions run first. Remaining dirt is never waived
                 # merely because it existed before this session.
                 validated_head = head(repo)
-                if intent.get('head_revision') and validated_head not in {intent['initial_head'], intent.get('committed')}:
+                if validated_head not in {intent['initial_head'], intent.get('committed'), synchronized_head}:
                     raise LifecycleError('HEAD changed before finish validation')
                 precommit = _validate(repo, task['validation'])
-                if intent.get('head_revision'):
-                    if _finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head:
-                        raise LifecycleError('HEAD or identity changed during finish validation')
-                    _operation_check(repo, 'finish HEAD revision')
+                if _finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head:
+                    raise LifecycleError('HEAD or identity changed during finish validation')
+                _operation_check(repo, 'finish validation')
                 _resolve_files(repo, plan, intent, directory, state)
-                _checked_paths(repo, plan.get('commit', []), need='source', owner=task_id)
-                if intent.get('head_revision') and (_finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head):
+                _checked_paths(repo, plan.get('commit', []), need='source', owner=task_id,
+                    completed=set(commit_paths) if synchronized_head and intent.get('committed') else None)
+                if _finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head:
                     raise LifecycleError('HEAD or identity changed during finish preservation')
                 if _index_paths(repo) - set(commit_paths):
                     raise LifecycleError('validation or cleanup staged unrelated changes')
@@ -643,21 +666,19 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                         raise LifecycleError('index changed before task commit')
                     if _index_paths(repo):
                         intent['commit_tree'] = git(repo, 'write-tree'); save_state(directory, state)
-                        if intent.get('head_revision') and (_finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head):
+                        if _finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head:
                             raise LifecycleError('HEAD or identity changed before finish commit')
                         git(repo, 'commit', '-m', message)
                         committed_head = head(repo)
-                        if intent.get('head_revision'):
-                            parents = (git(repo, 'rev-list', '--parents', '-n', '1', committed_head) or '').split()
-                            if parents[1:] != [validated_head] or git(repo, 'rev-parse', committed_head + '^{tree}') != intent['commit_tree']:
-                                raise LifecycleError('finish commit identity changed during HEAD revision')
+                        parents = (git(repo, 'rev-list', '--parents', '-n', '1', committed_head) or '').split()
+                        if parents[1:] != [validated_head] or git(repo, 'rev-parse', committed_head + '^{tree}') != intent['commit_tree']:
+                            raise LifecycleError('finish commit identity changed')
                         intent['committed'] = committed_head; save_state(directory, state)
                 evidence = _validate(repo, task['validation'])
-                expected_finish_head = intent.get('committed') or intent['initial_head']
-                if intent.get('head_revision'):
-                    if _finish_identity(repo, task_id, branch) != identity or head(repo) != expected_finish_head:
-                        raise LifecycleError('HEAD or identity changed during finish validation')
-                    _operation_check(repo, 'finish HEAD revision')
+                expected_finish_head = synchronized_head or intent.get('committed') or intent['initial_head']
+                if _finish_identity(repo, task_id, branch) != identity or head(repo) != expected_finish_head:
+                    raise LifecycleError('HEAD or identity changed during finish validation')
+                _operation_check(repo, 'finish validation')
                 final_dirty = _snapshot(repo)
                 if task.get('owner_receipts'):
                     from .producers import owned_dirty_paths
@@ -671,16 +692,15 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     state['intents'].pop(task_id, None); save_state(directory, state)
                     return {'task': task_id, 'completion': 'exception', 'dirty': sorted(final_dirty)}
                 commit = head(repo)
-                if intent.get('head_revision'):
-                    if _finish_identity(repo, task_id, branch) != identity or commit != expected_finish_head:
-                        raise LifecycleError('HEAD or identity changed before finish push')
-                    pushed = _push(repo, task['preflight'], branch, task['remote'], expected_head=commit)
-                else:
-                    pushed = _push(repo, task['preflight'], branch, task['remote'])
+                if _finish_identity(repo, task_id, branch) != identity or commit != expected_finish_head:
+                    raise LifecycleError('HEAD or identity changed before finish push')
+                pushed = _push(repo, task['preflight'], branch, task['remote'], expected_head=commit)
                 task.pop('exception', None)
                 task['acceptance'] = {'commit': commit, 'result_ref': result_ref,
                                       'validation': {'precommit': precommit, 'postcommit': evidence},
                                       'push': pushed, 'accepted_at': _now()}
+                if synchronized_head:
+                    task.setdefault('finish_receipts', []).append(intent.copy())
                 if waived:
                     task['acceptance']['waived_workspace_data'] = {
                         'count': len(waived),
@@ -719,6 +739,170 @@ def _remote_tip(repo, remote, branch):
     if len(rows) != 1 or rows[0].split()[1:] != ['refs/heads/' + branch]:
         raise LifecycleError('remote integration branch could not be verified')
     return rows[0].split()[0]
+
+
+def _sync_identity(repo, branch, remote, remote_head, remote_url=None):
+    if (current_branch(repo) != branch or _remote_tip(repo, remote, branch) != remote_head
+            or (remote_url is not None and git(repo, 'remote', 'get-url', remote) != remote_url)):
+        raise LifecycleError('synchronization branch or remote tip changed; preserve and review the pending operation')
+
+
+def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
+                 validation, holder, persist):
+    """One exact native merge, shared by task repair and integration targets.
+
+    The receipt extends an existing operation; it is never task acceptance.
+    Native writers must be quiescent, as for adoption and finish.
+    """
+    for marker in ('REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer', 'BISECT_START', 'index.lock'):
+        if Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-path', marker)).exists():
+            raise LifecycleError('unrelated Git operation prevents synchronization: ' + marker)
+    desired = {'branch': branch, 'remote': remote, 'local': expected_head,
+               'source': remote_head, 'evidence': evidence,
+               'remote_url': git(repo, 'remote', 'get-url', remote)}
+    previous = holder.get('synchronization')
+    if previous and previous['remote_url'] != desired['remote_url']:
+        raise LifecycleError('synchronization remote URL changed')
+    if previous and all(previous.get(k) == v for k, v in desired.items()):
+        receipt = previous
+    else:
+        if previous and not previous.get('commit'):
+            raise LifecycleError('resume the pending synchronization with its exact local and remote OIDs')
+        if head(repo) != expected_head:
+            raise LifecycleError('synchronization local HEAD differs from the reviewed OID')
+        observed = _remote_tip(repo, remote, branch)
+        merge_head = git(repo, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True)
+        if observed != remote_head and merge_head != remote_head:
+            raise LifecycleError('remote tip differs from the reviewed synchronization source')
+        _sync_identity(repo, branch, remote, observed, desired['remote_url'])
+        git(repo, 'fetch', remote, 'refs/heads/' + branch)
+        if head(repo, 'FETCH_HEAD') != observed:
+            raise LifecycleError('remote changed during synchronization fetch')
+        if observed != remote_head and git(repo, 'merge-base', '--is-ancestor', remote_head, observed, optional=True) is None:
+            raise LifecycleError('manual merge source is not preserved in the actual same-name remote')
+        if previous and git(repo, 'merge-base', '--is-ancestor', previous['source'], observed, optional=True) is None:
+            raise LifecycleError('remote synchronization history was rewritten')
+        if head(repo, expected_head) != expected_head or head(repo, remote_head) != remote_head:
+            raise LifecycleError('synchronization requires full commit OIDs')
+        if git(repo, 'merge-base', expected_head, remote_head, optional=True) is None:
+            raise LifecycleError('synchronization refuses unrelated histories')
+        merge_head = git(repo, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True)
+        if merge_head:
+            if merge_head != remote_head:
+                raise LifecycleError('manual merge source differs from the exact same-name remote topic')
+            dirty = _snapshot(repo)
+            if any(code in ('??', '!!') for code in dirty.values()):
+                raise LifecycleError('manual merge contains unrelated untracked or private data')
+        else:
+            _operation_check(repo, 'synchronization')
+            if _snapshot(repo):
+                raise LifecycleError('synchronization requires a clean checkout')
+        outcome = subprocess.run(['git', '-C', str(repo), 'merge-tree', '--write-tree', '-z', '--name-only', expected_head, remote_head],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if outcome.returncode not in (0, 1):
+            raise LifecycleError('Git could not establish the synchronization merge contract: ' + os.fsdecode(outcome.stderr))
+        fields = outcome.stdout.split(b'\0')
+        conflicts = []
+        for field in fields[1:]:
+            if not field: break
+            conflicts.append(os.fsdecode(field))
+        receipt = {**desired, 'at': _now(), 'expected_tree': os.fsdecode(fields[0]).strip(),
+                   'conflicts': conflicts}
+        if previous:
+            holder.setdefault('synchronization_history', []).append(previous)
+        holder['synchronization'] = receipt; persist()
+    current = head(repo)
+    merge_head = git(repo, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True)
+    observed_remote = _remote_tip(repo, remote, branch)
+    if observed_remote != remote_head:
+        git(repo, 'fetch', remote, 'refs/heads/' + branch)
+        if head(repo, 'FETCH_HEAD') != observed_remote or git(repo, 'merge-base', '--is-ancestor', remote_head, observed_remote, optional=True) is None:
+            raise LifecycleError('pending synchronization remote no longer preserves its pinned source')
+    _sync_identity(repo, branch, remote, observed_remote, receipt['remote_url'])
+    if receipt.get('commit'):
+        if current != receipt['commit'] or merge_head or _snapshot(repo):
+            raise LifecycleError('completed synchronization identity changed')
+        return receipt
+    if current != expected_head:
+        parents = (git(repo, 'rev-list', '--parents', '-1', 'HEAD') or '').split()[1:]
+        fast_forward = current == remote_head and git(repo, 'merge-base', '--is-ancestor', expected_head, current, optional=True) is not None
+        if merge_head or not (fast_forward or (receipt.get('tree') == git(repo, 'rev-parse', 'HEAD^{tree}')
+                                              and parents == [expected_head, remote_head])):
+            raise LifecycleError('HEAD changed outside the recorded synchronization')
+    elif not merge_head:
+        _operation_check(repo, 'synchronization')
+        if _snapshot(repo):
+            raise LifecycleError('pending synchronization has unrelated dirty content')
+        if git(repo, 'merge-base', '--is-ancestor', remote_head, current, optional=True) is not None:
+            pass
+        elif git(repo, 'merge-base', '--is-ancestor', current, remote_head, optional=True) is not None:
+            # Validate the incoming tree without accepting it. The subsequent
+            # validation binds evidence to the actual new checkout.
+            git(repo, 'merge', '--ff-only', remote_head)
+        else:
+            git(repo, 'merge', '--no-ff', '--no-commit', remote_head)
+    current = head(repo)
+    merge_head = git(repo, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True)
+    if merge_head and (current != expected_head or merge_head != remote_head):
+        raise LifecycleError('native synchronization merge identity changed')
+    _index_protection(repo)
+    dirty = _snapshot(repo)
+    if any(code in ('??', '!!') or code[1] != ' ' for code in dirty.values()):
+        raise LifecycleError('resolve synchronization conflicts and unstaged data in this same checkout')
+    tree = git(repo, 'write-tree')
+    if merge_head:
+        differences = subprocess.run(['git', '-C', str(repo), 'diff', '--name-only', '-z', receipt['expected_tree'], tree],
+                                     stdout=subprocess.PIPE, check=True).stdout
+        if {os.fsdecode(row) for row in differences.split(b'\0') if row} - set(receipt['conflicts']):
+            raise LifecycleError('synchronization index changed outside the recorded conflict paths')
+    checked = [_validate(repo, argv) for argv in validation]
+    _sync_identity(repo, branch, remote, observed_remote, receipt['remote_url'])
+    if head(repo) != current or git(repo, 'write-tree') != tree:
+        raise LifecycleError('HEAD or index changed during synchronization validation')
+    if git(repo, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True) != merge_head:
+        raise LifecycleError('merge state changed during synchronization validation')
+    if _snapshot(repo) != dirty:
+        raise LifecycleError('validation changed synchronization working content')
+    if merge_head:
+        receipt['tree'] = tree; persist()
+        git(repo, 'commit', '-m', 'Merge same-name remote branch ' + branch)
+        parents = (git(repo, 'rev-list', '--parents', '-1', 'HEAD') or '').split()[1:]
+        if parents != [expected_head, remote_head] or git(repo, 'rev-parse', 'HEAD^{tree}') != tree:
+            raise LifecycleError('synchronization commit identity changed')
+    if _snapshot(repo):
+        raise LifecycleError('synchronization commit left dirty content')
+    receipt['commit'] = head(repo); receipt['validation'] = checked; persist()
+    _sync_identity(repo, branch, remote, observed_remote, receipt['remote_url'])
+    return receipt
+
+
+def synchronize(repo, *, task, expected_head, remote_head, evidence):
+    """Review and resume the same task's same-name remote synchronization."""
+    repo = Path(repo).resolve()
+    if (not isinstance(evidence, str) or not evidence.strip()
+            or not isinstance(expected_head, str) or not isinstance(remote_head, str)
+            or not expected_head or not remote_head):
+        raise LifecycleError('synchronization requires exact OIDs and durable ownership/review evidence')
+    with _lease(repo, task, allow_use=True):
+        with locked_state(repo) as (directory, state):
+            item = _task(state, task); branch = branch_for_task(repo, task)
+            _finish_identity(repo, task, branch)
+            if item.get('hold') or item.get('retire'):
+                raise LifecycleError('held or retiring task cannot synchronize')
+            intent = state['intents'].get(task)
+            if intent and intent['kind'] != 'finish':
+                raise LifecycleError('resume the existing integration operation with finish')
+            holder = intent if intent else item
+            if intent:
+                previous = intent.get('synchronization', {}).get('commit')
+                if expected_head not in {intent.get('committed') or intent['initial_head'], previous}:
+                    raise LifecycleError('synchronization must extend the recorded finish HEAD')
+                if any(action['phase'] != 'resolved' for action in intent['actions'].values()):
+                    raise LifecycleError('finish preservation must complete before synchronization')
+            result = _synchronize(repo, branch=branch, remote=item['remote'], expected_head=expected_head,
+                remote_head=remote_head, evidence=evidence, validation=[item['validation']],
+                holder=holder, persist=lambda: save_state(directory, state))
+            return {'task': task, 'commit': result['commit'], 'synchronization': result}
 
 
 def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
@@ -766,19 +950,43 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                                or intent['target'] != target_branch):
                     raise LifecycleError('pending integration identity differs; preserve the existing operation')
                 if not intent:
-                    if _snapshot(target_worktree) or git(target_worktree, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True):
-                        raise LifecycleError('integration target has unrelated dirty or merge state')
-                    target_head = head(target_worktree)
-                    if parent and target_head != parent['acceptance']['commit']:
-                        raise LifecycleError('parent HEAD differs from its accepted identity')
-                    if target_head != _remote_tip(repo, item['remote'], target_branch):
-                        raise LifecycleError('integration target differs from its actual remote tip; resolve in this same target')
+                    holder = item.get('integration_synchronization', {})
+                    pending = holder.get('synchronization')
+                    if pending and pending.get('commit') == head(target_worktree):
+                        # The exact prior synchronization is already complete.
+                        target_head = pending['commit']
+                    elif pending and not pending.get('commit'):
+                        target_head = pending['local']
+                    else:
+                        if _snapshot(target_worktree) or git(target_worktree, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True):
+                            raise LifecycleError('integration target has unrelated dirty or merge state')
+                        target_head = head(target_worktree)
+                        if parent and target_head != parent['acceptance']['commit']:
+                            raise LifecycleError('parent HEAD differs from its accepted identity')
+                    remote_head = _remote_tip(repo, item['remote'], target_branch)
+                    if target_head != remote_head or (pending and not pending.get('commit')):
+                        synced = _synchronize(target_worktree, branch=target_branch, remote=item['remote'],
+                            expected_head=pending['local'] if pending and not pending.get('commit') else target_head,
+                            remote_head=pending['source'] if pending and not pending.get('commit') else remote_head,
+                            evidence=result_ref,
+                            validation=[item['validation']] + ([parent['validation']] if parent else []),
+                            holder=item.setdefault('integration_synchronization', {}),
+                            persist=lambda: save_state(directory, state))
+                        target_head = synced['commit']
                     intent = {'kind': 'merge', 'source': source_commit, 'target': target_branch,
                               'target_head': target_head, 'result_ref': result_ref, 'at': _now()}
                     state['intents'][task_id] = intent; save_state(directory, state)
+                pending_sync = intent.get('synchronization')
+                if pending_sync and not pending_sync.get('commit'):
+                    _synchronize(target_worktree, branch=target_branch, remote=item['remote'],
+                        expected_head=pending_sync['local'], remote_head=pending_sync['source'],
+                        evidence=result_ref, validation=[item['validation']] + ([parent['validation']] if parent else []),
+                        holder=intent, persist=lambda: save_state(directory, state))
                 current = head(target_worktree)
                 merge_head = git(target_worktree, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True)
-                if current != intent['target_head']:
+                if current == intent.get('synchronization', {}).get('commit'):
+                    pass
+                elif current != intent['target_head']:
                     parents = (git(target_worktree, 'rev-list', '--parents', '-n', '1', 'HEAD') or '').split()[1:]
                     if merge_head or parents != [intent['target_head'], source_commit]:
                         raise LifecycleError('target moved outside the recorded normal merge')
@@ -797,19 +1005,44 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                     _index_protection(target_worktree)
                 # Both the child and its parent contract must hold for the new
                 # parent identity before it can progress to the next edge.
+                checked_head = head(target_worktree)
+                checked_tree = git(target_worktree, 'write-tree')
                 evidence = _validate(target_worktree, item['validation'])
                 parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
+                if head(target_worktree) != checked_head or git(target_worktree, 'write-tree') != checked_tree:
+                    raise LifecycleError('integration HEAD or index changed during validation')
+                if git(target_worktree, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True) != merge_head:
+                    raise LifecycleError('integration merge state changed during validation')
                 dirty = _snapshot(target_worktree)
                 if any(code in ('??', '!!') or code[1] != ' ' for code in dirty.values()):
                     raise LifecycleError('merge validation left unstaged or private data; resolve in this target')
                 if not intent.get('merged'):
                     intent['merge_tree'] = git(target_worktree, 'write-tree'); save_state(directory, state)
                     git(target_worktree, 'commit', '-m', 'Merge workspace task ' + task_id)
-                    intent['merged'] = head(target_worktree); save_state(directory, state)
+                    committed = head(target_worktree)
+                    parents = (git(target_worktree, 'rev-list', '--parents', '-1', committed) or '').split()[1:]
+                    if parents != [checked_head, source_commit] or git(target_worktree, 'rev-parse', 'HEAD^{tree}') != checked_tree:
+                        raise LifecycleError('integration commit changed from the validated merge')
+                    intent['merged'] = committed; save_state(directory, state)
                 if _snapshot(target_worktree):
                     raise LifecycleError('integration commit left dirty content')
-                merged = intent['merged']
-                pushed = _push(target_worktree, item['preflight'], target_branch, item['remote'])
+                merged = intent.get('synchronization', {}).get('commit') or intent['merged']
+                remote_head = _remote_tip(repo, item['remote'], target_branch)
+                pending_sync = intent.get('synchronization')
+                if remote_head != merged or (pending_sync and not pending_sync.get('commit')):
+                    git(repo, 'fetch', item['remote'], 'refs/heads/' + target_branch)
+                    if git(repo, 'merge-base', '--is-ancestor', remote_head, merged, optional=True) is None or (pending_sync and not pending_sync.get('commit')):
+                        synced = _synchronize(target_worktree, branch=target_branch, remote=item['remote'],
+                            expected_head=pending_sync['local'] if pending_sync and not pending_sync.get('commit') else merged,
+                            remote_head=pending_sync['source'] if pending_sync and not pending_sync.get('commit') else remote_head,
+                            evidence=result_ref, validation=[item['validation']] + ([parent['validation']] if parent else []),
+                            holder=intent, persist=lambda: save_state(directory, state))
+                        merged = synced['commit']
+                evidence = _validate(target_worktree, item['validation'])
+                parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
+                if head(target_worktree) != merged or _snapshot(target_worktree):
+                    raise LifecycleError('integration changed during final validation')
+                pushed = _push(target_worktree, item['preflight'], target_branch, item['remote'], expected_head=merged)
                 record = {'destination': target_branch, 'commit': merged, 'source': source_commit,
                           'validation': evidence, 'push': pushed, 'result_ref': result_ref, 'at': _now()}
                 item['integrated'] = record
