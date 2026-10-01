@@ -1,3 +1,4 @@
+import io
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from workspace_lifecycle.errors import LifecycleError
@@ -109,6 +111,28 @@ class LifecycleTest(unittest.TestCase):
         replay = retire_pending(self.root)
         self.assertEqual(replay["pending"][0]["task"], "retire-retry")
         self.assertTrue(replay["pending"][0]["retired"])
+
+    def test_retire_request_cli_reports_saved_pending_request(self):
+        from workspace_lifecycle.cli import main
+
+        begin(self.root, task="request-cli", request="i/cli", remote="origin",
+              branch="topic/request-cli", worktree=str(self.topic),
+              validation=["git", "diff", "--check"], preflight=self.preflight)
+        (self.topic / "cli.txt").write_text("done\n")
+        self.task = "request-cli"
+        plan = Path(self.temp.name) / "request-cli-plan.json"
+        plan.write_text(json.dumps(self.source_plan(self.topic, "cli.txt")))
+        finish(self.topic, task=self.task, plan_path=str(plan), result_ref="i/cli")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(["--repo", str(self.root), "retire", "--task", self.task,
+                         "--result-ref", "i/cli", "--users-released", "--request"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue()),
+                         {"ok": True, "task": self.task, "pending": True})
+        self.assertTrue(self.topic.exists())
+        self.assertEqual(status(self.root, self.task)["retire"]["phase"], "requested")
 
     def test_status_from_default_discovers_registered_tasks(self):
         begin(self.root, task="discover", request="i/d", remote="origin", branch="topic/discover", worktree=str(self.topic), validation=["git", "diff", "--check"], preflight=self.preflight)

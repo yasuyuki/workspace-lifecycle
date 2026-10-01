@@ -1,5 +1,25 @@
 # Workspace lifecycle
 
+Git worktrees make parallel tasks possible, but Git does not know when a task is
+accepted, whether another process still uses its checkout, or who owns generated
+files. `workspace-lifecycle` records those decisions per task. It can create a
+linked worktree, run a task under a process-use lease, validate and integrate a
+reviewed result, then retire the checkout after its users release it.
+
+Start with `begin` for a new task or `adopt-existing` for a checkout already in
+use. Use `status` to inspect it and `run` to supervise a command. `finish`
+requires an explicit file-ownership plan and result reference; it can commit,
+push, and integrate the reviewed result. `retire` requires that accepted result
+and an explicit release from external users. See `workspace-lifecycle --help`
+and each subcommand's `--help` for the exact arguments.
+
+Retirement removes a linked checkout from Git's active worktree list while
+**retaining its payload and Git admin data in recovery storage**. It does not
+immediately recover disk space. `reclaim` removes only the exact retired data
+covered by preservation evidence and unchanged retirement manifests; refusals
+remain pending for review. This safety tradeoff matters if checkouts contain
+large build outputs. Existing primary checkouts cannot be retired.
+
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
 directory; version `0.4.5` is not published to PyPI. It imports no agent-rules
