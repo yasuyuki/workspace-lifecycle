@@ -218,6 +218,7 @@ def release_hold(repo, task, evidence):
 
 def _validate(repo: Path, argv: list[str]) -> dict:
     if not argv: return {"argv": [], "returncode": 0}
+    argv = [str(repo) if value == "{repo}" else value for value in argv]
     result = subprocess.run(argv, cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     evidence = {"argv": argv, "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
     if result.returncode: raise LifecycleError("configured validation failed: " + json.dumps(evidence, ensure_ascii=True))

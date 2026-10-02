@@ -127,6 +127,62 @@ class LifecycleTest(unittest.TestCase):
         result = finish(self.topic, task="validate", plan_path=str(plan), result_ref="i/v")
         self.assertTrue(result["accepted"])
 
+    def test_validation_expands_literal_repo_for_task_integration_and_retry(self):
+        self.topic = Path(self.temp.name) / "topic with spaces"
+        gate = Path(self.temp.name) / "validation.ok"
+        observed = Path(self.temp.name) / "validated-repositories"
+        script = (
+            "from pathlib import Path; import sys; "
+            "repo = Path(sys.argv[1]).resolve(); "
+            "assert repo == Path.cwd().resolve(), (repo, Path.cwd()); "
+            "assert sys.argv[2] == 'embedded{repo}value'; "
+            "Path(sys.argv[3]).open('a').write(str(repo) + '\\n'); "
+            "raise SystemExit(9 if not Path(sys.argv[4]).exists() else 0)"
+        )
+        validation = [sys.executable, "-c", script, "{repo}", "embedded{repo}value", str(observed), str(gate)]
+        begin(self.root, task="validate", request="issue/143", remote="origin", branch="topic/validate",
+              worktree=str(self.topic), validation=validation, preflight=self.preflight)
+        (self.topic / "feature.txt").write_text("done\n")
+        self.task = "validate"
+        plan = Path(self.temp.name) / "validation-retry-plan.json"
+        plan.write_text(json.dumps(self.source_plan(self.topic, "feature.txt")))
+        initial_head = run(self.topic, "rev-parse", "HEAD")
+
+        with self.assertRaises(LifecycleError) as failure:
+            finish(self.topic, task="validate", plan_path=str(plan), result_ref="issue/143")
+        self.assertIn('"returncode": 9', str(failure.exception))
+        pending = status(self.topic, "validate")["intent"]
+        self.assertEqual(pending["result_ref"], "issue/143")
+        self.assertEqual(pending["initial_head"], initial_head)
+        self.assertNotIn("committed", pending)
+        self.assertEqual(run(self.topic, "rev-parse", "HEAD"), initial_head)
+
+        gate.write_text("continue\n")
+        result = finish(self.topic, task="validate", plan_path=str(plan), result_ref="issue/143")
+        self.assertTrue(result["accepted"])
+        self.assertNotEqual(result["commit"], initial_head)
+        task = status(self.topic, "validate")
+        expected_task_argv = [*validation[:3], str(self.topic.resolve()), *validation[4:]]
+        self.assertEqual(task["acceptance"]["validation"]["precommit"]["argv"], expected_task_argv)
+        self.assertEqual(task["acceptance"]["validation"]["postcommit"]["argv"], expected_task_argv)
+        self.assertEqual(task["integrated"]["validation"]["argv"],
+                         [*validation[:3], str(self.root.resolve()), *validation[4:]])
+        self.assertEqual(set(observed.read_text().splitlines()), {str(self.topic.resolve()), str(self.root.resolve())})
+
+    def test_validation_without_repo_placeholder_is_unchanged(self):
+        validation = [sys.executable, "-c", "import sys; sys.exit(len(sys.argv) - 1)"]
+        begin(self.root, task="no-placeholder", request="issue/143", remote="origin", branch="topic/no-placeholder",
+              worktree=str(self.topic), validation=validation, preflight=self.preflight)
+        (self.topic / "feature.txt").write_text("done\n")
+        self.task = "no-placeholder"
+        plan = Path(self.temp.name) / "validation-no-placeholder-plan.json"
+        plan.write_text(json.dumps(self.source_plan(self.topic, "feature.txt")))
+
+        finish(self.topic, task="no-placeholder", plan_path=str(plan), result_ref="issue/143")
+        task = status(self.topic, "no-placeholder")
+        self.assertEqual(task["acceptance"]["validation"]["postcommit"]["argv"], validation)
+        self.assertEqual(task["integrated"]["validation"]["argv"], validation)
+
     def test_retire_refuses_ignored_data(self):
         (self.root / ".git" / "info" / "exclude").write_text("private.generated\n")
         begin(self.root, task="ignored", request="i/g", remote="origin", branch="topic/ignored", worktree=str(self.topic), validation=["git", "diff", "--check"], preflight=self.preflight)

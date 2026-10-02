@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.4.5` is not published to PyPI. It imports no agent-rules
+directory; version `0.4.6` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
@@ -22,7 +22,8 @@ workspace-lifecycle --help
 ## Lifecycle
 
 Begin a task with an explicit request, remote, branch, absolute worktree,
-validation argv and preflight argv. The preflight must contain the literal
+validation argv and preflight argv. See `begin --help` for validation checkout
+placeholders. The preflight must contain the literal
 `{repo}` placeholder. `status` reports the selected task and its live Git state;
 `hold` records a reason and next action. Parent and dependency tasks must
 already exist and are checked again before integration.
