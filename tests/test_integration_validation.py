@@ -21,7 +21,7 @@ class IntegrationValidationTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.base = Path(self.temp.name)
+        self.base = Path(self.temp.name).resolve()
         self.remote, self.root, self.topic, self.other = [
             self.base / name for name in ('remote.git', 'root', 'topic', 'other')]
         git(self.base, 'init', '--bare', '--initial-branch=trunk', str(self.remote))
