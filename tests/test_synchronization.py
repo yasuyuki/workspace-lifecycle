@@ -195,7 +195,7 @@ class SynchronizationTest(unittest.TestCase):
         self.assertFalse((self.root / 'later').exists())
 
     def test_preserved_archive_and_changed_source_survive_finish_sync(self):
-        (self.topic / 'base').write_text('local\n'); (self.topic / 'private').write_text('retain privately\n')
+        (self.topic / 'base').write_bytes(b'local\n'); (self.topic / 'private').write_text('retain privately\n')
         store = self.base / 'store'; store.mkdir()
         self.plan.write_text(json.dumps({'commit': [{'path': 'base', 'owner': 'same', 'evidence': 'review/source',
             'classification': 'source', 'safe_to_commit': True, 'sha256': hashlib.sha256((self.topic / 'base').read_bytes()).hexdigest()}],

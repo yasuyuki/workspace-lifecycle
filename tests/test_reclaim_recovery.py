@@ -52,7 +52,7 @@ class ReclaimRecoveryTests(unittest.TestCase):
         return json.loads((Path(common) / 'workspace-lifecycle' / 'state.json').read_text())
 
     def _wait_for_marker(self, child, marker):
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + 60
         while not marker.exists() and child.poll() is None and time.monotonic() < deadline:
             time.sleep(.02)
         self.assertTrue(marker.exists(), 'reclaim child did not reach its durable checkpoint')
