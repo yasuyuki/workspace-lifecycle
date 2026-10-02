@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.4.7` is not published to PyPI. It imports no agent-rules
+directory; it is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
