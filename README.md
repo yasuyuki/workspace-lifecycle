@@ -22,7 +22,8 @@ workspace-lifecycle --help
 ## Lifecycle
 
 Begin a task with an explicit request, remote, branch, absolute worktree,
-validation argv and preflight argv. The preflight must contain the literal
+validation argv and preflight argv. See `begin --help` for validation checkout
+placeholders. The preflight must contain the literal
 `{repo}` placeholder. `status` reports the selected task and its live Git state;
 `hold` records a reason and next action. Parent and dependency tasks must
 already exist and are checked again before integration.
