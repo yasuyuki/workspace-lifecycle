@@ -66,6 +66,20 @@ class ValidationUpdateTests(unittest.TestCase):
                 self.update(**args)
             self.assertEqual(self.state.read_bytes(), before)
 
+    def test_subdirectory_command_records_worktree_root_identity(self):
+        child = self.f.topic / 'subdirectory'
+        child.mkdir()
+        command = [sys.executable, '-m', 'workspace_lifecycle', '--repo', str(child),
+                   'update-validation', '--task', 'current', '--expected-head', self.head,
+                   '--expected-validation-json', json.dumps(self.old),
+                   '--validation-json', json.dumps(self.new), '--evidence', 'issue/11 correction']
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        identity = service.status(self.f.topic, 'current')['validation_updates'][0]['identity']
+        root = self.f.topic.resolve()
+        self.assertEqual(identity['worktree'], str(root))
+        self.assertEqual(identity['worktree_id'], [root.stat().st_dev, root.stat().st_ino])
+
     def test_empty_old_registration_can_be_corrected(self):
         from workspace_lifecycle.state import locked_state, save_state
         with locked_state(self.f.topic) as (directory, state):

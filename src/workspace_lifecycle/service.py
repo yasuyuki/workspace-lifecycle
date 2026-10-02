@@ -196,7 +196,7 @@ def update_preflight(repo, *, task: str, expected_preflight: list[str],
 def update_validation(repo, *, task: str, expected_head: str,
                       expected_validation: list[str], validation: list[str], evidence: str) -> dict:
     """Correct an unaccepted task's validator without changing its contract history."""
-    repo = Path(repo).resolve()
+    repo = top(repo)
     if (not isinstance(expected_validation, list)
             or not all(isinstance(x, str) and x for x in expected_validation)):
         raise LifecycleError('expected validation requires a string argv array')
