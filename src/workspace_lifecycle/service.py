@@ -1006,10 +1006,18 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                             expected_head=pending['local'] if pending and not pending.get('commit') else target_head,
                             remote_head=pending['source'] if pending and not pending.get('commit') else remote_head,
                             evidence=result_ref,
-                            validation=[item['validation']] + ([parent['validation']] if parent else []),
+                            validation=[parent['validation']] if parent else [],
                             holder=item.setdefault('integration_synchronization', {}),
                             persist=lambda: save_state(directory, state))
                         target_head = synced['commit']
+                        remote_head = _remote_tip(repo, item['remote'], target_branch)
+                        if synced['source'] != remote_head:
+                            synced = _synchronize(target_worktree, branch=target_branch, remote=item['remote'],
+                                expected_head=target_head, remote_head=remote_head, evidence=result_ref,
+                                validation=[parent['validation']] if parent else [],
+                                holder=item['integration_synchronization'],
+                                persist=lambda: save_state(directory, state))
+                            target_head = synced['commit']
                     intent = {'kind': 'merge', 'source': source_commit, 'target': target_branch,
                               'target_head': target_head, 'result_ref': result_ref, 'at': _now()}
                     state['intents'][task_id] = intent; save_state(directory, state)
