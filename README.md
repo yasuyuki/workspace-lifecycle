@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.4.5` is not published to PyPI. It imports no agent-rules
+directory; version `0.4.6` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
@@ -199,6 +199,13 @@ On Windows, another process in that use's Job can start a managed agent with
 the inherited exact use token. It shares the existing receipt; the outer
 supervisor releases it after all Job members exit. A process outside the Job
 cannot join by copying the token.
+
+Ordinary task use needs no default-branch checkout or remote-default lookup.
+Startup and exit retry only the selected task's recorded recovery, from the
+primary checkout. Integration still requires its actual destination checkout.
+Failed recovery remains pending and refuses new use of that released task;
+other tasks can continue. Explicit `retire --pending` and `reclaim --pending`
+process recorded requests across the repository.
 
 Runtime launchers use `resolve-run` with the already selected effective cwd and
 the original invocation cwd. It runs unmanaged work without creating lifecycle

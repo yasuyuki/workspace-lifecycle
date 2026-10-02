@@ -1568,12 +1568,13 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
             raise
 
 
-def reclaim_pending(repo) -> dict:
+def reclaim_pending(repo, task: str | None = None) -> dict:
     """Resume reclaim that already has preservation evidence. Never authorize a new one."""
     repo = Path(repo).resolve()
     with locked_state(repo) as (_, state):
         pending = [(name, item['result_ref'], item['preservation_evidence'])
                    for name, item in state.get('retired', {}).items()
+                   if task is None or name == task
                    if item.get('preservation_evidence') and item.get('reclaim_phase') not in (None, 'reclaimed')]
     results = []
     for name, reference, evidence in pending:
@@ -1584,12 +1585,13 @@ def reclaim_pending(repo) -> dict:
     return {'pending': results}
 
 
-def retire_pending(repo) -> dict:
+def retire_pending(repo, task: str | None = None) -> dict:
     """Retry only durable explicit retirement requests, never scan for cleanup."""
     repo = Path(repo).resolve()
     with locked_state(repo) as (_, state):
         pending = [(name, (item.get('retire') or item.get('completion_release'))['result_ref'], bool(item.get('retire')))
                    for name, item in state['tasks'].items()
+                   if task is None or name == task
                    if item.get('retire') or item.get('completion_release')]
     results = []
     for name, reference, requested in pending:
@@ -1612,6 +1614,11 @@ def retire_pending(repo) -> dict:
     return {'pending': results}
 
 
+def check_run_identity(repo, task: str) -> None:
+    if bound_task(repo) != task or task_worktree(repo, branch_for_task(repo, task)) != top(repo):
+        raise LifecycleError('run must use the exact bound task checkout')
+
+
 def before_run(repo, task: str) -> None:
     with locked_state(repo) as (_, state):
         item = _task(state, task)
@@ -1619,5 +1626,4 @@ def before_run(repo, task: str) -> None:
             raise LifecycleError('task is held; explicit hold resolution is required')
         if item.get('retire') or item.get('completion_release'):
             raise LifecycleError('task has a retirement request; replay it before starting new use')
-        if bound_task(repo) != task or task_worktree(repo, branch_for_task(repo, task)) != top(repo):
-            raise LifecycleError('run must use the exact bound task checkout')
+        check_run_identity(repo, task)

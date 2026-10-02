@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 from pathlib import Path
 import sys
@@ -11,7 +12,7 @@ from . import __version__
 
 from .errors import LifecycleError
 from . import service
-from .git import bound_task, common_dir, remote_default, task_worktree, top
+from .git import bound_task, common_dir, worktree_records
 from .state import locked_state, save_state
 
 
@@ -123,21 +124,20 @@ def main(argv=None):
             cwd = Path(args.cwd).resolve()
             if cwd != repo and repo not in cwd.parents:
                 raise LifecycleError('run cwd must be inside the selected task worktree')
-            if _recover_before_spawn(repo, args.task):
+            service.check_run_identity(repo, args.task)
+            recovery = _recover_selected_task(repo, args.task)
+            if recovery['error']:
+                raise LifecycleError(recovery['error'])
+            if recovery['terminal']:
                 return 0
             code = run(repo, args.task, argv, cwd,
                        before_spawn=lambda: service.before_run(repo, args.task),
                        child_env=_managed_context(repo, args.task))
             # Native output and status pass through; management JSON belongs to
             # status/finish, not the program's stdout stream.
-            with locked_state(repo) as (_, state):
-                remote = state['tasks'][args.task]['remote']
-            control = task_worktree(repo, remote_default(repo, remote))
-            os.chdir(control)
-            recovered = service.retire_pending(control)
-            reclaimed = service.reclaim_pending(control)
-            if any(not entry.get('retired') for entry in recovered['pending']) or any(not entry.get('reclaimed') for entry in reclaimed['pending']):
-                print(json.dumps({'retire': recovered, 'reclaim': reclaimed}), file=sys.stderr)
+            recovery = _recover_selected_task(repo, args.task)
+            if recovery['error']:
+                print(json.dumps(recovery['report']), file=sys.stderr)
                 if code == 0:
                     return 1
             return code if code >= 0 else 128 - code
@@ -188,14 +188,21 @@ def _managed_context(repo, task):
             'WORKSPACE_LIFECYCLE_REPO': str(repo), 'WORKSPACE_LIFECYCLE_TASK': task}
 
 
-def _recover_before_spawn(repo, task):
-    """Replay a released task from its control checkout before admitting use."""
+def _recover_selected_task(repo, task):
+    """Replay only one durable task recovery before or after its managed use."""
     with locked_state(repo) as (_, state):
         item = state['tasks'].get(task)
-        if item is None:
-            return True
-        release = item.get('completion_release')
-        remote = item['remote']
+        retired = state.get('retired', {}).get(task)
+        if item is None and retired is None:
+            raise LifecycleError('unknown task: ' + task)
+        release = item.get('completion_release') if item else None
+        pending_record = deepcopy((item.get('retire') or release) if item else None)
+        pending = bool(pending_record) or bool(
+            retired and retired.get('preservation_evidence')
+            and retired.get('reclaim_phase') not in (None, 'reclaimed'))
+    if not pending:
+        return {'terminal': item is None, 'error': None,
+                'report': {'retire': {'pending': []}, 'reclaim': {'pending': []}}}
     if release:
         from . import leases
         lease = leases.status(repo, task)['receipt']
@@ -208,12 +215,30 @@ def _recover_before_spawn(repo, task):
                     if current and current.get('completion_release') == release:
                         current['completion_release']['lease_recovery_failure'] = str(exc)
                         save_state(directory, state)
-    control = task_worktree(repo, remote_default(repo, remote))
+    records = worktree_records(repo)
+    if not records:
+        raise LifecycleError('managed task recovery requires a primary Git worktree')
+    control = Path(records[0]['worktree']).resolve()
     os.chdir(control)
-    service.retire_pending(control)
-    service.reclaim_pending(control)
-    with locked_state(control) as (_, state):
-        return task not in state['tasks']
+    report = {'retire': service.retire_pending(control, task),
+              'reclaim': service.reclaim_pending(control, task)}
+    error = next((entry.get('error') or 'selected task retirement remains pending'
+                  for entry in report['retire']['pending'] if entry.get('error') or not entry.get('retired')), None)
+    error = error or next((entry.get('error') or 'selected task reclaim remains pending'
+                           for entry in report['reclaim']['pending'] if entry.get('error') or not entry.get('reclaimed')), None)
+    with locked_state(control) as (directory, state):
+        current = state['tasks'].get(task)
+        retired = state.get('retired', {}).get(task)
+        current_pending = current and (current.get('retire') or current.get('completion_release'))
+        if current_pending and error is None:
+            error = 'selected task recovery remains pending'
+        if error and current_pending is not None and current_pending == pending_record and current_pending.get('recovery_failure') != error:
+            current_pending['recovery_failure'] = error
+            save_state(directory, state)
+    if error == 'selected task recovery remains pending':
+        report['retire']['pending'].append({'task': task, 'retired': False,
+                                            'error': error})
+    return {'terminal': current is None and retired is not None, 'error': error, 'report': report}
 
 
 def _native_code(code):
@@ -270,19 +295,18 @@ def _resolve_run(effective, launch, argv):
         raise LifecycleError('workspace lifecycle state is not a directory')
     task = bound_task(repo)
     from .leases import run
-    if _recover_before_spawn(repo, task):
+    service.check_run_identity(repo, task)
+    recovery = _recover_selected_task(repo, task)
+    if recovery['error']:
+        raise LifecycleError(recovery['error'])
+    if recovery['terminal']:
         return 0
     code = run(repo, task, argv, launch,
                before_spawn=lambda: service.before_run(repo, task),
                child_env=_managed_context(repo, task))
-    with locked_state(repo) as (_, state):
-        remote = state['tasks'][task]['remote']
-    control = task_worktree(repo, remote_default(repo, remote))
-    os.chdir(control)
-    recovered = service.retire_pending(control)
-    reclaimed = service.reclaim_pending(control)
-    if any(not entry.get('retired') for entry in recovered['pending']) or any(not entry.get('reclaimed') for entry in reclaimed['pending']):
-        print(json.dumps({'retire': recovered, 'reclaim': reclaimed}), file=sys.stderr)
+    recovery = _recover_selected_task(repo, task)
+    if recovery['error']:
+        print(json.dumps(recovery['report']), file=sys.stderr)
         return 1 if code == 0 else _native_code(code)
     return _native_code(code)
 
