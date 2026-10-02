@@ -50,7 +50,7 @@ class ValidationUpdateTests(unittest.TestCase):
         self.assertEqual(receipt['to'], self.new)
         self.assertEqual(receipt['evidence'], 'issue/11 correction')
         self.assertEqual(receipt['head'], self.head)
-        self.assertEqual(receipt['identity']['worktree'], str(self.f.topic))
+        self.assertEqual(receipt['identity']['worktree'], str(self.f.topic.resolve()))
         before.pop('validation'); after.pop('validation')
         self.assertEqual(after, before)
         self.assertEqual((self.f.topic / 'dirty.txt').read_text(), 'retain work\n')
