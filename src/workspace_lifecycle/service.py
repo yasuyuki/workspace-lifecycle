@@ -193,6 +193,43 @@ def update_preflight(repo, *, task: str, expected_preflight: list[str],
     return {'task': task, 'preflight': list(preflight)}
 
 
+def update_validation(repo, *, task: str, expected_head: str,
+                      expected_validation: list[str], validation: list[str], evidence: str) -> dict:
+    """Correct an unaccepted task's validator without changing its contract history."""
+    repo = Path(repo).resolve()
+    if (not isinstance(expected_validation, list)
+            or not all(isinstance(x, str) and x for x in expected_validation)):
+        raise LifecycleError('expected validation requires a string argv array')
+    if (not isinstance(validation, list) or not validation
+            or not all(isinstance(x, str) and x for x in validation)):
+        raise LifecycleError('validation requires a nonempty string argv array')
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise LifecycleError('validation update requires durable evidence')
+    with _lease(repo, task):
+        with locked_state(repo) as (directory, state):
+            item = _task(state, task)
+            if task in state.get('intents', {}) or item.get('retire'):
+                raise LifecycleError('pending task operation prevents validation update')
+            if item.get('acceptance'):
+                raise LifecycleError('accepted task validation cannot be replaced')
+            branch = branch_for_task(repo, task)
+            identity = _finish_identity(repo, task, branch)
+            if expected_head != head(repo):
+                raise LifecycleError('validation update HEAD mismatch; supply the exact full commit OID')
+            _operation_check(repo, 'validation update')
+            if item.get('validation') != expected_validation:
+                raise LifecycleError('validation CAS mismatch')
+            receipt = {'from': list(expected_validation), 'to': list(validation),
+                       'evidence': evidence, 'head': expected_head, 'identity': identity, 'at': _now()}
+            _operation_check(repo, 'validation update')
+            if _finish_identity(repo, task, branch) != identity or head(repo) != expected_head:
+                raise LifecycleError('HEAD or identity changed during validation update')
+            item['validation'] = list(validation)
+            item.setdefault('validation_updates', []).append(receipt)
+            save_state(directory, state)
+    return {'task': task, 'validation': list(validation)}
+
+
 def hold(repo, task: str, reason: str, next_action: str) -> dict:
     if not reason or not next_action: raise LifecycleError("hold requires reason and next action")
     with _lease(repo, task, allow_use=True):

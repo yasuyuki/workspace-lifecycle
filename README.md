@@ -2,7 +2,7 @@
 
 `workspace-lifecycle` is an independently installable Python 3.10+ package for
 the workspace contract that Git does not provide. Build or install it from this
-directory; version `0.4.6` is not published to PyPI. It imports no agent-rules
+directory; version `0.4.7` is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
 
 Git owns worktree creation and relocation, branch and HEAD identity,
@@ -35,6 +35,21 @@ active use leases and pending operations. It records the latest from/to argv and
 evidence while preserving acceptance, holds, dirty baseline, Git identity and
 all other task fields. Compare old and new policy decisions in the task checkout
 before a migration; this command does not run either preflight or push.
+
+Use `update-validation` from the bound task checkout to correct a misregistered
+validator before acceptance. Review the old and replacement commands against the
+same correctness requirements, then use the command's help for the exact argv
+and full HEAD comparison inputs. The replacement runs in both the candidate and
+integration checkout during ordinary `finish`; prefer checkout-relative inputs
+that inspect the source being accepted. Do not point it at an unaccepted source
+placed in main just to make validation pass.
+
+The correction retains the task, dirty ownership, holds, dependencies, and
+preflight. Each correction records both commands, identity, HEAD, and evidence.
+It does not execute validation or grant acceptance. Active use, pending lifecycle
+or Git operations, and accepted tasks are refused. Old acceptance remains tied
+to its original validator. Resolve a pending operation through its existing
+recovery contract before attempting a correction.
 
 Use `adopt-existing` instead of `begin` to continue an existing checkout, including a nondefault primary checkout or a
 linked checkout nested below it.

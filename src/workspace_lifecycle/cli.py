@@ -51,6 +51,14 @@ def parser():
     update.add_argument('--expected-preflight-json', type=_json_list, required=True)
     update.add_argument('--preflight-json', type=_json_list, required=True)
     update.add_argument('--evidence', required=True)
+    validation = commands.add_parser('update-validation',
+        help='correct an unaccepted task validator by exact argv and HEAD CAS in its bound checkout')
+    validation.add_argument('--task', required=True)
+    validation.add_argument('--expected-head', required=True, help='exact full current commit OID')
+    validation.add_argument('--expected-validation-json', type=_json_list, required=True)
+    validation.add_argument('--validation-json', type=_json_list, required=True,
+        help='nonempty argv executed by finish in the candidate and integration checkout')
+    validation.add_argument('--evidence', required=True, help='durable reference explaining the correction')
     sync = commands.add_parser('sync', help='resume the same task by an exact same-name remote merge; does not accept or integrate work')
     for name in ('task', 'expected-head', 'remote-head', 'evidence'):
         sync.add_argument('--' + name, required=True)
@@ -90,6 +98,10 @@ def main(argv=None):
             result = service.update_preflight(args.repo, task=args.task,
                 expected_preflight=args.expected_preflight_json,
                 preflight=args.preflight_json, evidence=args.evidence)
+        elif args.command == 'update-validation':
+            result = service.update_validation(args.repo, task=args.task, expected_head=args.expected_head,
+                expected_validation=args.expected_validation_json,
+                validation=args.validation_json, evidence=args.evidence)
         elif args.command == 'register-owner-receipt':
             from . import producers
             result = producers.register(args.repo, args.task, args.owner, args.generation,
