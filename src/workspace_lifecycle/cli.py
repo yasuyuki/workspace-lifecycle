@@ -135,6 +135,7 @@ def main(argv=None):
                 return _resolve_run(args.cwd, args.launch_cwd, argv)
             from .leases import run
             repo = Path(args.repo).resolve()
+            service.check_preserved_cwd(Path(args.cwd).absolute())
             cwd = Path(args.cwd).resolve()
             if cwd != repo and repo not in cwd.parents:
                 raise LifecycleError('run cwd must be inside the selected task worktree')
@@ -287,6 +288,8 @@ def _git_marker(path):
 
 def _resolve_run(effective, launch, argv):
     """Resolve lifecycle ownership without exposing its state schema to callers."""
+    service.check_preserved_cwd(Path(effective).absolute())
+    service.check_preserved_cwd(Path(launch).absolute())
     effective = Path(effective).resolve()
     launch = Path(launch).resolve()
     service.check_preserved_cwd(effective)
