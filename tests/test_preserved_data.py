@@ -154,7 +154,7 @@ class PreservedDataTest(unittest.TestCase):
     def test_producer_output_and_managed_cwd_cannot_enter_boundary(self):
         entry, payload, _, _ = self.retired('old', legacy=True)
         self.adopt([entry])
-        with self.assertRaisesRegex(LifecycleError, 'nested repository'):
+        with self.assertRaisesRegex(LifecycleError, 'foreign preserved data'):
             producers.register(self.root, 'primary', 'bad-owner', 'g1',
                 str(producers.task_receipt_dir(self.root, 'primary') / 'g1.json'),
                 [str(payload / 'new-output')], [sys.executable, '-c', 'pass'])
@@ -364,6 +364,56 @@ class PreservedDataTest(unittest.TestCase):
             service.before_run(self.root, 'primary')
         marker.write_bytes(raw)
         self.assertFalse(self.adopt([entry])['accepted'])
+
+    def test_root_producer_cannot_claim_external_archived_admin(self):
+        entry, payload, admin, receipt = self.retired('old', legacy=True)
+        self.adopt([entry])
+        before = self.tree(payload, admin, receipt)
+        with self.assertRaisesRegex(LifecycleError, 'foreign preserved data'):
+            producers.register(self.root, 'primary', 'bad-owner', 'g1',
+                str(producers.task_receipt_dir(self.root, 'primary') / 'g1.json'),
+                [str(admin / 'new-output')], [sys.executable, '-c', 'pass'])
+        self.assertEqual(before, self.tree(payload, admin, receipt))
+
+    def test_other_task_producer_cannot_claim_parent_foreign_boundaries(self):
+        entry, payload, admin, receipt = self.retired('old', legacy=True)
+        self.adopt([entry])
+        child = Path(self.f.temp.name) / 'consumer'
+        service.begin(self.root, task='consumer', request='original consumer', remote='origin',
+            branch='topic/consumer', worktree=str(child), parent='primary',
+            validation=['git', 'diff', '--check'], preflight=self.f.preflight)
+        before = self.tree(payload, admin, receipt)
+        for target in (payload / 'new-output', admin / 'new-output'):
+            with self.assertRaisesRegex(LifecycleError, 'foreign preserved data'):
+                producers.register(child, 'consumer', 'bad-owner', 'g1',
+                    str(producers.task_receipt_dir(child, 'consumer') / 'g1.json'),
+                    [str(target)], [sys.executable, '-c', 'pass'])
+        self.assertEqual(before, self.tree(payload, admin, receipt))
+
+    def test_pending_adoption_also_blocks_other_task_producer(self):
+        entry, payload, admin, _ = self.retired('old', legacy=True)
+        self.interrupt([entry])
+        child = Path(self.f.temp.name) / 'independent'
+        service.begin(self.root, task='independent', request='unrelated work', remote='origin',
+            branch='topic/independent', worktree=str(child),
+            validation=['git', 'diff', '--check'], preflight=self.f.preflight)
+        for target in (payload / 'new-output', admin / 'new-output'):
+            with self.assertRaisesRegex(LifecycleError, 'foreign preserved data'):
+                producers.register(child, 'independent', 'bad-owner', 'g1',
+                    str(producers.task_receipt_dir(child, 'independent') / 'g1.json'),
+                    [str(target)], [sys.executable, '-c', 'pass'])
+
+    def test_existing_producer_claim_stops_overlapping_adoption(self):
+        entry, _, admin, _ = self.retired('old', legacy=True)
+        child = Path(self.f.temp.name) / 'independent'
+        service.begin(self.root, task='independent', request='unrelated work', remote='origin',
+            branch='topic/independent', worktree=str(child),
+            validation=['git', 'diff', '--check'], preflight=self.f.preflight)
+        producers.register(child, 'independent', 'claimed-owner', 'g1',
+            str(producers.task_receipt_dir(child, 'independent') / 'g1.json'),
+            [str(admin / 'claimed-output')], [sys.executable, '-c', 'pass'])
+        with self.assertRaisesRegex(LifecycleError, 'active producer output'):
+            self.adopt([entry])
 
 
 if __name__ == '__main__':

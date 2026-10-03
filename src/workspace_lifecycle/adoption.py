@@ -242,6 +242,8 @@ def adopt_existing(repo, *, task, request, remote, branch, worktree, expected_he
                 if other != task and (d.get('branch') == branch or d.get('worktree') == str(target)):
                     raise LifecycleError('another pending task owns this branch or worktree')
             _bindings(repo, task, branch, bool(intent))
+            from .preserved import check_claims
+            check_claims(target, preserved_data, state)
             snapshot = _capture(repo, target, branch, expected_head, preserved_data)
             if not intent:
                 intent = {'kind': 'adopt-existing', 'desired': desired, 'integration': integration,

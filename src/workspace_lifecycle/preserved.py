@@ -6,7 +6,7 @@ from pathlib import Path
 import stat
 
 from .errors import LifecycleError
-from .git import git, worktree_records
+from .git import branch_for_task, git, task_worktree, worktree_records
 
 
 def _text(value):
@@ -152,3 +152,38 @@ def overlap(name, boundaries):
     path = Path(name)
     return any(path == Path(root) or Path(root) in path.parents or path in Path(root).parents
                for root in boundaries)
+
+
+def roots(workspace, entries):
+    return [path for entry in entries for path in
+            (Path(workspace) / entry['path'], Path(entry['admin_archive']['path']))]
+
+
+def authorities(repo, state):
+    """Known protection in this common, including unfinished adoption intents."""
+    for task, item in state['tasks'].items():
+        entries = item.get('adoption', {}).get('preserved_data', [])
+        if entries:
+            yield task_worktree(repo, branch_for_task(repo, task)), entries
+    for intent in state['intents'].values():
+        if intent.get('kind') == 'adopt-existing':
+            desired = intent['desired']
+            if desired.get('preserved_data'):
+                yield Path(desired['worktree']), desired['preserved_data']
+
+
+def check_output(repo, state, output):
+    for workspace, entries in authorities(repo, state):
+        if any(overlap(output, [str(root)]) for root in roots(workspace, entries)):
+            raise LifecycleError('owner output cannot overlap foreign preserved data')
+
+
+def check_claims(workspace, entries, state):
+    boundaries = [str(root) for root in roots(workspace, entries)]
+    if not boundaries:
+        return
+    for item in state['tasks'].values():
+        for record in item.get('owner_receipts', {}).values():
+            if record.get('phase') != 'completed' and any(overlap(output, boundaries)
+                                                         for output in record.get('outputs', [])):
+                raise LifecycleError('preserved data overlaps an active producer output')
