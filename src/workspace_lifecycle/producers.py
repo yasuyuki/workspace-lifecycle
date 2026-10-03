@@ -43,6 +43,8 @@ def _overlap(left: Path, right: Path) -> bool:
 
 
 def _validate_bound(repo: Path, task: str, item: dict) -> Path:
+    from .service import _check_preserved
+    _check_preserved(repo, item)
     branch = branch_for_task(repo, task)
     workspace = task_worktree(repo, branch)
     if top(repo) != workspace or current_branch(repo) != branch or bound_task(repo) != task:
@@ -187,7 +189,7 @@ def _run(record: dict, result_ref: str, workspace: Path, task: str) -> None:
 
 def retry(repo, task: str) -> dict:
     """Complete only pre-registered owner generations after task acceptance."""
-    from .service import _lease
+    from .service import _lease, _check_preserved
 
     repo = Path(repo).resolve()
     results = []
@@ -210,6 +212,7 @@ def retry(repo, task: str) -> dict:
             raise LifecycleError('owner receipt completion requires the bound task worktree')
         if head(workspace) != acceptance['commit']:
             raise LifecycleError('owner receipt completion refuses a changed accepted branch')
+        _check_preserved(workspace, item)
         for key, record in item['owner_receipts'].items():
             if record.get('phase') == 'completed':
                 results.append({'generation': record['generation'], 'reclaimed': True})

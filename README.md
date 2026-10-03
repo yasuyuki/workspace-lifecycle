@@ -102,6 +102,56 @@ is not an accepted task; runtime use remains refused until adoption completes.
 Keep native Git writers and external filesystem users quiescent during adoption:
 the lifecycle lease serializes lifecycle clients, not arbitrary outside writers.
 
+For an explicitly identified foreign retired payload, use optional
+`adopt-existing --preserved-data-json` with an array of objects. Each object
+requires these exact fields:
+
+| Field | Required observation or reference |
+| --- | --- |
+| `path` | Canonical relative path of the individual retired payload, outside `.git`; no recovery-directory name is special. |
+| `owner` | Foreign owner identity, distinct from the adopting task. |
+| `receipt_ref` | Durable reference to that owner's existing retirement receipt; the receipt stays with its owner. |
+| `evidence` | Durable reference to the explicit protection contract and current payload/admin/path inspection. |
+| `identity` | Current payload directory `[st_dev, st_ino]`, from this host. |
+| `admin_archive` | Object with absolute `path` and current directory `identity: [st_dev, st_ino]` for the existing archived admin. |
+| `unresolved` | Array of outstanding conditions; empty only if the protection evidence has no outstanding conditions. |
+
+The owner must first map each receipt, payload and archived admin using existing
+private evidence and quiesce native writers. Use current identities for the
+boundary, preserving old device disagreements, missing manifests/remotes and
+unknown reclaim eligibility verbatim in `unresolved` and the referenced evidence.
+Do not repair the marker, rewrite a receipt, move data, or borrow a guessed
+validator to obtain adoption. This contract grants protection only: it does not
+certify retirement completeness, acceptance, integrity or permission to reclaim.
+
+This narrow boundary requires an existing regular native `.git` file naming an
+absolute former admin path that is absent, plus the explicitly identified
+existing archived admin directory. A live admin, active worktree, tracked source,
+link/reparse/mount traversal, changed anchor or marker is refused. Normal live
+nested Git keeps its existing independent protection; unknown broken Git outside
+the exact declared boundaries still stops adoption. Payload and admin interiors
+remain opaque: there is no manifest recapture or content ownership transfer.
+Links or mounts *inside* opaque data are never traversed or authorized by this
+contract; the referenced owner evidence retains any unverified conditions.
+
+The existing task adoption record stores only boundary identities, references,
+unresolved conditions and the marker fingerprint. There is no additional ledger
+and no receipt/content import. Named payloads and any archived admins inside the
+checkout join its existing `protected_paths`; Git dirty inventory excludes those
+exact paths without adding Git ignore rules. Existing branch/HEAD/index and dirt
+outside them stay unchanged. Retrying an interrupted adoption requires the same
+contract and anchors, including the same unresolved conditions.
+
+Managed entry checks, finish and producer registration recheck the anchors.
+Commit/restore/archive plans and producer outputs cannot overlap a protected
+boundary, even by an ancestor path or spelling alias. Sync and child integration
+reject incoming Git changes there before merging. A checkout retaining foreign
+preserved data cannot retire, so its retirement/reclaim never acquires that data.
+Use the existing owner separately for any future recovery/reclaim. Managed cwd
+selection cannot enter the preserved data. Arbitrary native commands are not a
+filesystem sandbox: keep their permissions and the real validator consistent
+with the referenced owner boundary, and keep external writers quiescent.
+
 An active `agent-branches/state.json` prevents adoption. Stop the old consumers
 in an explicit maintenance interval, preserve and verify state/hooks/config and
 rollback evidence, then detach the old authority before adopting continuing
@@ -331,3 +381,8 @@ still requires explicit review.
 
 Version 0.4.4 lets an adopted primary checkout finish while it keeps ignored
 workspace data and unchanged baseline entries.
+
+Version 0.4.9 adds explicit foreign preserved-data boundaries to existing-work
+adoption, with current anchor checks and unchanged unresolved owner conditions.
+It reuses task protection through managed entry, finish, producer, sync and
+integration, and refuses retirement of a checkout retaining these boundaries.

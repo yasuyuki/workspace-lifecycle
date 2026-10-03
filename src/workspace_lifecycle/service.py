@@ -35,14 +35,15 @@ def _lease(repo, task, allow_use=False):
         raise LifecycleError(str(exc)) from exc
 
 
-def _snapshot(repo: Path, *, optional_locks=True) -> dict[str, str]:
+def _snapshot(repo: Path, *, optional_locks=True, excluded=()) -> dict[str, str]:
+    pathspec = ['--', '.', *(':(exclude,literal)' + name for name in excluded)] if excluded else []
     environment = None if optional_locks else {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
     process = subprocess.run(['git', '-C', str(repo), 'status', '--porcelain=v1', '-z',
-                              '--untracked-files=all', '--ignored=no', '--no-renames'],
+                              '--untracked-files=all', '--ignored=no', '--no-renames', *pathspec],
                              capture_output=True, check=True, env=environment)
     result = {os.fsdecode(row[3:]): os.fsdecode(row[:2]) for row in process.stdout.split(b'\0') if row}
     ignored = subprocess.run(['git', '-C', str(repo), 'ls-files', '--others', '--ignored',
-                              '--exclude-standard', '-z'], capture_output=True, check=True)
+                              '--exclude-standard', '-z', *pathspec], capture_output=True, check=True)
     result.update({os.fsdecode(row): '!!' for row in ignored.stdout.split(b'\0') if row})
     return result
 
@@ -161,7 +162,7 @@ def status(repo, task: str | None = None) -> dict:
         branch = branch_for_task(repo, task)
         try:
             live = task_worktree(repo, branch)
-            data["live"] = {"branch": branch, "head": head(live), "worktree": str(live), "dirty": _snapshot(live)}
+            data["live"] = {"branch": branch, "head": head(live), "worktree": str(live), "dirty": _snapshot(live, excluded=_preserved_paths(data))}
         except LifecycleError as exc: data["live_error"] = str(exc)
         data["task"] = task
         data["completion"] = "exception" if data.get("exception") else ("accepted" if data.get("acceptance") else "active")
@@ -522,6 +523,41 @@ def _bind_preservation_evidence(stored, incoming: str | None):
     return incoming
 
 
+def _preserved_paths(item):
+    return [name for value in item.get('adoption', {}).get('preserved_snapshot', {}).values()
+            for name in value['protected_paths']]
+
+
+def _check_preserved(repo, item, incoming=None):
+    from .preserved import check, overlap
+    check(repo, item)
+    protected = _preserved_paths(item)
+    if not protected:
+        return
+    changes = _index_paths(repo)
+    if incoming:
+        raw = subprocess.run(['git', '-C', str(repo), 'diff', '--name-only', '-z',
+                              'HEAD', incoming], check=True, capture_output=True).stdout
+        changes.update(os.fsdecode(row) for row in raw.split(b'\0') if row)
+    if any(overlap(name, protected) for name in changes):
+        raise LifecycleError('Git changes overlap preserved data')
+
+
+def _check_preserved_plan(item, plan):
+    from .preserved import overlap
+    protected = _preserved_paths(item)
+    if not protected:
+        return
+    for category in ('commit', 'restore', 'archive'):
+        for entry in plan.get(category, []):
+            if isinstance(entry, dict) and isinstance(entry.get('path'), str):
+                path = Path(entry['path'])
+                if any(part.casefold() in ('.git', '..') for part in path.parts):
+                    raise LifecycleError('path must name a workspace file outside Git metadata')
+                if overlap(entry['path'], protected):
+                    raise LifecycleError('plan path belongs to preserved data')
+
+
 def _primary_workspace_data(repo: Path, task: dict, dirty: dict[str, str]) -> set[str]:
     """Dirt an adopted primary checkout may keep after acceptance.
 
@@ -552,6 +588,8 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
         with locked_state(repo) as (directory, state):
             task = _task(state, task_id); branch = branch_for_task(repo, task_id)
             identity = _finish_identity(repo, task_id, branch)
+            _check_preserved(repo, task)
+            _check_preserved_plan(task, plan)
             if task.get('hold'):
                 raise LifecycleError('task is held: ' + json.dumps(task['hold']))
             _index_protection(repo)
@@ -680,7 +718,7 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     raise LifecycleError('preexisting dirty is not owned by this task')
                 if _index_paths(repo) - set(commit_paths + restore_paths):
                     raise LifecycleError('index contains changes outside the owned finish plan')
-                dirty = _snapshot(repo)
+                dirty = _snapshot(repo, excluded=_preserved_paths(task))
                 uncovered = set(dirty) - set(all_paths)
                 # Safe owned actions run first. Remaining dirt is never waived
                 # merely because it existed before this session.
@@ -688,10 +726,13 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 if validated_head not in {intent['initial_head'], intent.get('committed'), synchronized_head}:
                     raise LifecycleError('HEAD changed before finish validation')
                 precommit = _validate(repo, task['validation'])
+                _check_preserved(repo, task)
                 if _finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head:
                     raise LifecycleError('HEAD or identity changed during finish validation')
                 _operation_check(repo, 'finish validation')
+                _check_preserved_plan(task, plan)
                 _resolve_files(repo, plan, intent, directory, state)
+                _check_preserved(repo, task)
                 _checked_paths(repo, plan.get('commit', []), need='source', owner=task_id,
                     completed=set(commit_paths) if synchronized_head and intent.get('committed') else None)
                 if _finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head:
@@ -713,11 +754,12 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                             raise LifecycleError('finish commit identity changed')
                         intent['committed'] = committed_head; save_state(directory, state)
                 evidence = _validate(repo, task['validation'])
+                _check_preserved(repo, task)
                 expected_finish_head = synchronized_head or intent.get('committed') or intent['initial_head']
                 if _finish_identity(repo, task_id, branch) != identity or head(repo) != expected_finish_head:
                     raise LifecycleError('HEAD or identity changed during finish validation')
                 _operation_check(repo, 'finish validation')
-                final_dirty = _snapshot(repo)
+                final_dirty = _snapshot(repo, excluded=_preserved_paths(task))
                 if task.get('owner_receipts'):
                     from .producers import owned_dirty_paths
                     owned_outputs = owned_dirty_paths(repo, task)
@@ -786,12 +828,14 @@ def _sync_identity(repo, branch, remote, remote_head, remote_url=None):
 
 
 def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
-                 validation, holder, persist):
+                 validation, holder, persist, workspace_record=None):
     """One exact native merge, shared by task repair and integration targets.
 
     The receipt extends an existing operation; it is never task acceptance.
     Native writers must be quiescent, as for adoption and finish.
     """
+    workspace_record = workspace_record or {}
+    _check_preserved(repo, workspace_record)
     for marker in ('REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer', 'BISECT_START', 'index.lock'):
         if Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-path', marker)).exists():
             raise LifecycleError('unrelated Git operation prevents synchronization: ' + marker)
@@ -824,16 +868,17 @@ def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
             raise LifecycleError('synchronization requires full commit OIDs')
         if git(repo, 'merge-base', expected_head, remote_head, optional=True) is None:
             raise LifecycleError('synchronization refuses unrelated histories')
+        _check_preserved(repo, workspace_record, remote_head)
         merge_head = git(repo, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True)
         if merge_head:
             if merge_head != remote_head:
                 raise LifecycleError('manual merge source differs from the exact same-name remote topic')
-            dirty = _snapshot(repo)
+            dirty = _snapshot(repo, excluded=_preserved_paths(workspace_record))
             if any(code in ('??', '!!') for code in dirty.values()):
                 raise LifecycleError('manual merge contains unrelated untracked or private data')
         else:
             _operation_check(repo, 'synchronization')
-            if _snapshot(repo):
+            if _snapshot(repo, excluded=_preserved_paths(workspace_record)):
                 raise LifecycleError('synchronization requires a clean checkout')
         outcome = subprocess.run(['git', '-C', str(repo), 'merge-tree', '--write-tree', '-z', '--name-only', expected_head, remote_head],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -849,6 +894,7 @@ def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
         if previous:
             holder.setdefault('synchronization_history', []).append(previous)
         holder['synchronization'] = receipt; persist()
+    _check_preserved(repo, workspace_record, remote_head)
     current = head(repo)
     merge_head = git(repo, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True)
     observed_remote = _remote_tip(repo, remote, branch)
@@ -858,7 +904,7 @@ def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
             raise LifecycleError('pending synchronization remote no longer preserves its pinned source')
     _sync_identity(repo, branch, remote, observed_remote, receipt['remote_url'])
     if receipt.get('commit'):
-        if current != receipt['commit'] or merge_head or _snapshot(repo):
+        if current != receipt['commit'] or merge_head or _snapshot(repo, excluded=_preserved_paths(workspace_record)):
             raise LifecycleError('completed synchronization identity changed')
         return receipt
     if current != expected_head:
@@ -869,7 +915,7 @@ def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
             raise LifecycleError('HEAD changed outside the recorded synchronization')
     elif not merge_head:
         _operation_check(repo, 'synchronization')
-        if _snapshot(repo):
+        if _snapshot(repo, excluded=_preserved_paths(workspace_record)):
             raise LifecycleError('pending synchronization has unrelated dirty content')
         if git(repo, 'merge-base', '--is-ancestor', remote_head, current, optional=True) is not None:
             pass
@@ -884,7 +930,7 @@ def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
     if merge_head and (current != expected_head or merge_head != remote_head):
         raise LifecycleError('native synchronization merge identity changed')
     _index_protection(repo)
-    dirty = _snapshot(repo)
+    dirty = _snapshot(repo, excluded=_preserved_paths(workspace_record))
     if any(code in ('??', '!!') or code[1] != ' ' for code in dirty.values()):
         raise LifecycleError('resolve synchronization conflicts and unstaged data in this same checkout')
     tree = git(repo, 'write-tree')
@@ -894,12 +940,13 @@ def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
         if {os.fsdecode(row) for row in differences.split(b'\0') if row} - set(receipt['conflicts']):
             raise LifecycleError('synchronization index changed outside the recorded conflict paths')
     checked = [_validate(repo, argv) for argv in validation]
+    _check_preserved(repo, workspace_record)
     _sync_identity(repo, branch, remote, observed_remote, receipt['remote_url'])
     if head(repo) != current or git(repo, 'write-tree') != tree:
         raise LifecycleError('HEAD or index changed during synchronization validation')
     if git(repo, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True) != merge_head:
         raise LifecycleError('merge state changed during synchronization validation')
-    if _snapshot(repo) != dirty:
+    if _snapshot(repo, excluded=_preserved_paths(workspace_record)) != dirty:
         raise LifecycleError('validation changed synchronization working content')
     if merge_head:
         receipt['tree'] = tree; persist()
@@ -907,7 +954,7 @@ def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
         parents = (git(repo, 'rev-list', '--parents', '-1', 'HEAD') or '').split()[1:]
         if parents != [expected_head, remote_head] or git(repo, 'rev-parse', 'HEAD^{tree}') != tree:
             raise LifecycleError('synchronization commit identity changed')
-    if _snapshot(repo):
+    if _snapshot(repo, excluded=_preserved_paths(workspace_record)):
         raise LifecycleError('synchronization commit left dirty content')
     receipt['commit'] = head(repo); receipt['validation'] = checked; persist()
     _sync_identity(repo, branch, remote, observed_remote, receipt['remote_url'])
@@ -939,7 +986,7 @@ def synchronize(repo, *, task, expected_head, remote_head, evidence):
                     raise LifecycleError('finish preservation must complete before synchronization')
             result = _synchronize(repo, branch=branch, remote=item['remote'], expected_head=expected_head,
                 remote_head=remote_head, evidence=evidence, validation=[item['validation']],
-                holder=holder, persist=lambda: save_state(directory, state))
+                holder=holder, persist=lambda: save_state(directory, state), workspace_record=item)
             return {'task': task, 'commit': result['commit'], 'synchronization': result}
 
 
@@ -975,6 +1022,8 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
             else:
                 target_branch = remote_default(repo, item['remote'])
             target_worktree = task_worktree(repo, target_branch)
+            _check_preserved(task_worktree(repo, source_branch), item)
+            _check_preserved(target_worktree, parent or {}, source_commit)
             if current_branch(target_worktree) != target_branch:
                 raise LifecycleError('integration checkout branch changed')
             record = item.get('integrated')
@@ -996,7 +1045,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                     elif pending and not pending.get('commit'):
                         target_head = pending['local']
                     else:
-                        if _snapshot(target_worktree) or git(target_worktree, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True):
+                        if _snapshot(target_worktree, excluded=_preserved_paths(parent or {})) or git(target_worktree, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True):
                             raise LifecycleError('integration target has unrelated dirty or merge state')
                         target_head = head(target_worktree)
                         if parent and target_head != parent['acceptance']['commit']:
@@ -1009,7 +1058,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                             evidence=result_ref,
                             validation=[parent['validation']] if parent else [],
                             holder=item.setdefault('integration_synchronization', {}),
-                            persist=lambda: save_state(directory, state))
+                            persist=lambda: save_state(directory, state), workspace_record=parent)
                         target_head = synced['commit']
                         remote_head = _remote_tip(repo, item['remote'], target_branch)
                         if synced['source'] != remote_head:
@@ -1017,7 +1066,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                                 expected_head=target_head, remote_head=remote_head, evidence=result_ref,
                                 validation=[parent['validation']] if parent else [],
                                 holder=item['integration_synchronization'],
-                                persist=lambda: save_state(directory, state))
+                                persist=lambda: save_state(directory, state), workspace_record=parent)
                             target_head = synced['commit']
                     intent = {'kind': 'merge', 'source': source_commit, 'target': target_branch,
                               'target_head': target_head, 'result_ref': result_ref, 'at': _now()}
@@ -1027,7 +1076,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                     _synchronize(target_worktree, branch=target_branch, remote=item['remote'],
                         expected_head=pending_sync['local'], remote_head=pending_sync['source'],
                         evidence=result_ref, validation=[item['validation']] + ([parent['validation']] if parent else []),
-                        holder=intent, persist=lambda: save_state(directory, state))
+                        holder=intent, persist=lambda: save_state(directory, state), workspace_record=parent)
                 current = head(target_worktree)
                 merge_head = git(target_worktree, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True)
                 if current == intent.get('synchronization', {}).get('commit'):
@@ -1038,7 +1087,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                         raise LifecycleError('target moved outside the recorded normal merge')
                     intent['merged'] = current; save_state(directory, state)
                 elif not merge_head:
-                    if _snapshot(target_worktree):
+                    if _snapshot(target_worktree, excluded=_preserved_paths(parent or {})):
                         raise LifecycleError('pending target has unrelated dirty content')
                     if git(repo, 'merge-base', '--is-ancestor', source_commit, current, optional=True) is not None:
                         intent['merged'] = current
@@ -1055,11 +1104,12 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                 checked_tree = git(target_worktree, 'write-tree')
                 evidence = _validate(target_worktree, item['validation'])
                 parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
+                _check_preserved(target_worktree, parent or {})
                 if head(target_worktree) != checked_head or git(target_worktree, 'write-tree') != checked_tree:
                     raise LifecycleError('integration HEAD or index changed during validation')
                 if git(target_worktree, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True) != merge_head:
                     raise LifecycleError('integration merge state changed during validation')
-                dirty = _snapshot(target_worktree)
+                dirty = _snapshot(target_worktree, excluded=_preserved_paths(parent or {}))
                 if any(code in ('??', '!!') or code[1] != ' ' for code in dirty.values()):
                     raise LifecycleError('merge validation left unstaged or private data; resolve in this target')
                 if not intent.get('merged'):
@@ -1070,7 +1120,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                     if parents != [checked_head, source_commit] or git(target_worktree, 'rev-parse', 'HEAD^{tree}') != checked_tree:
                         raise LifecycleError('integration commit changed from the validated merge')
                     intent['merged'] = committed; save_state(directory, state)
-                if _snapshot(target_worktree):
+                if _snapshot(target_worktree, excluded=_preserved_paths(parent or {})):
                     raise LifecycleError('integration commit left dirty content')
                 merged = intent.get('synchronization', {}).get('commit') or intent['merged']
                 remote_head = _remote_tip(repo, item['remote'], target_branch)
@@ -1082,11 +1132,12 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                             expected_head=pending_sync['local'] if pending_sync and not pending_sync.get('commit') else merged,
                             remote_head=pending_sync['source'] if pending_sync and not pending_sync.get('commit') else remote_head,
                             evidence=result_ref, validation=[item['validation']] + ([parent['validation']] if parent else []),
-                            holder=intent, persist=lambda: save_state(directory, state))
+                            holder=intent, persist=lambda: save_state(directory, state), workspace_record=parent)
                         merged = synced['commit']
                 evidence = _validate(target_worktree, item['validation'])
                 parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
-                if head(target_worktree) != merged or _snapshot(target_worktree):
+                _check_preserved(target_worktree, parent or {})
+                if head(target_worktree) != merged or _snapshot(target_worktree, excluded=_preserved_paths(parent or {})):
                     raise LifecycleError('integration changed during final validation')
                 pushed = _push(target_worktree, item['preflight'], target_branch, item['remote'], expected_head=merged)
                 record = {'destination': target_branch, 'commit': merged, 'source': source_commit,
@@ -1222,6 +1273,8 @@ def retire(repo, *, task: str, result_ref: str, users_released: bool = False, re
         with _lease(repo, task, allow_use=request_only):
             with locked_state(repo) as (directory, state):
                 item = state['tasks'].get(task)
+                if item and item.get('adoption', {}).get('preserved_data'):
+                    raise LifecycleError('checkout with foreign preserved data cannot retire')
                 if item and item.get('owner_receipts'):
                     acceptance = item.get('acceptance')
                     if item.get('hold') or not acceptance or acceptance['result_ref'] != result_ref:
@@ -1246,6 +1299,8 @@ def retire(repo, *, task: str, result_ref: str, users_released: bool = False, re
                 result = {'task': task, 'retired': True, 'receipt': state['retired'][task]}
             else:
                 item = _task(state, task); request = item.get('retire')
+                if item.get('adoption', {}).get('preserved_data'):
+                    raise LifecycleError('checkout with foreign preserved data cannot retire')
                 acceptance = item.get('acceptance')
                 if item.get('hold') or not acceptance or acceptance.get('result_ref') != result_ref:
                     raise LifecycleError('retire requires exact accepted result and no hold')
@@ -1665,11 +1720,41 @@ def check_run_identity(repo, task: str) -> None:
         raise LifecycleError('run must use the exact bound task checkout')
 
 
-def before_run(repo, task: str) -> None:
+def before_run(repo, task: str, cwd=None) -> None:
     with locked_state(repo) as (_, state):
         item = _task(state, task)
+        _check_preserved(repo, item)
+        if cwd is not None:
+            _check_preserved_cwd(repo, item, Path(cwd))
         if item.get('hold'):
             raise LifecycleError('task is held; explicit hold resolution is required')
         if item.get('retire') or item.get('completion_release'):
             raise LifecycleError('task has a retirement request; replay it before starting new use')
         check_run_identity(repo, task)
+
+
+def _check_preserved_cwd(repo, item, cwd):
+    from .preserved import overlap
+    for name in _preserved_paths(item):
+        boundary = Path(repo) / name
+        if cwd == boundary or boundary in cwd.parents:
+            raise LifecycleError('managed cwd belongs to foreign preserved data')
+
+
+def check_preserved_cwd(cwd):
+    # Inspect outer managed roots before probing a retired payload as live Git.
+    for ancestor in reversed((cwd, *cwd.parents)):
+        if not (ancestor / '.git').exists():
+            continue
+        root = git(ancestor, 'rev-parse', '--show-toplevel', optional=True)
+        if root is None or Path(root).resolve() != ancestor:
+            continue
+        common = Path(git(ancestor, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
+        if not (common / 'workspace-lifecycle' / 'state.json').is_file():
+            continue
+        with locked_state(ancestor) as (_, state):
+            try:
+                item = _task(state, bound_task(ancestor))
+            except LifecycleError:
+                continue
+            _check_preserved_cwd(ancestor, item, cwd)
