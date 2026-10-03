@@ -1765,6 +1765,7 @@ def check_preserved_cwd(cwd, repo=None):
         with locked_state(repo) as (_, state):
             _check_preserved_cwd(repo, state, cwd)
         return
+    selected = None
     for ancestor in reversed((cwd, *cwd.parents)):
         if not (ancestor / '.git').exists():
             continue
@@ -1780,3 +1781,5 @@ def check_preserved_cwd(cwd, repo=None):
             except LifecycleError:
                 continue
             _check_preserved_cwd(ancestor, state, cwd)
+            selected = ancestor.resolve()
+    return selected

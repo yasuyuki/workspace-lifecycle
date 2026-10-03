@@ -290,7 +290,9 @@ def _git_marker(path):
 def _resolve_run(effective, launch, argv):
     """Resolve lifecycle ownership without exposing its state schema to callers."""
     lexical_launch = Path(launch).absolute()
-    service.check_preserved_cwd(Path(effective).absolute())
+    context = service.check_preserved_cwd(Path(effective).absolute())
+    if context is not None:
+        service.check_preserved_cwd(lexical_launch, repo=context)
     service.check_preserved_cwd(Path(launch).absolute())
     effective = Path(effective).resolve()
     launch = Path(launch).resolve()
