@@ -1,19 +1,16 @@
 {
-  "README.md": "88c6395eb5ac5f2a0201eb1432661532954ad8bf9b7666f04c611c3c9fb526a1",
-  "pyproject.toml": "680ebc133dea9de7c5069de0c41bbba02d71cb3e4c2885f9c278cf35ba5a909b",
   "src/workspace_lifecycle/__init__.py": "a32d7ac0a64bd17ad1291fa13d84ed19e5792aaacf3236e397e649b55ce51b86",
   "src/workspace_lifecycle/__main__.py": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d",
+  "src/workspace_lifecycle/producers.py": "18d18ee05f606522a9348f08c2923e9cf4e8e78b3591599219aead74ca7d7e20",
+  "src/workspace_lifecycle/reclamation.py": "9f9501f097ae8a0ced18a30f8b716a9390b7cecebf5220bf4c150bede66f1c27",
   "src/workspace_lifecycle/adoption.py": "6ae51a14f6ce3587a5278a44e202d65b49dc7866744e4705990067e87dbd8cab",
-  "src/workspace_lifecycle/cli.py": "1a838bb1284225edee3e9db997d45b448c2eb8c873faa298a70c2632b8a1e46e",
-  "src/workspace_lifecycle/compat.py": "f0d2cb0d8ee4e57dd3aced0429f3455938ea29f786c0fd20f4ac35d03f35e5b2",
+  "src/workspace_lifecycle/cli.py": "6449c14372684d0cb66893dc347b591a345726478967ac7cfeaf65ec3cb50112",
+  "src/workspace_lifecycle/preserved.py": "858e86d44d0cee17b32f5c8f2cd350aa3838feaa2ba30a228bdfd46be20faaee",
+  "src/workspace_lifecycle/state.py": "63e15a7472089258f100f88e3e056e452963d2a53b8ca278abc261d2b3af5a6e",
   "src/workspace_lifecycle/errors.py": "57e0b0c6be305c8f61e5791672a08007a41a6db0ba50e7a93b17273e67dcb501",
   "src/workspace_lifecycle/git.py": "c4b632eb8a5b8286e0cd5773da105a98e577d96b55483f69ef28a43b7aca6af7",
   "src/workspace_lifecycle/leases.py": "c84c308d13f97f68650833af166db758c78245ca9b77a49326a79fec9fc0a0a0",
-  "src/workspace_lifecycle/preserved.py": "9c43809acef341a4bbc6ad30446bcd1d74796f7627cfe2fdb7150c9fbd2811e3",
-  "src/workspace_lifecycle/producers.py": "18d18ee05f606522a9348f08c2923e9cf4e8e78b3591599219aead74ca7d7e20",
+  "src/workspace_lifecycle/compat.py": "f0d2cb0d8ee4e57dd3aced0429f3455938ea29f786c0fd20f4ac35d03f35e5b2",
   "src/workspace_lifecycle/push.py": "4113f96c3c231382974a93bf459a493140b1bddc381008b411d0451d1b812b13",
-  "src/workspace_lifecycle/reclamation.py": "9f9501f097ae8a0ced18a30f8b716a9390b7cecebf5220bf4c150bede66f1c27",
-  "src/workspace_lifecycle/service.py": "20819cd05d1b4e8e5240b126631c9d24eb88eb3ff607d02a61a6c17cefb07259",
-  "src/workspace_lifecycle/state.py": "63e15a7472089258f100f88e3e056e452963d2a53b8ca278abc261d2b3af5a6e",
-  "tests/test_preserved_data.py": "4c1ef1cacf6749a800029e802c7430cb1b32bf37119bc3fe4607866038a8c368"
+  "src/workspace_lifecycle/service.py": "591fcf36e5a9d0dd3da4e40bf369533c1d29679e14d0a78e2d4b9e96c99d8171"
 }

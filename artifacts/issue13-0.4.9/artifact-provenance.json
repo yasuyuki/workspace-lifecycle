@@ -1,21 +1,156 @@
 {
   "build_and_twine_strict": "PASS",
-  "ci": "Windows final CI pending at artifact creation; final result belongs to Issue #13",
+  "ci": {
+    "main": {
+      "jobs": {
+        "package (ubuntu-latest, 3.10)": {
+          "result": "success",
+          "test_summary": [
+            "package (ubuntu-latest, 3.10)\tInstall and test outside checkout\t2026-10-03T02:37:20.4957531Z Ran 263 tests in 107.051s",
+            "package (ubuntu-latest, 3.10)\tInstall and test outside checkout\t2026-10-03T02:37:20.4957866Z OK (skipped=9)"
+          ],
+          "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090320798/job/111109074679"
+        },
+        "package (ubuntu-latest, 3.12)": {
+          "result": "success",
+          "test_summary": [
+            "package (ubuntu-latest, 3.12)\tInstall and test outside checkout\t2026-10-03T02:37:12.0716768Z Ran 263 tests in 101.986s",
+            "package (ubuntu-latest, 3.12)\tInstall and test outside checkout\t2026-10-03T02:37:12.0717274Z OK (skipped=9)"
+          ],
+          "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090320798/job/111109074816"
+        },
+        "package (windows-latest, 3.10)": {
+          "result": "success",
+          "test_summary": [
+            "package (windows-latest, 3.10)\tInstall and test outside checkout\t2026-10-03T02:59:55.0819215Z Ran 263 tests in 1433.745s",
+            "package (windows-latest, 3.10)\tInstall and test outside checkout\t2026-10-03T02:59:55.0819774Z OK (skipped=17)"
+          ],
+          "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090320798/job/111109074433"
+        },
+        "package (windows-latest, 3.12)": {
+          "result": "success",
+          "test_summary": [
+            "package (windows-latest, 3.12)\tInstall and test outside checkout\t2026-10-03T03:01:41.0090638Z Ran 263 tests in 1544.480s",
+            "package (windows-latest, 3.12)\tInstall and test outside checkout\t2026-10-03T03:01:41.0091118Z OK (skipped=17)"
+          ],
+          "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090320798/job/111109074870"
+        }
+      },
+      "result": "PASS",
+      "revision": "666075dec2b54c37dbe2fa2ded01e2b6a1563a68",
+      "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090320798"
+    },
+    "source_pr": {
+      "jobs": {
+        "package (ubuntu-latest, 3.10)": {
+          "result": "success",
+          "test_summary": [
+            "package (ubuntu-latest, 3.10)\tInstall and test outside checkout\t2026-10-03T02:36:45.7757881Z Ran 263 tests in 146.859s",
+            "package (ubuntu-latest, 3.10)\tInstall and test outside checkout\t2026-10-03T02:36:45.7758254Z OK (skipped=9)"
+          ],
+          "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090245304/job/111108854568"
+        },
+        "package (ubuntu-latest, 3.12)": {
+          "result": "success",
+          "test_summary": [
+            "package (ubuntu-latest, 3.12)\tInstall and test outside checkout\t2026-10-03T02:36:44.9908294Z Ran 263 tests in 149.318s",
+            "package (ubuntu-latest, 3.12)\tInstall and test outside checkout\t2026-10-03T02:36:44.9908639Z OK (skipped=9)"
+          ],
+          "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090245304/job/111108854507"
+        },
+        "package (windows-latest, 3.10)": {
+          "result": "success",
+          "test_summary": [
+            "package (windows-latest, 3.10)\tInstall and test outside checkout\t2026-10-03T02:58:30.2411769Z Ran 263 tests in 1430.466s",
+            "package (windows-latest, 3.10)\tInstall and test outside checkout\t2026-10-03T02:58:30.2412137Z OK (skipped=17)"
+          ],
+          "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090245304/job/111108854375"
+        },
+        "package (windows-latest, 3.12)": {
+          "result": "success",
+          "test_summary": [
+            "package (windows-latest, 3.12)\tInstall and test outside checkout\t2026-10-03T02:55:48.1452986Z Ran 263 tests in 1251.435s",
+            "package (windows-latest, 3.12)\tInstall and test outside checkout\t2026-10-03T02:55:48.1453172Z OK (skipped=17)"
+          ],
+          "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090245304/job/111108854508"
+        }
+      },
+      "result": "PASS",
+      "revision": "ddacc53621d33410fb230b092adc3deaacbe407e",
+      "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090245304"
+    },
+    "source_push": {
+      "jobs": {
+        "package (ubuntu-latest, 3.10)": {
+          "result": "success",
+          "test_summary": [
+            "package (ubuntu-latest, 3.10)\tInstall and test outside checkout\t2026-10-03T02:36:02.8517337Z Ran 263 tests in 150.090s",
+            "package (ubuntu-latest, 3.10)\tInstall and test outside checkout\t2026-10-03T02:36:02.8517613Z OK (skipped=9)"
+          ],
+          "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090200098/job/111108717681"
+        },
+        "package (ubuntu-latest, 3.12)": {
+          "result": "success",
+          "test_summary": [
+            "package (ubuntu-latest, 3.12)\tInstall and test outside checkout\t2026-10-03T02:35:59.3939045Z Ran 263 tests in 148.907s",
+            "package (ubuntu-latest, 3.12)\tInstall and test outside checkout\t2026-10-03T02:35:59.3939686Z OK (skipped=9)"
+          ],
+          "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090200098/job/111108717669"
+        },
+        "package (windows-latest, 3.10)": {
+          "result": "success",
+          "test_summary": [
+            "package (windows-latest, 3.10)\tInstall and test outside checkout\t2026-10-03T02:54:23.6446719Z Ran 263 tests in 1228.910s",
+            "package (windows-latest, 3.10)\tInstall and test outside checkout\t2026-10-03T02:54:23.6447082Z OK (skipped=17)"
+          ],
+          "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090200098/job/111108717671"
+        },
+        "package (windows-latest, 3.12)": {
+          "result": "success",
+          "test_summary": [
+            "package (windows-latest, 3.12)\tInstall and test outside checkout\t2026-10-03T03:00:10.7059374Z Ran 263 tests in 1579.320s",
+            "package (windows-latest, 3.12)\tInstall and test outside checkout\t2026-10-03T03:00:10.7059821Z OK (skipped=17)"
+          ],
+          "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090200098/job/111108717586"
+        }
+      },
+      "result": "PASS",
+      "revision": "ddacc53621d33410fb230b092adc3deaacbe407e",
+      "url": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37090200098"
+    }
+  },
+  "ci_result": "PASS",
+  "cloud_raw_evidence_hashes": {
+    "child-integration-boundary.json": "0cd4327738cfc283327b1a97e5414876aa2107d5fd8315b0e00915a9986c26d6",
+    "linux-installed-suite.log": "b07538cd4bc15b32f3559fa4ff41f1f40d4e6280e43e594bbfcb1c8d15c297f3",
+    "preserved-fixtures.log": "79d6fd849cd89b87ee4708aa73609e196376f1a2f86c059bc56cc00b6e04b4a2"
+  },
   "extra_child_integration_fixture": "PASS",
-  "installed_linux_tests": 260,
+  "fixture_fix": "Windows 8.3/canonical temporary-path mismatch fixed without disabling or skipping refusal checks.",
+  "installed_linux_full_suite_revision": "ddacc53621d33410fb230b092adc3deaacbe407e",
+  "installed_linux_tests": 263,
   "linux_skips": 9,
-  "main_revision": "4e928ea7ea11458853e809d873ecba673fa1a09d",
+  "main_revision": "666075dec2b54c37dbe2fa2ded01e2b6a1563a68",
+  "managed_cwd_scope": "Current and pending boundaries across the common; lexical and canonical cwd with ancestor identity alias checks.",
   "module_byte_match": 14,
   "operator_acceptance": "PENDING",
   "operator_applied": false,
+  "operator_private_evidence": "O continuation-o5/h-payload-current.json was not retrievable from Cloud; O must recheck actual current boundaries and original-request validators.",
   "package": "workspace-lifecycle 0.4.9",
   "package_hashes": {
-    "source-b6f7122c34a6b40daf922ebff2688a70b65b2477.tar.gz": "431ef303e47685d7b5ee1fc7405b0caa0f6d8ef1319f33197855b69659de354d",
-    "source-files.sha256.json": "9b90be3fae6d3b382f1658ad7790b59005595de2d412f8e03784d3587170fc2a",
-    "workspace_lifecycle-0.4.9-py3-none-any.whl": "7a84e37928e09b5d13616b652afdaba79d928f1e7b2482d0c4ebd11cf516d056",
-    "workspace_lifecycle-0.4.9.tar.gz": "6f0a305cb3de7e07fee8a31853b3ebdc1d03a3e83817893571c0224c21c6c11b"
+    "source-ddacc53621d33410fb230b092adc3deaacbe407e.tar.gz": "766ab02af54914567e0981d2d664867937239916734341f11cf9868f659fd44d",
+    "source-files.sha256.json": "89191f07d915406f02adc41534dc33a70a3126f01043cd1604a8fff5bc5b1d44",
+    "workspace_lifecycle-0.4.9-py3-none-any.whl": "86f1f909024325c851961240343c3c66424b3c3536f4830f2f9dc5786e2b0f5f",
+    "workspace_lifecycle-0.4.9.tar.gz": "29440cfbdce71eeab4c8b5924ec2c1c38ef0e2501a91f5b2d098ad7cb2455547"
   },
-  "preservation_fixtures": 23,
-  "source_main_tree": "f3df1be59b622d9a9022cbc5ea316534aa2bddfc",
-  "source_revision": "b6f7122c34a6b40daf922ebff2688a70b65b2477"
+  "preservation_fixtures": 26,
+  "raw_evidence": "Cloud execution workspace only; no raw/operator evidence published in artifact repository.",
+  "source_main_tree": "5e97f1fb3ba3d7eb43b1fb25d20a1f68fa98e490",
+  "source_revision": "ddacc53621d33410fb230b092adc3deaacbe407e",
+  "superseded_windows_fixture_failure": {
+    "cause": "Short/canonical path mismatch in five new fixture checks; corrected in PR17.",
+    "pr_ci": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37086409622",
+    "source_ci": "https://github.com/yasuyuki/workspace-lifecycle/actions/runs/37086374003"
+  },
+  "wheel_build_source_revision": "ddacc53621d33410fb230b092adc3deaacbe407e"
 }
