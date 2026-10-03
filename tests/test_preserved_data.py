@@ -19,7 +19,8 @@ class PreservedDataTest(unittest.TestCase):
         self.f = test_lifecycle.LifecycleTest('runTest')
         self.f.setUp()
         self.addCleanup(self.f.tearDown)
-        self.root = self.f.root
+        # Native retirement resolves Windows 8.3 temporary-path aliases.
+        self.root = self.f.root.resolve()
         test_lifecycle.run(self.root, 'switch', '-c', 'topic/primary')
         self.integration = Path(self.f.temp.name) / 'integration'
         test_lifecycle.run(self.root, 'worktree', 'add', str(self.integration), 'trunk')
@@ -57,7 +58,9 @@ class PreservedDataTest(unittest.TestCase):
             admin = Path(receipt['admin_archive_path'])
         receipt_file = Path(self.other.temp.name) / (name + '-receipt.json')
         receipt_file.write_text(json.dumps(receipt, sort_keys=True))
-        entry = {'path': payload.relative_to(self.root).as_posix(), 'owner': 'foreign-common/' + name,
+        payload = payload.resolve()
+        admin = admin.resolve()
+        entry = {'path': payload.relative_to(self.root.resolve()).as_posix(), 'owner': 'foreign-common/' + name,
                  'receipt_ref': str(receipt_file), 'evidence': 'private current ownership/anchor inspection',
                  'identity': self.identity(payload),
                  'admin_archive': {'path': str(admin), 'identity': self.identity(admin)},
@@ -320,7 +323,7 @@ class PreservedDataTest(unittest.TestCase):
     def test_linked_checkout_cannot_retire_foreign_payload(self):
         linked = Path(self.f.temp.name) / 'linked'
         test_lifecycle.run(self.root, 'worktree', 'add', '-b', 'topic/linked', str(linked))
-        self.root = linked
+        self.root = linked.resolve()
         entry, payload, admin, receipt = self.retired('old', legacy=True)
         before = self.tree(payload, admin, receipt)
         self.adopt([entry], worktree=str(linked), branch='topic/linked')
