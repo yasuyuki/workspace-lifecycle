@@ -42,6 +42,11 @@ def contracts(value, task):
                 or not _text(admin['path']) or not Path(admin['path']).is_absolute()
                 or not _identity(admin['identity'])):
             raise LifecycleError('preserved data needs an absolute archived admin and its current identity')
+        from .service import _no_links
+        archive_path = Path(admin['path'])
+        _no_links(archive_path)
+        entry = deepcopy(entry)
+        entry['admin_archive']['path'] = str(archive_path.resolve())
         result.append(entry)
     paths = [Path(e['path']) for e in result]
     if any(a == b or a in b.parents or b in a.parents

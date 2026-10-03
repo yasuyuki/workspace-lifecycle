@@ -164,6 +164,11 @@ class PreservedDataTest(unittest.TestCase):
             run = subprocess.run([*argv, '--cwd', str(payload), '--', sys.executable, '-c', 'raise AssertionError()'], capture_output=True, text=True)
             self.assertNotEqual(run.returncode, 0)
             self.assertIn('foreign preserved data', run.stderr)
+        outside = subprocess.run([sys.executable, '-m', 'workspace_lifecycle', 'resolve-run',
+            '--cwd', str(self.root), '--launch-cwd', entry['admin_archive']['path'], '--',
+            sys.executable, '-c', 'raise AssertionError()'], capture_output=True, text=True)
+        self.assertNotEqual(outside.returncode, 0)
+        self.assertIn('foreign preserved data', outside.stderr)
 
     def interrupt(self, entries):
         original = adoption.save_state
@@ -414,6 +419,56 @@ class PreservedDataTest(unittest.TestCase):
             [str(admin / 'claimed-output')], [sys.executable, '-c', 'pass'])
         with self.assertRaisesRegex(LifecycleError, 'active producer output'):
             self.adopt([entry])
+
+    def test_archive_destination_cannot_enter_external_preserved_admin(self):
+        entry, payload, admin, receipt = self.retired('old', legacy=True)
+        self.adopt([entry])
+        before = self.tree(payload, admin, receipt)
+        source = self.root / 'owned-private'
+        source.write_text('new private output owned by primary')
+        plan = Path(self.f.temp.name) / 'archive-destination.json'
+        plan.write_text(json.dumps({'archive': [{'path': source.name, 'classification': 'private',
+            'owner': 'primary', 'evidence': 'primary owns the source only',
+            'sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+            'store': str(admin), 'approval_evidence': 'does not grant foreign admin ownership'}]}))
+        original = service.git
+        def git(path, *args, **kwargs):
+            self.assertNotEqual(Path(path), admin, 'must not open protected admin as live Git')
+            return original(path, *args, **kwargs)
+        with patch.object(service, 'git', side_effect=git):
+            with self.assertRaisesRegex(LifecycleError, 'foreign preserved data'):
+                service.finish(self.root, task='primary', plan_path=str(plan), result_ref='issue/primary')
+        self.assertTrue(source.is_file())
+        self.assertFalse((admin / source.name).exists())
+        self.assertEqual(before, self.tree(payload, admin, receipt))
+
+    def test_admin_path_alias_retains_canonical_protection(self):
+        entry, _, admin, _ = self.retired('old', legacy=True)
+        alternate = admin.parent / 'regular-parent'
+        alternate.mkdir()
+        entry['admin_archive']['path'] = str(alternate / '..' / admin.name)
+        self.adopt([entry])
+        item = service.status(self.root, 'primary')
+        self.assertEqual(item['adoption']['preserved_data'][0]['admin_archive']['path'], str(admin.resolve()))
+        with self.assertRaisesRegex(LifecycleError, 'foreign preserved data'):
+            producers.register(self.root, 'primary', 'bad-owner', 'g1',
+                str(producers.task_receipt_dir(self.root, 'primary') / 'g1.json'),
+                [str(admin / 'new-output')], [sys.executable, '-c', 'pass'])
+
+    @unittest.skipIf(os.name == 'nt', 'directory symlink permission differs on Windows')
+    def test_cwd_cannot_escape_opaque_data_through_an_internal_link(self):
+        entry, payload, _, _ = self.retired('old', legacy=True)
+        self.adopt([entry])
+        target = Path(self.f.temp.name) / 'ordinary-directory'
+        target.mkdir()
+        link = payload / 'internal-link'
+        link.symlink_to(target, target_is_directory=True)
+        for command in ('run', 'resolve-run'):
+            argv = [sys.executable, '-m', 'workspace_lifecycle', '--repo', str(self.root), command]
+            argv += ['--task', 'primary'] if command == 'run' else ['--launch-cwd', str(link)]
+            run = subprocess.run([*argv, '--cwd', str(link), '--', sys.executable, '-c', 'raise AssertionError()'], capture_output=True, text=True)
+            self.assertNotEqual(run.returncode, 0)
+            self.assertIn('foreign preserved data', run.stderr)
 
 
 if __name__ == '__main__':

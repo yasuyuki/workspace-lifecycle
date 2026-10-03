@@ -427,15 +427,18 @@ def _resolve_files(repo, plan, intent, directory, state):
         name = entry['path']; source = _file_path(repo, name)
         approval = entry.get('approval_evidence')
         store = Path(entry.get('store', ''))
+        filename = entry.get('name', source.name)
+        if not isinstance(filename, str) or Path(filename).name != filename or filename in ('.', '..'):
+            raise LifecycleError('archive destination name must be a filename')
+        from .preserved import check_output
+        check_output(repo, state, str(store / filename))
         if not approval or not store.is_absolute() or not store.is_dir():
             raise LifecycleError('archive needs an explicit existing authorized absolute store and approval evidence')
         _no_links(store)
         store = store.resolve()
+        check_output(repo, state, str(store / filename))
         if store == repo or repo in store.parents or git(store, 'rev-parse', '--show-toplevel', optional=True):
             raise LifecycleError('private archive store cannot be inside a Git worktree')
-        filename = entry.get('name', source.name)
-        if not isinstance(filename, str) or Path(filename).name != filename or filename in ('.', '..'):
-            raise LifecycleError('archive destination name must be a filename')
         destination = store / filename
         action = intent['actions'].get(name)
         if action:
@@ -1734,9 +1737,8 @@ def before_run(repo, task: str, cwd=None) -> None:
 
 
 def _check_preserved_cwd(repo, item, cwd):
-    from .preserved import overlap
-    for name in _preserved_paths(item):
-        boundary = Path(repo) / name
+    from .preserved import roots
+    for boundary in roots(repo, item.get('adoption', {}).get('preserved_data', [])):
         if cwd == boundary or boundary in cwd.parents:
             raise LifecycleError('managed cwd belongs to foreign preserved data')
 
