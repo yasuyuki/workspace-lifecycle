@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import test_lifecycle
-from workspace_lifecycle import adoption, preserved, producers, service
+from workspace_lifecycle import adoption, cli, preserved, producers, service
 from workspace_lifecycle.errors import LifecycleError
 from workspace_lifecycle.state import locked_state
 
@@ -490,6 +490,14 @@ class PreservedDataTest(unittest.TestCase):
                 run = subprocess.run([*argv, '--cwd', str(effective), '--', sys.executable, '-c', 'raise AssertionError()'], capture_output=True, text=True)
                 self.assertNotEqual(run.returncode, 0)
                 self.assertIn('foreign preserved data', run.stderr)
+        original = service.git
+        def git(path, *args, **kwargs):
+            self.assertNotEqual(Path(path).resolve(), payload, 'must not probe a preserved payload through a native alias')
+            return original(path, *args, **kwargs)
+        with patch.object(service, 'git', side_effect=git):
+            with self.assertRaisesRegex(LifecycleError, 'foreign preserved data'):
+                cli._resolve_run(str(self.root), str(outside_alias / link.name),
+                    [sys.executable, '-c', 'raise AssertionError()'])
 
 
 if __name__ == '__main__':
