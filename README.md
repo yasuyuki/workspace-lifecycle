@@ -153,7 +153,7 @@ reject incoming Git changes there before merging. A checkout retaining foreign
 preserved data cannot retire, so its retirement/reclaim never acquires that data.
 Use the existing owner separately for any future recovery/reclaim. Managed cwd
 selection cannot enter the preserved data, including external archived admins
-for the selected task. Lexical cwd checks run before link resolution so a path
+and other tasks' or pending adoptions' boundaries in the same common. Lexical cwd checks run before link resolution so a path
 inside preserved data cannot escape through an internal link. Arbitrary native commands are not a
 filesystem sandbox: keep their permissions and the real validator consistent
 with the referenced owner boundary, and keep external writers quiescent.

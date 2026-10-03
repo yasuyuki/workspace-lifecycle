@@ -383,7 +383,7 @@ class PreservedDataTest(unittest.TestCase):
                 [str(admin / 'new-output')], [sys.executable, '-c', 'pass'])
         self.assertEqual(before, self.tree(payload, admin, receipt))
 
-    def test_other_task_producer_cannot_claim_parent_foreign_boundaries(self):
+    def test_other_task_producer_and_managed_cwd_cannot_enter_parent_foreign_boundaries(self):
         entry, payload, admin, receipt = self.retired('old', legacy=True)
         self.adopt([entry])
         child = Path(self.f.temp.name) / 'consumer'
@@ -396,6 +396,14 @@ class PreservedDataTest(unittest.TestCase):
                 producers.register(child, 'consumer', 'bad-owner', 'g1',
                     str(producers.task_receipt_dir(child, 'consumer') / 'g1.json'),
                     [str(target)], [sys.executable, '-c', 'pass'])
+        for cwd in (payload, admin):
+            with self.assertRaisesRegex(LifecycleError, 'foreign preserved data'):
+                service.before_run(child, 'consumer', cwd)
+            command = subprocess.run([sys.executable, '-m', 'workspace_lifecycle', 'resolve-run',
+                '--cwd', str(child), '--launch-cwd', str(cwd), '--', sys.executable, '-c',
+                'raise AssertionError()'], capture_output=True, text=True)
+            self.assertNotEqual(command.returncode, 0)
+            self.assertIn('foreign preserved data', command.stderr)
         self.assertEqual(before, self.tree(payload, admin, receipt))
 
     def test_pending_adoption_also_blocks_other_task_producer(self):
@@ -410,6 +418,9 @@ class PreservedDataTest(unittest.TestCase):
                 producers.register(child, 'independent', 'bad-owner', 'g1',
                     str(producers.task_receipt_dir(child, 'independent') / 'g1.json'),
                     [str(target)], [sys.executable, '-c', 'pass'])
+        for cwd in (payload, admin):
+            with self.assertRaisesRegex(LifecycleError, 'foreign preserved data'):
+                service.before_run(child, 'independent', cwd)
 
     def test_existing_producer_claim_stops_overlapping_adoption(self):
         entry, _, admin, _ = self.retired('old', legacy=True)
@@ -466,12 +477,19 @@ class PreservedDataTest(unittest.TestCase):
         target.mkdir()
         link = payload / 'internal-link'
         link.symlink_to(target, target_is_directory=True)
-        for command in ('run', 'resolve-run'):
-            argv = [sys.executable, '-m', 'workspace_lifecycle', '--repo', str(self.root), command]
-            argv += ['--task', 'primary'] if command == 'run' else ['--launch-cwd', str(link)]
-            run = subprocess.run([*argv, '--cwd', str(link), '--', sys.executable, '-c', 'raise AssertionError()'], capture_output=True, text=True)
-            self.assertNotEqual(run.returncode, 0)
-            self.assertIn('foreign preserved data', run.stderr)
+        regular = self.root / 'regular-parent'
+        regular.mkdir()
+        alias = regular / '..' / link.relative_to(self.root)
+        outside_alias = Path(self.f.temp.name) / 'outside-alias'
+        outside_alias.symlink_to(payload, target_is_directory=True)
+        for cwd in (link, alias, outside_alias / link.name):
+            for command in ('run', 'resolve-run'):
+                argv = [sys.executable, '-m', 'workspace_lifecycle', '--repo', str(self.root), command]
+                argv += ['--task', 'primary'] if command == 'run' else ['--launch-cwd', str(cwd)]
+                effective = self.root if command == 'resolve-run' and cwd == outside_alias / link.name else cwd
+                run = subprocess.run([*argv, '--cwd', str(effective), '--', sys.executable, '-c', 'raise AssertionError()'], capture_output=True, text=True)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn('foreign preserved data', run.stderr)
 
 
 if __name__ == '__main__':

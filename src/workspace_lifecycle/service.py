@@ -1723,12 +1723,14 @@ def check_run_identity(repo, task: str) -> None:
         raise LifecycleError('run must use the exact bound task checkout')
 
 
-def before_run(repo, task: str, cwd=None) -> None:
+def before_run(repo, task: str, cwd=None, lexical_cwd=None) -> None:
     with locked_state(repo) as (_, state):
         item = _task(state, task)
         _check_preserved(repo, item)
         if cwd is not None:
-            _check_preserved_cwd(repo, item, Path(cwd))
+            _check_preserved_cwd(repo, state, Path(cwd))
+        if lexical_cwd is not None:
+            _check_preserved_cwd(repo, state, Path(lexical_cwd))
         if item.get('hold'):
             raise LifecycleError('task is held; explicit hold resolution is required')
         if item.get('retire') or item.get('completion_release'):
@@ -1736,27 +1738,45 @@ def before_run(repo, task: str, cwd=None) -> None:
         check_run_identity(repo, task)
 
 
-def _check_preserved_cwd(repo, item, cwd):
-    from .preserved import roots
-    for boundary in roots(repo, item.get('adoption', {}).get('preserved_data', [])):
-        if cwd == boundary or boundary in cwd.parents:
-            raise LifecycleError('managed cwd belongs to foreign preserved data')
+def _check_preserved_cwd(repo, state, cwd):
+    from .preserved import authorities
+    cwd = Path(os.path.abspath(cwd))
+    for workspace, entries in authorities(repo, state):
+        for entry in entries:
+            for boundary, identity in ((workspace / entry['path'], entry['identity']),
+                    (Path(entry['admin_archive']['path']), entry['admin_archive']['identity'])):
+                if cwd == boundary or boundary in cwd.parents:
+                    raise LifecycleError('managed cwd belongs to foreign preserved data')
+                # Recognize native aliases before resolving a link inside opaque
+                # data. Read ancestor identities only; never walk its contents.
+                for ancestor in reversed((cwd, *cwd.parents)):
+                    try:
+                        info = ancestor.stat()
+                    except OSError:
+                        continue
+                    if [info.st_dev, info.st_ino] == identity:
+                        raise LifecycleError('managed cwd belongs to foreign preserved data')
 
 
-def check_preserved_cwd(cwd):
+def check_preserved_cwd(cwd, repo=None):
     # Inspect outer managed roots before probing a retired payload as live Git.
+    cwd = Path(os.path.abspath(cwd))
+    if repo is not None:
+        with locked_state(repo) as (_, state):
+            _check_preserved_cwd(repo, state, cwd)
+        return
     for ancestor in reversed((cwd, *cwd.parents)):
         if not (ancestor / '.git').exists():
             continue
         root = git(ancestor, 'rev-parse', '--show-toplevel', optional=True)
-        if root is None or Path(root).resolve() != ancestor:
+        if root is None or Path(root).resolve() != ancestor.resolve():
             continue
         common = Path(git(ancestor, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
         if not (common / 'workspace-lifecycle' / 'state.json').is_file():
             continue
         with locked_state(ancestor) as (_, state):
             try:
-                item = _task(state, bound_task(ancestor))
+                _task(state, bound_task(ancestor))
             except LifecycleError:
                 continue
-            _check_preserved_cwd(ancestor, item, cwd)
+            _check_preserved_cwd(ancestor, state, cwd)
