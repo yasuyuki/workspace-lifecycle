@@ -169,8 +169,9 @@ def main(argv=None):
 def _reclaim_refused(result):
     if not isinstance(result, dict):
         return False
-    if any(isinstance(entry, dict) and entry.get('error')
-           for entry in result.get('pending', [])):
+    pending = result.get('pending')
+    if isinstance(pending, list) and any(isinstance(entry, dict) and entry.get('error')
+                                         for entry in pending):
         return True
     if any(not entry.get('reclaimed') for entry in result.get('producers', {}).get('results', [])):
         return True
