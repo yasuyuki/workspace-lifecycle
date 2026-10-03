@@ -135,7 +135,7 @@ def main(argv=None):
                 return _resolve_run(args.cwd, args.launch_cwd, argv)
             from .leases import run
             repo = Path(args.repo).resolve()
-            service.check_preserved_cwd(Path(args.cwd).absolute())
+            service.check_preserved_cwd(Path(args.cwd).absolute(), repo=repo)
             cwd = Path(args.cwd).resolve()
             if cwd != repo and repo not in cwd.parents:
                 raise LifecycleError('run cwd must be inside the selected task worktree')
@@ -146,7 +146,8 @@ def main(argv=None):
             if recovery['terminal']:
                 return 0
             code = run(repo, args.task, argv, cwd,
-                       before_spawn=lambda: service.before_run(repo, args.task, Path(args.cwd).resolve()),
+                       before_spawn=lambda: service.before_run(repo, args.task, cwd,
+                           lexical_cwd=Path(args.cwd).absolute()),
                        child_env=_managed_context(repo, args.task))
             # Native output and status pass through; management JSON belongs to
             # status/finish, not the program's stdout stream.
@@ -288,6 +289,7 @@ def _git_marker(path):
 
 def _resolve_run(effective, launch, argv):
     """Resolve lifecycle ownership without exposing its state schema to callers."""
+    lexical_launch = Path(launch).absolute()
     service.check_preserved_cwd(Path(effective).absolute())
     service.check_preserved_cwd(Path(launch).absolute())
     effective = Path(effective).resolve()
@@ -322,7 +324,7 @@ def _resolve_run(effective, launch, argv):
     if recovery['terminal']:
         return 0
     code = run(repo, task, argv, launch,
-               before_spawn=lambda: service.before_run(repo, task, launch),
+               before_spawn=lambda: service.before_run(repo, task, launch, lexical_cwd=lexical_launch),
                child_env=_managed_context(repo, task))
     recovery = _recover_selected_task(repo, task)
     if recovery['error']:
