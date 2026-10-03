@@ -33,8 +33,9 @@ def _repository_boundary(path):
             'common_dir': str(common_dir(path)), 'head': head(path)}
 
 
-def _directories(target):
+def _directories(target, protected=None):
     """Preserve directory identities without taking ownership of nested repos."""
+    protected = protected or {}
     result = {}
     def walk_error(error):
         raise error
@@ -43,6 +44,11 @@ def _directories(target):
             path = Path(current) / name
             if path == target / '.git':
                 dirs.remove(name)  # Our own state/index/leases are Git metadata.
+                continue
+            relative = path.relative_to(target).as_posix()
+            if relative in protected:
+                result[relative] = {'preserved_data_boundary': protected[relative]}
+                dirs.remove(name)
                 continue
             info = path.lstat()
             if stat.S_ISLNK(info.st_mode):
@@ -60,7 +66,7 @@ def _directories(target):
     return result
 
 
-def _capture(repo, target, branch, expected_head):
+def _capture(repo, target, branch, expected_head, preserved_data=None):
     _no_links(target)
     if os.path.ismount(target):
         raise LifecycleError('adoption refuses a mounted worktree')
@@ -96,10 +102,13 @@ def _capture(repo, target, branch, expected_head):
     admin = Path(git(target, 'rev-parse', '--absolute-git-dir'))
     _no_links(admin)
     _operation_check(target)
-    dirty = _snapshot(target, optional_locks=False)
-    directories = _directories(target)
+    from .preserved import capture
+    preserved = capture(target, preserved_data or [], records)
+    protected = {name: value for value in preserved.values() for name in value['protected_paths']}
+    dirty = _snapshot(target, optional_locks=False, excluded=protected)
+    directories = _directories(target, protected)
     boundaries = {name: value for name, value in directories.items()
-                  if isinstance(value, dict) and 'git_dir' in value}
+                  if isinstance(value, dict) and ('git_dir' in value or 'preserved_data_boundary' in value)}
     content = {}
     for name in sorted(dirty):
         boundary = next((root for root in boundaries
@@ -146,7 +155,7 @@ def _capture(repo, target, branch, expected_head):
     _no_links(index_path)
     index = index_path.read_bytes()
     snapshot = {'dirty': dirty, 'content': content,
-                'directories': directories,
+                'directories': directories, 'preserved_data': preserved,
                 'index_sha256': hashlib.sha256(index).hexdigest(),
                 'index_identity': _identity(index_path),
                 'worktree': _identity(target), 'git_dir': str(admin),
@@ -175,7 +184,9 @@ def _bindings(repo, task, branch, retry):
 
 def adopt_existing(repo, *, task, request, remote, branch, worktree, expected_head,
                    evidence, validation, preflight, parent=None, dependencies=None,
-                   hold_reason=None, next_action=None):
+                   hold_reason=None, next_action=None, preserved_data=None):
+    from .preserved import contracts
+    preserved_data = contracts(preserved_data, task)
     repo = Path(repo).resolve()
     dependencies = dependencies or []
     if any(not isinstance(v, str) or not v.strip() or '\0' in v or '\n' in v
@@ -200,7 +211,8 @@ def adopt_existing(repo, *, task, request, remote, branch, worktree, expected_he
     desired = dict(task=task, request=request, remote=remote, branch=branch,
                    worktree=str(target), expected_head=expected_head, evidence=evidence,
                    parent=parent, dependencies=dependencies, validation=validation,
-                   preflight=preflight, hold_reason=hold_reason, next_action=next_action)
+                   preflight=preflight, hold_reason=hold_reason, next_action=next_action,
+                   preserved_data=preserved_data)
     with ExitStack() as stack:
         for name in sorted(set([task] + dependencies + ([parent] if parent else []))):
             stack.enter_context(_lease(repo, name))
@@ -230,17 +242,17 @@ def adopt_existing(repo, *, task, request, remote, branch, worktree, expected_he
                 if other != task and (d.get('branch') == branch or d.get('worktree') == str(target)):
                     raise LifecycleError('another pending task owns this branch or worktree')
             _bindings(repo, task, branch, bool(intent))
-            snapshot = _capture(repo, target, branch, expected_head)
+            snapshot = _capture(repo, target, branch, expected_head, preserved_data)
             if not intent:
                 intent = {'kind': 'adopt-existing', 'desired': desired, 'integration': integration,
                           'snapshot': snapshot, 'at': _now()}
                 state['intents'][task] = intent
                 save_state(directory, state)
-            if snapshot != intent['snapshot'] or _capture(repo, target, branch, expected_head) != snapshot:
+            if snapshot != intent['snapshot'] or _capture(repo, target, branch, expected_head, preserved_data) != snapshot:
                 raise LifecycleError('pending adoption snapshot changed; preserve the original intent')
             _bindings(repo, task, branch, True)
             git(repo, 'config', '--local', 'branch.' + branch + '.workspaceTask', task)
-            if _capture(repo, target, branch, expected_head) != intent['snapshot']:
+            if _capture(repo, target, branch, expected_head, preserved_data) != intent['snapshot']:
                 raise LifecycleError('adoption changed after binding; preserve the original intent')
             _bindings(repo, task, branch, True)
             item = {'request': request, 'remote': remote, 'integration': integration,
@@ -248,8 +260,10 @@ def adopt_existing(repo, *, task, request, remote, branch, worktree, expected_he
                     'baseline_dirty': snapshot['dirty'], 'created_at': _now(),
                     'adoption': {'evidence': evidence, 'expected_head': expected_head,
                                  'snapshot_digest': snapshot['digest'],
+                                 'preserved_data': preserved_data,
+                                 'preserved_snapshot': snapshot['preserved_data'],
                                  'protected_paths': sorted(name for name, value in snapshot['directories'].items()
-                                                           if isinstance(value, dict) and 'git_dir' in value)}}
+                                                           if isinstance(value, dict) and ('git_dir' in value or 'preserved_data_boundary' in value))}}
             if hold_reason:
                 item['hold'] = {'reason': hold_reason, 'next_action': next_action, 'at': _now()}
             state['tasks'][task] = item

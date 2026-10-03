@@ -39,6 +39,7 @@ def parser():
     adopt.add_argument('--parent'); adopt.add_argument('--dependency', action='append', default=[])
     adopt.add_argument('--validation-json', type=_json_list, required=True, help="validation argv array; an element equal to {repo} resolves to the current validation checkout, including the integration destination; embedded placeholders are unchanged")
     adopt.add_argument('--preflight-json', type=_json_list, required=True)
+    adopt.add_argument('--preserved-data-json', type=json.loads, help='explicit foreign retired payload boundaries with current payload/admin identities and evidence references')
     adopt.add_argument('--hold-reason'); adopt.add_argument('--next-action')
     status = commands.add_parser("status"); status.add_argument("--task")
     producer = commands.add_parser('register-owner-receipt', help='bind an exact producer generation before it writes outputs')
@@ -89,7 +90,8 @@ def main(argv=None):
                 branch=args.branch, worktree=args.worktree, expected_head=args.expected_head,
                 evidence=args.evidence, parent=args.parent, dependencies=args.dependency,
                 validation=args.validation_json, preflight=args.preflight_json,
-                hold_reason=args.hold_reason, next_action=args.next_action)
+                hold_reason=args.hold_reason, next_action=args.next_action,
+                preserved_data=args.preserved_data_json)
         elif args.command == 'sync':
             result = service.synchronize(args.repo, task=args.task, expected_head=args.expected_head,
                                          remote_head=args.remote_head, evidence=args.evidence)
@@ -143,7 +145,7 @@ def main(argv=None):
             if recovery['terminal']:
                 return 0
             code = run(repo, args.task, argv, cwd,
-                       before_spawn=lambda: service.before_run(repo, args.task),
+                       before_spawn=lambda: service.before_run(repo, args.task, Path(args.cwd).resolve()),
                        child_env=_managed_context(repo, args.task))
             # Native output and status pass through; management JSON belongs to
             # status/finish, not the program's stdout stream.
@@ -287,6 +289,8 @@ def _resolve_run(effective, launch, argv):
     """Resolve lifecycle ownership without exposing its state schema to callers."""
     effective = Path(effective).resolve()
     launch = Path(launch).resolve()
+    service.check_preserved_cwd(effective)
+    service.check_preserved_cwd(launch)
     if not effective.is_dir() or not launch.is_dir():
         raise LifecycleError('resolve-run directories must exist')
     probe = subprocess.run(['git', '-C', str(effective), 'rev-parse', '--show-toplevel'],
@@ -315,7 +319,7 @@ def _resolve_run(effective, launch, argv):
     if recovery['terminal']:
         return 0
     code = run(repo, task, argv, launch,
-               before_spawn=lambda: service.before_run(repo, task),
+               before_spawn=lambda: service.before_run(repo, task, launch),
                child_env=_managed_context(repo, task))
     recovery = _recover_selected_task(repo, task)
     if recovery['error']:
