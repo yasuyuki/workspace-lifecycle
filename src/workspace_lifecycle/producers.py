@@ -109,6 +109,9 @@ def register(repo, task: str, owner: str, generation: str, receipt: str,
                    for right in desired['outputs'][index + 1:]):
                 raise LifecycleError('owner outputs cannot overlap')
             key = _key(owner, generation)
+            from .preserved import check_output
+            for output in desired['outputs']:
+                check_output(repo, state, output)
             records = item.setdefault('owner_receipts', {})
             existing = records.get(key)
             if existing:

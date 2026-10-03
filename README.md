@@ -144,7 +144,10 @@ contract and anchors, including the same unresolved conditions.
 
 Managed entry checks, finish and producer registration recheck the anchors.
 Commit/restore/archive plans and producer outputs cannot overlap a protected
-boundary, even by an ancestor path or spelling alias. Sync and child integration
+boundary, even by an ancestor path or spelling alias. Producer checks also protect
+external archived admins and boundaries belonging to other tasks or unfinished
+adoptions in the same Git common. Existing active producer claims stop adoption
+of an overlapping foreign preservation boundary. Sync and child integration
 reject incoming Git changes there before merging. A checkout retaining foreign
 preserved data cannot retire, so its retirement/reclaim never acquires that data.
 Use the existing owner separately for any future recovery/reclaim. Managed cwd
