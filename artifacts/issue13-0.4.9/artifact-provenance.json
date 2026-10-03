@@ -1,0 +1,21 @@
+{
+  "build_and_twine_strict": "PASS",
+  "ci": "Windows final CI pending at artifact creation; final result belongs to Issue #13",
+  "extra_child_integration_fixture": "PASS",
+  "installed_linux_tests": 260,
+  "linux_skips": 9,
+  "main_revision": "4e928ea7ea11458853e809d873ecba673fa1a09d",
+  "module_byte_match": 14,
+  "operator_acceptance": "PENDING",
+  "operator_applied": false,
+  "package": "workspace-lifecycle 0.4.9",
+  "package_hashes": {
+    "source-b6f7122c34a6b40daf922ebff2688a70b65b2477.tar.gz": "431ef303e47685d7b5ee1fc7405b0caa0f6d8ef1319f33197855b69659de354d",
+    "source-files.sha256.json": "9b90be3fae6d3b382f1658ad7790b59005595de2d412f8e03784d3587170fc2a",
+    "workspace_lifecycle-0.4.9-py3-none-any.whl": "7a84e37928e09b5d13616b652afdaba79d928f1e7b2482d0c4ebd11cf516d056",
+    "workspace_lifecycle-0.4.9.tar.gz": "6f0a305cb3de7e07fee8a31853b3ebdc1d03a3e83817893571c0224c21c6c11b"
+  },
+  "preservation_fixtures": 23,
+  "source_main_tree": "f3df1be59b622d9a9022cbc5ea316534aa2bddfc",
+  "source_revision": "b6f7122c34a6b40daf922ebff2688a70b65b2477"
+}
