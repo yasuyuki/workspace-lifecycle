@@ -12,7 +12,7 @@ from . import __version__
 
 from .errors import LifecycleError
 from . import service
-from .git import bound_task, common_dir, worktree_records
+from .git import bound_task, common_dir, git, worktree_records
 from .state import locked_state, save_state
 
 
@@ -71,7 +71,8 @@ def parser():
     retire = commands.add_parser("retire"); retire.add_argument("--task"); retire.add_argument("--result-ref"); retire.add_argument("--pending", action="store_true"); retire.add_argument("--users-released", action="store_true"); retire.add_argument("--request", action="store_true"); retire.add_argument("--reclaim-preservation-evidence", help="durable preservation evidence used to start reclaim after retirement")
     reclaim = commands.add_parser("reclaim"); reclaim.add_argument("--task"); reclaim.add_argument("--result-ref"); reclaim.add_argument("--preservation-evidence"); reclaim.add_argument("--pending", action="store_true")
     run = commands.add_parser("run"); run.add_argument("--task", required=True); run.add_argument("--cwd", default="."); run.add_argument("argv", nargs=argparse.REMAINDER)
-    resolve = commands.add_parser("resolve-run", help="Run unmanaged work directly or supervise an already managed task.")
+    resolve = commands.add_parser("resolve-run", help="Run unmanaged work directly or supervise an already managed task. "
+        "Sessions of one task run concurrently; a checkout without a task binding runs unsupervised with a notice on stderr.")
     resolve.add_argument("--cwd", required=True, help="effective workspace directory selected by the caller")
     resolve.add_argument("--launch-cwd", required=True, help="invocation directory used to resolve native relative arguments")
     resolve.add_argument("argv", nargs=argparse.REMAINDER)
@@ -146,8 +147,8 @@ def main(argv=None):
             if recovery['terminal']:
                 return 0
             code = run(repo, args.task, argv, cwd,
-                       before_spawn=lambda: service.before_run(repo, args.task, cwd,
-                           lexical_cwd=Path(args.cwd).absolute()),
+                       before_spawn=lambda: _notify(service.before_run(repo, args.task, cwd,
+                           lexical_cwd=Path(args.cwd).absolute())),
                        child_env=_managed_context(repo, args.task))
             # Native output and status pass through; management JSON belongs to
             # status/finish, not the program's stdout stream.
@@ -164,7 +165,10 @@ def main(argv=None):
             from .leases import release
             release(args.repo, args.task, args.token, args.evidence); result = {"task": args.task, "released": True}
     except (LifecycleError, ValueError, OSError, subprocess.CalledProcessError) as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr); return 2
+        refusal = {"ok": False, "error": str(exc)}
+        if getattr(exc, 'recovery', None):
+            refusal['recovery'] = exc.recovery
+        print(json.dumps(refusal), file=sys.stderr); return 2
     if _reclaim_refused(result):
         print(json.dumps({"ok": False, **result}, sort_keys=True)); return 1
     print(json.dumps({"ok": True, **result}, sort_keys=True)); return 0
@@ -222,8 +226,7 @@ def _recover_selected_task(repo, task):
                 'report': {'retire': {'pending': []}, 'reclaim': {'pending': []}}}
     if release:
         from . import leases
-        lease = leases.status(repo, task)['receipt']
-        if lease is not None:
+        for lease in leases.status(repo, task)['uses']:
             try:
                 leases.release(repo, task, lease['token'], release['result_ref'])
             except (ValueError, OSError) as exc:
@@ -260,6 +263,30 @@ def _recover_selected_task(repo, task):
 
 def _native_code(code):
     return code if code >= 0 else 128 - code
+
+
+def _notify(notices):
+    # Native stdout stays the program's; lifecycle notices are one JSON line each on stderr.
+    for notice in notices:
+        print(json.dumps({'notice': notice}, ensure_ascii=False), file=sys.stderr, flush=True)
+
+
+def _integration_target(repo):
+    """The checked-out branch when it is, or may be, a remote default branch."""
+    branch = git(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD', optional=True)
+    if not branch:
+        return None
+    for remote in (git(repo, 'remote') or '').splitlines():
+        default = git(repo, 'symbolic-ref', '--quiet', '--short', 'refs/remotes/%s/HEAD' % remote, optional=True)
+        # Without a recorded remote HEAD the default is unknown; assume it.
+        if default is None or default == remote + '/' + branch:
+            return branch
+    return None
+
+
+def _unmanaged(argv, launch, repo, reason):
+    _notify([{'lifecycle': 'unmanaged', 'repo': str(repo), 'reason': reason}])
+    return _plain_run(argv, launch)
 
 
 def _plain_run(argv, cwd, env=None):
@@ -311,13 +338,28 @@ def _resolve_run(effective, launch, argv):
         raise LifecycleError('effective cwd is outside its resolved Git worktree')
     common = common_dir(repo)
     if (common / 'agent-branches' / 'state.json').exists():
-        raise LifecycleError('legacy agent-branches registry exists; migration is not authorized')
+        # Launching changes nothing the old registry owns; only migration and
+        # lifecycle mutations stay unauthorized there.
+        return _unmanaged(argv, launch, repo, 'legacy agent-branches registry; this lifecycle does not supervise it')
     lifecycle = common / 'workspace-lifecycle'
     if not lifecycle.exists():
         return _plain_run(argv, launch)
     if not lifecycle.is_dir():
         raise LifecycleError('workspace lifecycle state is not a directory')
-    task = bound_task(repo)
+    try:
+        task = bound_task(repo)
+    except LifecycleError:
+        # Retirement finds a task's checkout only through its binding. The one
+        # unbound checkout a mutation writes is the default-branch integration
+        # target, so a session there holds the use that integration waits for.
+        target = _integration_target(repo)
+        reason = 'checkout is not bound to a lifecycle task'
+        if target is None:
+            return _unmanaged(argv, launch, repo, reason)
+        from .leases import run
+        _notify([{'lifecycle': 'unmanaged', 'repo': str(repo), 'reason': reason,
+                  'guards': 'integration into ' + target}])
+        return _native_code(run(repo, '@default', argv, launch))
     from .leases import run
     service.check_run_identity(repo, task)
     recovery = _recover_selected_task(repo, task)
@@ -326,7 +368,7 @@ def _resolve_run(effective, launch, argv):
     if recovery['terminal']:
         return 0
     code = run(repo, task, argv, launch,
-               before_spawn=lambda: service.before_run(repo, task, launch, lexical_cwd=lexical_launch),
+               before_spawn=lambda: _notify(service.before_run(repo, task, launch, lexical_cwd=lexical_launch)),
                child_env=_managed_context(repo, task))
     recovery = _recover_selected_task(repo, task)
     if recovery['error']:

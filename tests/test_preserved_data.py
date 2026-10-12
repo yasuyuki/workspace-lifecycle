@@ -107,8 +107,8 @@ class PreservedDataTest(unittest.TestCase):
         self.assertEqual(item['adoption']['preserved_data'], [good, old])
         self.assertEqual(set(item['adoption']['protected_paths']), {good['path'], old['path']})
         self.assertNotIn('acceptance', item)
-        with self.assertRaisesRegex(LifecycleError, 'held'):
-            service.before_run(self.root, 'primary')
+        self.assertEqual(service.before_run(self.root, 'primary')[0]['hold']['reason'],
+                         'original pending acceptance')
         with locked_state(self.root) as (_, state):
             self.assertEqual(state.get('retired', {}), {})
         self.assertEqual(before, self.tree(payload, admin, receipt, old_payload, old_admin, old_receipt))

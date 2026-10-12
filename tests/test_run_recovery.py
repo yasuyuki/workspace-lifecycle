@@ -56,13 +56,13 @@ class RunRecoveryTests(unittest.TestCase):
                           sys.executable, '-c', 'import os,sys; print(os.getcwd()); print("direct"); sys.exit(17)')
         self.assertEqual(direct.returncode, 17, direct.stderr)
         self.assertEqual(direct.stdout.splitlines(), [str(self.topic.resolve()), 'direct'])
-        self.assertIsNone(leases.status(self.topic, 'active')['receipt'])
+        self.assertEqual(leases.status(self.topic, 'active')['uses'], [])
 
         resolved = self.cli('resolve-run', '--cwd', str(self.topic), '--launch-cwd', str(self.topic), '--',
                             sys.executable, '-c', 'import os,sys; print(os.getcwd()); print("resolved"); sys.exit(19)')
         self.assertEqual(resolved.returncode, 19, resolved.stderr)
         self.assertEqual(resolved.stdout.splitlines(), [str(self.topic.resolve()), 'resolved'])
-        self.assertIsNone(leases.status(self.topic, 'active')['receipt'])
+        self.assertEqual(leases.status(self.topic, 'active')['uses'], [])
         self.assertEqual(worktree_records(self.root), records)
 
     def test_active_run_does_not_replay_another_tasks_pending_release(self):

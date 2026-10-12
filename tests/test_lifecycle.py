@@ -351,16 +351,18 @@ class RecoveryBoundaryTests(unittest.TestCase):
                 retire(f.root, task='boundary', result_ref='issue/boundary', users_released=True)
         self.assertTrue(f.topic.exists())
 
-    def test_own_session_can_record_hold_and_next_start_refuses(self):
+    def test_own_session_can_record_hold_and_next_start_reports_it(self):
         f = self.fixture
         command = [sys.executable, '-m', 'workspace_lifecycle', '--repo', str(f.topic),
                    'run', '--task', 'boundary', '--cwd', str(f.topic), '--', sys.executable, '-c']
         held = subprocess.run([*command, "from workspace_lifecycle.service import hold; hold('.', 'boundary', 'user hold', 'wait for user')"],
                               capture_output=True, text=True)
         self.assertEqual(held.returncode, 0, held.stderr)
-        refused = subprocess.run([*command, "raise SystemExit(99)"], capture_output=True, text=True)
-        self.assertEqual(refused.returncode, 2)
-        self.assertIn('held', refused.stderr)
+        started = subprocess.run([*command, "raise SystemExit(99)"], capture_output=True, text=True)
+        self.assertEqual(started.returncode, 99, started.stderr)
+        notice = json.loads(started.stderr.splitlines()[0])['notice']
+        self.assertEqual((notice['task'], notice['hold']['reason'], notice['hold']['next_action']),
+                         ('boundary', 'user hold', 'wait for user'))
 
 
 class EmptyDirectoryRetirementTests(unittest.TestCase):
