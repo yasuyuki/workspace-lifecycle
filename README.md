@@ -279,14 +279,25 @@ fail closed. Explicit `reclaim` also remains available for late evidence.
 
 A lease is separate from Git's administrative lock.
 
-`run` supervises one task checkout. Linux uses a native subreaper and Windows a
-native job to track descendants. A normal child exit does not prove that an
+`run` supervises one use of a task checkout. Several uses of the same task,
+such as two agents working in it, run at the same time; each has its own
+receipt. Mutations such as `finish`, `hold`, `sync` and `retire` do not wait;
+they are refused while another use is live or an unreleased receipt remains,
+and the refusal's `recovery` names `lease-status` and `lease-release`. Inside a
+use, a mutation proceeds only when that use is the task's sole one. A new use
+is refused only while a mutation of the task is in progress. Linux uses a
+native subreaper and Windows a native job to track descendants. A normal child exit does not prove that an
 arbitrary detached external user released the workspace; explicit release
 evidence is still required. On Windows, a caller whose current directory remains
 inside the task still holds a directory handle; `--users-released` cannot turn
 that use into a removable worktree. Release that caller before retrying pending
-retirement. `lease-status` inspects a lease and
-`lease-release` recovers exactly one dead-owner lease after review.
+retirement. `lease-status` lists the task's uses and
+`lease-release` recovers exactly one dead-owner use after review. A crashed
+use does not stop new uses; it stops mutations until it is released. A
+0.4 supervisor's exclusive lease and receipt still count as a use, but a 0.4
+client cannot see newer uses, so supervise one clone with one version. On
+Windows a managed agent started inside a use's Job joins that use; on Linux it
+is a second use, so its own `finish` is refused while the outer session runs.
 On Windows, another process in that use's Job can start a managed agent with
 the inherited exact use token. It shares the existing receipt; the outer
 supervisor releases it after all Job members exit. A process outside the Job
@@ -301,8 +312,17 @@ process recorded requests across the repository.
 
 Runtime launchers use `resolve-run` with the already selected effective cwd and
 the original invocation cwd. It runs unmanaged work without creating lifecycle
-state, refuses legacy or incomplete managed bindings, and delegates managed work
-to the same `run` supervisor. Managed children receive the bound repository and
+state and delegates managed work to the same `run` supervisor. A checkout of a
+lifecycle repository that no task is bound to, such as the primary checkout,
+and a repository with a legacy registry also run unmanaged; one JSON `notice`
+on stderr says that no lifecycle supervises them. That includes a task worktree
+whose branch is detached or no longer bound: retirement and the other mutations
+find a task's checkout only through its binding, so none of them can act on it.
+The exception is a checkout on a remote default branch, or on any branch when a
+remote's default is not recorded locally: integration merges into it, so the
+session holds an `@default` use, its notice says so, and default-branch
+integration is refused until it exits. A held task still starts, with its hold in a notice; the hold keeps refusing `finish` and `sync`. Refusals are a JSON object
+on stderr with `error` and, where one exists, `recovery`. Managed children receive the bound repository and
 task and a fixed `finish_argv` prefix in `WORKSPACE_LIFECYCLE_CONTEXT`, plus
 `WORKSPACE_LIFECYCLE_REPO` and
 `WORKSPACE_LIFECYCLE_TASK`; they must still call `finish` with a reviewed plan
@@ -392,3 +412,9 @@ Version 0.4.9 adds explicit foreign preserved-data boundaries to existing-work
 adoption, with current anchor checks and unchanged unresolved owner conditions.
 It reuses task protection through managed entry, finish, producer, sync and
 integration, and refuses retirement of a checkout retaining these boundaries.
+
+Version 0.5.0 lets several sessions of one task run at once and refuses only
+the mutations that would act under them. `lease-status` reports a `uses` list
+instead of one `receipt`. Unbound checkouts, legacy-registry repositories and
+held tasks launch with a stderr notice instead of a refusal, and refusals carry
+`recovery`.

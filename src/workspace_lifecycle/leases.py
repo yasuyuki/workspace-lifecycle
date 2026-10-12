@@ -1,18 +1,30 @@
 """Explicit process-use leases, separate from Git's worktree administrative locks.
 
-A crashed supervisor leaves a receipt. Absence of a PID or Windows job name is
-not proof that all external users released the checkout.
+Several supervised uses of one task may run at once. Each holds a shared use
+lock and its own receipt; mutations need the exclusive lock and no receipt
+other than the caller's own. A crashed supervisor leaves a receipt. Absence of
+a PID or Windows job name is not proof that all external users released the
+checkout.
 """
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import tempfile
 import time
 import uuid
+
+
+class UseConflict(ValueError):
+    """A refusal that names how the caller can resolve it."""
+
+    def __init__(self, message, recovery):
+        super().__init__(message)
+        self.recovery = recovery
 
 
 def _paths(repo, task):
@@ -27,39 +39,86 @@ def _paths(repo, task):
     return root / (name + '.lock'), root / (name + '.json')
 
 
+BUSY = 'task is in use by another lifecycle operation'
+
+
+def _windows_range(stream, flags):
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+    class Overlapped(ctypes.Structure):
+        _fields_ = [('internal', ctypes.c_size_t), ('internal_high', ctypes.c_size_t),
+                    ('offset', wintypes.DWORD), ('offset_high', wintypes.DWORD),
+                    ('event', wintypes.HANDLE)]
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    pointer = ctypes.POINTER(Overlapped)
+    kernel.LockFileEx.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                                  wintypes.DWORD, wintypes.DWORD, pointer)
+    kernel.UnlockFileEx.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                                    wintypes.DWORD, pointer)
+    kernel.LockFileEx.restype = kernel.UnlockFileEx.restype = wintypes.BOOL
+    handle = wintypes.HANDLE(msvcrt.get_osfhandle(stream.fileno()))
+    overlapped = Overlapped()
+    # Byte 0, as msvcrt.locking in earlier releases, so both exclude each other.
+    if flags is None:
+        done = kernel.UnlockFileEx(handle, 0, 1, 0, ctypes.byref(overlapped))
+    else:
+        done = kernel.LockFileEx(handle, flags, 0, 1, 0, ctypes.byref(overlapped))
+    if not done:
+        raise OSError(ctypes.get_last_error(), 'byte-range lock failed')
+
+
 @contextmanager
-def _lock(path, blocking=False):
+def _lock(path, blocking=False, shared=False, message=BUSY, recovery=None):
     with path.open('a+b') as stream:
         if os.name == 'nt':
-            import msvcrt
             if not path.stat().st_size:
                 stream.write(b'0')
                 stream.flush()
-            stream.seek(0)
             try:
-                msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+                _windows_range(stream, (0 if shared else 2) | (0 if blocking else 1))
             except OSError as exc:
-                raise ValueError('task is in use by another lifecycle operation') from exc
+                raise UseConflict(message, recovery) from exc
         else:
             import fcntl
             try:
-                fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+                fcntl.flock(stream, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+                            | (0 if blocking else fcntl.LOCK_NB))
             except BlockingIOError as exc:
-                raise ValueError('task is in use by another lifecycle operation') from exc
+                raise UseConflict(message, recovery) from exc
         try:
             yield
         finally:
             if os.name == 'nt':
-                stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                _windows_range(stream, None)
             else:
                 fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def _io_lock(path):
+    return path.parent / (path.name.split('.', 1)[0] + '.io.lock')
+
+
+def _receipts(lock):
+    """Every use receipt of one task, including the single receipt of 0.4 releases."""
+    prefix = lock.name[:-len('.lock')]
+    pattern = re.compile(re.escape(prefix) + r'(\.[0-9a-f]{32})?\.json')
+    return sorted(path for path in lock.parent.iterdir() if pattern.fullmatch(path.name))
+
+
+def _uses(lock):
+    uses = []
+    for path in _receipts(lock):
+        record = _read(path)
+        if record is not None:
+            uses.append(record)
+    return uses
 
 
 def _save(path, value):
     # Windows readers otherwise deny the atomic destination replacement. Keep
     # receipt I/O separate from the use lease held for the entire process tree.
-    with _lock(path.with_suffix('.io.lock'), blocking=True):
+    with _lock(_io_lock(path), blocking=True):
         fd, temporary = tempfile.mkstemp(dir=path.parent)
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as stream:
@@ -73,7 +132,7 @@ def _save(path, value):
 
 
 def _read(path):
-    with _lock(path.with_suffix('.io.lock'), blocking=True):
+    with _lock(_io_lock(path), blocking=True):
         try:
             with path.open(encoding='utf-8') as stream:
                 return json.load(stream)
@@ -82,40 +141,57 @@ def _read(path):
 
 
 def _remove(path):
-    with _lock(path.with_suffix('.io.lock'), blocking=True):
+    with _lock(_io_lock(path), blocking=True):
         path.unlink()
+
+
+def _mutation(lock):
+    """Hold the mutation lock; registering a use takes the same short gate first."""
+    stack = ExitStack()
+    with _lock(lock.with_suffix('.register.lock'), blocking=True):
+        stack.enter_context(_lock(lock.with_suffix('.mutation.lock'),
+                                  recovery='retry after the other lifecycle operation completes'))
+    return stack
+
+
+def _users_recovery(task):
+    return ('wait for the other sessions to exit; `lease-status --task %s` lists them. '
+            'After confirming a listed supervisor and its users are gone, run '
+            '`lease-release --task %s --token TOKEN --evidence REF`' % (task, task))
 
 
 @contextmanager
 def guard(repo, task, allow_use=False):
-    """Serialize mutations, admitting only the owning supervised session when allowed."""
-    lock, receipt = _paths(repo, task)
-    with _lock(lock.with_suffix('.mutation.lock')):
-        record = _read(receipt)
-        own_use = allow_use and _own_use(record, task)
-        if own_use:
+    """Serialize mutations, admitting only a sole owning supervised session when allowed."""
+    lock, _ = _paths(repo, task)
+    with _mutation(lock):
+        uses = _uses(lock)
+        if allow_use and len(uses) == 1 and _own_use(uses[0], task):
             yield
-        else:
-            with _lock(lock):
-                if receipt.exists():
-                    raise ValueError('unreleased task use; inspect lease and explicitly recover: ' + task)
-                yield
+            return
+        with _lock(lock, message='task is in use by another session: ' + task,
+                   recovery=_users_recovery(task)):
+            if uses:
+                raise UseConflict('unreleased task use; inspect lease and explicitly recover: ' + task,
+                                  _users_recovery(task))
+            yield
+
+
+def _alive(record):
+    try:
+        return _identity(record['owner_pid']) == record['owner_identity']
+    except (KeyError, TypeError, ValueError):
+        return True  # Uncertainty is not proof of release.
 
 
 def status(repo, task):
-    lock, receipt = _paths(repo, task)
-    record = _read(receipt)
-    try:
-        with _lock(lock):
-            busy = False
-    except ValueError:
-        busy = True
-    return {'busy': busy, 'receipt': record}
+    lock, _ = _paths(repo, task)
+    uses = _uses(lock)
+    return {'busy': any(_alive(record) for record in uses), 'uses': uses}
 
 
 def is_in_use(repo, task):
-    value = status(repo, task)
-    return value['busy'] or value['receipt'] is not None
+    return bool(status(repo, task)['uses'])
 
 
 def _identity(pid):
@@ -330,21 +406,28 @@ def run(repo, task, argv, cwd, before_spawn=None, child_env=None):
     External detached users must still release explicitly before retirement.
     No kill-on-close job, process reap or implicit termination is used.
     """
-    lock, receipt = _paths(repo, task)
+    lock, _ = _paths(repo, task)
     if os.name == 'nt':
-        record = _read(receipt)
-        if _own_use(record, task):
+        for record in _uses(lock):
+            if _own_use(record, task):
+                if before_spawn is not None:
+                    before_spawn()
+                return _joined_run(argv, cwd, record['token'], child_env)
+    with ExitStack() as use:
+        with _lock(lock.with_suffix('.register.lock'), blocking=True):
+            with _lock(lock.with_suffix('.mutation.lock'),
+                       message='task is being changed by another lifecycle operation: ' + task,
+                       recovery='retry after that operation, such as finish or retire, completes'):
+                pass
+            use.enter_context(_lock(lock, shared=True,
+                                    message='task is in use by an older workspace-lifecycle supervisor: ' + task,
+                                    recovery='wait for that session to exit, or start every session of this task with this version'))
             if before_spawn is not None:
                 before_spawn()
-            return _joined_run(argv, cwd, record['token'], child_env)
-    with _lock(lock):
-        if receipt.exists():
-            raise ValueError('unreleased task use; inspect lease before restarting')
-        if before_spawn is not None:
-            before_spawn()
-        record = {'token': uuid.uuid4().hex, 'owner_pid': os.getpid(),
-                  'owner_identity': _identity(os.getpid()), 'task': task}
-        _save(receipt, record)  # crash between intent and spawn stays unresolved
+            record = {'token': uuid.uuid4().hex, 'owner_pid': os.getpid(),
+                      'owner_identity': _identity(os.getpid()), 'task': task}
+            receipt = lock.with_name(lock.name[:-len('.lock')] + '.' + record['token'] + '.json')
+            _save(receipt, record)  # crash between intent and spawn stays unresolved
         child = None
         previous = {}
         close_job = None
@@ -428,15 +511,17 @@ def run(repo, task, argv, cwd, before_spawn=None, child_env=None):
 
 def release(repo, task, token, evidence):
     """Recover exactly one dead-owner lease after explicit external-user review."""
-    lock, receipt = _paths(repo, task)
+    lock, _ = _paths(repo, task)
     if not isinstance(evidence, str) or not evidence.strip():
         raise ValueError('external user release evidence is required')
-    with _lock(lock):
-        record = _read(receipt)
-        if record is None:
+    # Other live uses keep the shared lock; owner identities, not the lock,
+    # prove that this receipt's users are gone.
+    with _mutation(lock):
+        matches = [(path, record) for path in _receipts(lock)
+                   for record in [_read(path)] if record is not None and record.get('token') == token]
+        if not matches:
             raise ValueError('lease receipt no longer exists')
-        if record['token'] != token:
-            raise ValueError('lease identity changed')
+        receipt, record = matches[0]
         if _identity(record['owner_pid']) == record['owner_identity']:
             raise ValueError('lease supervisor is still alive')
         if record.get('child_identity') is not None and _identity(record['child_pid']) == record['child_identity']:

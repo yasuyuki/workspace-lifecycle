@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -93,10 +94,16 @@ class DirtyLifecycleTest(unittest.TestCase):
         self.assertEqual(child.returncode, 0, child.stderr)
         self.assertEqual(child.stdout, '')
         hold(self.topic, task, 'fixture hold', 'await explicit release')
-        refused = self.resolve_run(nested, self.topic, sys.executable, '-c',
-                                   'raise SystemExit(99)')
-        self.assertEqual(refused.returncode, 2)
-        self.assertIn('held', refused.stderr)
+        held = self.resolve_run(nested, self.topic, sys.executable, '-c',
+                                'print("held use"); raise SystemExit(99)')
+        self.assertEqual((held.returncode, held.stdout), (99, 'held use\n'), held.stderr)
+        notice = json.loads(held.stderr.splitlines()[0])['notice']
+        self.assertEqual(notice['hold']['reason'], 'fixture hold')
+        self.assertIn('release-hold --task resolved', notice['recovery'])
+        (self.topic / 'owned.txt').write_text('owned\n')
+        plan = self.plan('held.json', {'commit': [self.entry(task, 'owned.txt')]})
+        with self.assertRaisesRegex(LifecycleError, 'held'):
+            finish(self.topic, task=task, plan_path=str(plan), result_ref='issue/held')
 
     @unittest.skipUnless(os.name == 'nt', 'Windows Job reentry')
     def test_nested_resolve_run_shares_one_managed_use(self):
@@ -106,30 +113,104 @@ class DirtyLifecycleTest(unittest.TestCase):
         leader = ('import os,subprocess,sys; from workspace_lifecycle import leases; '
                   'repo=os.environ["WORKSPACE_LIFECYCLE_REPO"]; '
                   'task=os.environ["WORKSPACE_LIFECYCLE_TASK"]; '
-                  'before=leases.status(repo,task)["receipt"]; '
+                  'before=leases.status(repo,task)["uses"]; '
                   'result=subprocess.run([sys.executable,"-m","workspace_lifecycle.cli",'
                   '"resolve-run","--cwd",repo,"--launch-cwd",repo,"--",'
                   'sys.executable,"-c",%r],capture_output=True,text=True); '
                   'assert result.returncode == 0, result.stderr; '
-                  'assert leases.status(repo,task)["receipt"] == before; '
+                  'assert leases.status(repo,task)["uses"] == before; '
                   'print(result.stdout.strip())' % inner)
         result = self.resolve_run(self.topic, self.topic, sys.executable, '-c', leader)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), 'joined child')
-        self.assertIsNone(leases.status(self.topic, task)['receipt'])
+        self.assertEqual(leases.status(self.topic, task)['uses'], [])
 
-    def test_resolve_run_refuses_legacy_and_managed_unbound(self):
+    def test_resolve_run_launches_legacy_and_unbound_checkouts_unsupervised(self):
         common = Path(git(self.root, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
         legacy = common / 'agent-branches'; legacy.mkdir()
         (legacy / 'state.json').write_text('{}')
-        refused = self.resolve_run(self.root, self.root, sys.executable, '-c', 'raise SystemExit(99)')
-        self.assertEqual(refused.returncode, 2)
-        self.assertIn('legacy', refused.stderr)
+        launched = self.resolve_run(self.root, self.root, sys.executable, '-c', 'print("legacy"); raise SystemExit(29)')
+        self.assertEqual((launched.returncode, launched.stdout), (29, 'legacy\n'), launched.stderr)
+        notice = json.loads(launched.stderr.splitlines()[0])['notice']
+        self.assertEqual((notice['lifecycle'], notice['repo']), ('unmanaged', str(self.root.resolve())))
+        self.assertIn('legacy', notice['reason'])
+        self.assertEqual((legacy / 'state.json').read_text(), '{}')
+        self.assertFalse((common / 'workspace-lifecycle').exists())
         (legacy / 'state.json').unlink(); legacy.rmdir()
-        (common / 'workspace-lifecycle').mkdir()
-        unbound = self.resolve_run(self.root, self.root, sys.executable, '-c', 'raise SystemExit(99)')
-        self.assertEqual(unbound.returncode, 2)
-        self.assertIn('binding', unbound.stderr)
+        task = self.start('bound')
+        before = (common / 'workspace-lifecycle' / 'state.json').read_bytes()
+        primary = self.resolve_run(self.root, self.root, sys.executable, '-c', 'print("primary"); raise SystemExit(31)')
+        self.assertEqual((primary.returncode, primary.stdout), (31, 'primary\n'), primary.stderr)
+        notice = json.loads(primary.stderr.splitlines()[0])['notice']
+        self.assertEqual((notice['reason'], notice['guards']),
+                         ('checkout is not bound to a lifecycle task', 'integration into trunk'))
+        gate = self.base / 'primary-gate'; gate.write_text('hold')
+        environment = dict(os.environ); environment.pop('PYTHONPATH', None)
+        waiting = subprocess.Popen([sys.executable, '-m', 'workspace_lifecycle.cli', 'resolve-run',
+                                    '--cwd', str(self.root), '--launch-cwd', str(self.root), '--', sys.executable, '-c',
+                                    'import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text("ready")\n'
+                                    'while pathlib.Path(sys.argv[2]).exists(): time.sleep(.02)',
+                                    str(self.base / 'primary-ready'), str(gate)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
+        try:
+            deadline = time.monotonic() + 30
+            while not (self.base / 'primary-ready').exists():
+                self.assertIsNone(waiting.poll()); self.assertLess(time.monotonic(), deadline); time.sleep(.02)
+            with self.assertRaisesRegex(ValueError, 'in use by another session: @default'):
+                with leases.guard(self.root, '@default'):
+                    self.fail('default-branch integration entered under a primary session')
+        finally:
+            gate.unlink()
+        self.assertEqual(waiting.wait(timeout=30), 0)
+        waiting.stdout.close(); waiting.stderr.close()
+        git(self.root, 'checkout', '-q', '-b', 'scratch')
+        unknown = self.resolve_run(self.root, self.root, sys.executable, '-c', 'pass')
+        self.assertEqual(json.loads(unknown.stderr.splitlines()[0])['notice']['guards'], 'integration into scratch')
+        git(self.root, 'remote', 'set-head', 'origin', 'trunk')
+        side = self.resolve_run(self.root, self.root, sys.executable, '-c', 'pass')
+        self.assertNotIn('guards', json.loads(side.stderr.splitlines()[0])['notice'])
+        git(self.root, 'checkout', '-q', 'trunk')
+        self.assertEqual((common / 'workspace-lifecycle' / 'state.json').read_bytes(), before)
+        git(self.topic, 'checkout', '-q', '--detach')
+        detached = self.resolve_run(self.topic, self.topic, sys.executable, '-c',
+                                    'import os; print(os.environ.get("WORKSPACE_LIFECYCLE_TASK"))')
+        self.assertEqual((detached.returncode, detached.stdout), (0, 'None\n'), detached.stderr)
+        self.assertEqual((common / 'workspace-lifecycle' / 'state.json').read_bytes(), before)
+
+    def test_two_sessions_of_one_task_run_together_and_hold_off_mutation(self):
+        task = self.start('shared')
+        gate = self.base / 'gate'; gate.write_text('hold')
+        waiting = ('import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text("ready")\n'
+                   'while pathlib.Path(sys.argv[2]).exists(): time.sleep(.02)\n'
+                   'print(sys.argv[1][-5:])')
+        environment = dict(os.environ); environment.pop('PYTHONPATH', None)
+        sessions = [subprocess.Popen([sys.executable, '-m', 'workspace_lifecycle.cli', 'resolve-run',
+                                      '--cwd', str(self.topic), '--launch-cwd', str(self.topic), '--',
+                                      sys.executable, '-c', waiting, str(self.base / name), str(gate)],
+                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
+                    for name in ('first', 'other')]
+        try:
+            deadline = time.monotonic() + 30
+            while not all((self.base / name).exists() for name in ('first', 'other')):
+                for session in sessions:
+                    self.assertIsNone(session.poll(), session.stderr.read() if session.poll() is not None else '')
+                self.assertLess(time.monotonic(), deadline, 'both sessions start')
+                time.sleep(.02)
+            self.assertEqual(len(leases.status(self.topic, task)['uses']), 2)
+            refused = subprocess.run([sys.executable, '-m', 'workspace_lifecycle', '--repo', str(self.topic),
+                                      'hold', '--task', task, '--reason', 'r', '--next-action', 'n'],
+                                     text=True, capture_output=True, env=environment)
+            self.assertEqual(refused.returncode, 2)
+            refusal = json.loads(refused.stderr)
+            self.assertEqual(refusal['error'], 'task is in use by another session: shared')
+            self.assertIn('lease-status --task shared', refusal['recovery'])
+        finally:
+            gate.unlink()
+        outputs = [session.communicate(timeout=30) for session in sessions]
+        self.assertEqual([session.returncode for session in sessions], [0, 0], outputs)
+        self.assertEqual(sorted(out.strip() for out, _ in outputs), ['first', 'other'])
+        self.assertEqual(leases.status(self.topic, task)['uses'], [])
+        hold(self.topic, task, 'after sessions', 'none')
 
     def test_resolve_run_refuses_corrupt_git_boundary(self):
         broken = self.base / 'broken'; broken.mkdir(); (broken / '.git').mkdir()

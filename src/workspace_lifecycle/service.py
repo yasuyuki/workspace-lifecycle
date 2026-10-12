@@ -32,7 +32,7 @@ def _lease(repo, task, allow_use=False):
         with guard(repo, task, allow_use=allow_use):
             yield
     except (ValueError, OSError) as exc:
-        raise LifecycleError(str(exc)) from exc
+        raise LifecycleError(str(exc), getattr(exc, 'recovery', None)) from exc
 
 
 def _snapshot(repo: Path, *, optional_locks=True, excluded=()) -> dict[str, str]:
@@ -1723,7 +1723,8 @@ def check_run_identity(repo, task: str) -> None:
         raise LifecycleError('run must use the exact bound task checkout')
 
 
-def before_run(repo, task: str, cwd=None, lexical_cwd=None) -> None:
+def before_run(repo, task: str, cwd=None, lexical_cwd=None) -> list[dict]:
+    """Refuse use that would race checkout removal; return notices for the caller."""
     with locked_state(repo) as (_, state):
         item = _task(state, task)
         _check_preserved(repo, item)
@@ -1731,11 +1732,18 @@ def before_run(repo, task: str, cwd=None, lexical_cwd=None) -> None:
             _check_preserved_cwd(repo, state, Path(cwd))
         if lexical_cwd is not None:
             _check_preserved_cwd(repo, state, Path(lexical_cwd))
-        if item.get('hold'):
-            raise LifecycleError('task is held; explicit hold resolution is required')
         if item.get('retire') or item.get('completion_release'):
-            raise LifecycleError('task has a retirement request; replay it before starting new use')
+            raise LifecycleError('task has a retirement request; replay it before starting new use',
+                                 'inspect `status --task %s` and resolve its recorded retirement '
+                                 'recovery before starting new use' % task)
         check_run_identity(repo, task)
+        # A hold stops acceptance and integration, not looking at or working in
+        # the checkout; the session learns why it was held.
+        if item.get('hold'):
+            return [{'task': task, 'hold': item['hold'],
+                     'recovery': 'finish and sync stay refused until `release-hold --task %s '
+                                 '--evidence REF` records the decision' % task}]
+        return []
 
 
 def _check_preserved_cwd(repo, state, cwd):
