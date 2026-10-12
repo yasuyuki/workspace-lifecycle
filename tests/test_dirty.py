@@ -138,6 +138,12 @@ class DirtyLifecycleTest(unittest.TestCase):
         self.assertFalse((common / 'workspace-lifecycle').exists())
         (legacy / 'state.json').unlink(); legacy.rmdir()
         task = self.start('bound')
+        legacy.mkdir(); (legacy / 'state.json').write_text('{}')
+        hybrid = self.resolve_run(self.topic, self.topic, sys.executable, '-c',
+                                  'import os; print(os.environ.get("WORKSPACE_LIFECYCLE_TASK"))')
+        self.assertEqual((hybrid.returncode, hybrid.stdout), (0, 'None\n'), hybrid.stderr)
+        self.assertIn('legacy', json.loads(hybrid.stderr.splitlines()[0])['notice']['reason'])
+        (legacy / 'state.json').unlink(); legacy.rmdir()
         before = (common / 'workspace-lifecycle' / 'state.json').read_bytes()
         primary = self.resolve_run(self.root, self.root, sys.executable, '-c', 'print("primary"); raise SystemExit(31)')
         self.assertEqual((primary.returncode, primary.stdout), (31, 'primary\n'), primary.stderr)

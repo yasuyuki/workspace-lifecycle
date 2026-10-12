@@ -1781,7 +1781,10 @@ def check_preserved_cwd(cwd, repo=None):
         if root is None or Path(root).resolve() != ancestor.resolve():
             continue
         common = Path(git(ancestor, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
-        if not (common / 'workspace-lifecycle' / 'state.json').is_file():
+        # A legacy registry's repository is not supervised here, so its state
+        # selects no managed root; resolve-run launches it unmanaged.
+        if (not (common / 'workspace-lifecycle' / 'state.json').is_file()
+                or (common / 'agent-branches' / 'state.json').exists()):
             continue
         with locked_state(ancestor) as (_, state):
             try:
