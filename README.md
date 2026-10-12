@@ -418,3 +418,6 @@ the mutations that would act under them. `lease-status` reports a `uses` list
 instead of one `receipt`. Unbound checkouts, legacy-registry repositories and
 held tasks launch with a stderr notice instead of a refusal, and refusals carry
 `recovery`.
+
+Version 0.5.1 also launches a repository that has both a legacy registry and
+lifecycle state unmanaged; 0.5.0 still refused it.
