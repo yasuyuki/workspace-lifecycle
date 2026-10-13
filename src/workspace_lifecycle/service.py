@@ -11,6 +11,7 @@ import stat
 import subprocess
 import uuid
 
+from . import checks
 from .errors import LifecycleError
 from .git import bound_task, branch_for_task, current_branch, git, head, remote_default, task_worktree, top, worktree_records
 from .state import locked_state, save_state
@@ -71,8 +72,10 @@ def _no_links(path, stop=None):
 
 def begin(repo, *, task: str, request: str, remote: str, branch: str, worktree: str,
           parent: str | None = None, dependencies: list[str] | None = None,
-          validation: list[str] | None = None, preflight: list[str] | None = None) -> dict:
+          validation: list[str] | None = None, preflight: list[str] | None = None,
+          required_checks: list[dict] | None = None) -> dict:
     repo = Path(repo).resolve(); dependencies = dependencies or []
+    required_checks = checks.parse(required_checks or [])
     if not task or not request or not branch or not worktree or '\n' in task or '\0' in task:
         raise LifecycleError('task, request, branch, and worktree are required')
     for value in (validation, preflight):
@@ -88,6 +91,8 @@ def begin(repo, *, task: str, request: str, remote: str, branch: str, worktree: 
         raise LifecycleError('new worktree must be outside the integration checkout')
     desired = {'branch': branch, 'worktree': str(target), 'request': request, 'remote': remote,
                'parent': parent, 'dependencies': dependencies, 'validation': validation, 'preflight': preflight}
+    if required_checks:
+        desired['required_checks'] = required_checks
     with ExitStack() as stack:
         for identity in sorted({task, *dependencies, *([parent] if parent else [])}):
             stack.enter_context(_lease(repo, identity))
@@ -146,7 +151,8 @@ def begin(repo, *, task: str, request: str, remote: str, branch: str, worktree: 
             state['tasks'][task] = {'request': request, 'remote': remote,
                 'integration': intent['integration'], 'dependencies': dependencies,
                 'validation': validation, 'preflight': preflight,
-                'baseline_dirty': _snapshot(target), 'created_at': _now()}
+                'baseline_dirty': _snapshot(target), 'created_at': _now(),
+                **({'required_checks': required_checks} if required_checks else {})}
             state['intents'].pop(task); save_state(directory, state)
     return {'task': task, 'branch': branch, 'base': base, 'worktree': str(target)}
 
@@ -229,6 +235,29 @@ def update_validation(repo, *, task: str, expected_head: str,
             item.setdefault('validation_updates', []).append(receipt)
             save_state(directory, state)
     return {'task': task, 'validation': list(validation)}
+
+
+def update_required_checks(repo, *, task: str, expected: list[dict],
+                           required_checks: list[dict], evidence: str) -> dict:
+    """Replace the remote checks one task's integration requires by exact CAS."""
+    expected = checks.parse(expected); required_checks = checks.parse(required_checks)
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise LifecycleError('required checks update requires durable evidence')
+    with _lease(repo, task):
+        with locked_state(repo) as (directory, state):
+            item = _task(state, task)
+            if task in state.get('intents', {}) or item.get('retire'):
+                raise LifecycleError('pending task operation prevents required checks update')
+            if item.get('required_checks', []) != expected:
+                raise LifecycleError('required checks CAS mismatch')
+            if required_checks:
+                item['required_checks'] = required_checks
+            else:
+                item.pop('required_checks', None)
+            item.setdefault('required_checks_updates', []).append(
+                {'from': expected, 'to': required_checks, 'evidence': evidence, 'at': _now()})
+            save_state(directory, state)
+    return {'task': task, 'required_checks': required_checks}
 
 
 def hold(repo, task: str, reason: str, next_action: str) -> dict:
@@ -1002,11 +1031,22 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
     with ExitStack() as stack:
         for identity in sorted({task_id, target_guard}):
             stack.enter_context(_lease(repo, identity, allow_use=identity == task_id))
+        with locked_state(repo) as (_, state):
+            item = _task(state, task_id)
+            required_checks = item.get('required_checks', [])
+            gated = item.get('acceptance', {}).get('commit')
+            pending = state['intents'].get(task_id)
+            settled = (item.get('integrated') or {}).get('source') == gated or pending
+        # Query outside the state lock; the leases pin this task and its target.
+        repository = checks.repository(repo, item['remote']) if required_checks else None
+        gate = checks.verify(repository, gated, required_checks) if required_checks and gated and not settled else None
         with locked_state(repo) as (directory, state):
             item = _task(state, task_id)
             if item.get('hold') or not item.get('acceptance'):
                 raise LifecycleError('source is held or not accepted: ' + task_id)
             acceptance = item['acceptance']; source_commit = acceptance['commit']
+            if item.get('required_checks', []) != required_checks:
+                raise LifecycleError('required checks changed during integration')
             source_branch = branch_for_task(repo, task_id)
             if head(repo, 'refs/heads/' + source_branch) != source_commit:
                 raise LifecycleError('source HEAD differs from the exact accepted identity')
@@ -1039,6 +1079,11 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                 if intent and (intent['kind'] != 'merge' or intent['source'] != source_commit
                                or intent['target'] != target_branch):
                     raise LifecycleError('pending integration identity differs; preserve the existing operation')
+                if required_checks:
+                    proof = intent.get('remote_checks') if intent else gate
+                    if (not proof or proof['commit'] != source_commit or proof['repository'] != repository
+                            or [{'app': c['app'], 'name': c['name']} for c in proof['checks']] != required_checks):
+                        raise LifecycleError('required check evidence does not match the exact accepted commit and remote')
                 if not intent:
                     holder = item.get('integration_synchronization', {})
                     pending = holder.get('synchronization')
@@ -1072,7 +1117,8 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                                 persist=lambda: save_state(directory, state), workspace_record=parent)
                             target_head = synced['commit']
                     intent = {'kind': 'merge', 'source': source_commit, 'target': target_branch,
-                              'target_head': target_head, 'result_ref': result_ref, 'at': _now()}
+                              'target_head': target_head, 'result_ref': result_ref, 'at': _now(),
+                              **({'remote_checks': gate} if required_checks else {})}
                     state['intents'][task_id] = intent; save_state(directory, state)
                 pending_sync = intent.get('synchronization')
                 if pending_sync and not pending_sync.get('commit'):
@@ -1144,7 +1190,8 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                     raise LifecycleError('integration changed during final validation')
                 pushed = _push(target_worktree, item['preflight'], target_branch, item['remote'], expected_head=merged)
                 record = {'destination': target_branch, 'commit': merged, 'source': source_commit,
-                          'validation': evidence, 'push': pushed, 'result_ref': result_ref, 'at': _now()}
+                          'validation': evidence, 'push': pushed, 'result_ref': result_ref, 'at': _now(),
+                          **({'remote_checks': intent['remote_checks']} if required_checks else {})}
                 item['integrated'] = record
                 if parent:
                     parent['acceptance'] = {**parent['acceptance'], 'commit': merged,
