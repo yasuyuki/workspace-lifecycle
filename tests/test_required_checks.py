@@ -54,6 +54,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.github = FakeGitHub()
         self.names = {str(self.remote): "example/repo"}
         real_git = checks.git
+        self.real_repository = checks.repository
 
         def repository(repo, remote):
             url = real_git(repo, "remote", "get-url", "--push", remote)
@@ -158,6 +159,13 @@ class RequiredChecksTest(unittest.TestCase):
         self.start("foreign")
         del self.names[str(self.remote)]
         self.refused("foreign", "GitHub remote")
+
+    def test_several_push_urls_refuse(self):
+        self.start("mirrors")
+        run(self.root, "remote", "set-url", "--add", "--push", "origin", str(self.remote))
+        run(self.root, "remote", "set-url", "--add", "--push", "origin", str(Path(self.temp.name) / "mirror.git"))
+        with self.assertRaisesRegex(LifecycleError, "exactly one push URL"):
+            self.real_repository(self.root, "origin")
 
     def test_new_head_requires_its_own_checks(self):
         self.start("moved")

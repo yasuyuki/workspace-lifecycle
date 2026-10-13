@@ -41,11 +41,14 @@ def github_repository(url: str) -> str:
 
 def repository(repo, remote: str) -> str:
     """The GitHub repository the remote actually pushes to."""
-    return github_repository(git(repo, 'remote', 'get-url', '--push', remote))
+    urls = (git(repo, 'remote', 'get-url', '--push', '--all', remote) or '').splitlines()
+    if len(urls) != 1:
+        raise LifecycleError('required checks need exactly one push URL for ' + remote)
+    return github_repository(urls[0])
 
 
 def _runs(repository: str, commit: str, name: str) -> list[dict]:
-    argv = ['gh', 'api', '--paginate', '-X', 'GET',
+    argv = ['gh', 'api', '--hostname', 'github.com', '--paginate', '-X', 'GET',
             f'repos/{repository}/commits/{commit}/check-runs',
             '-f', 'check_name=' + name, '-f', 'filter=all', '-f', 'per_page=100',
             '--jq', '.check_runs[] | {id, name, head_sha, status, conclusion, app: .app.slug}']

@@ -186,6 +186,9 @@ The repository's workflow defines the checks. Before creating an integration
 merge, finish asks GitHub through the `gh` CLI for those check runs on the exact
 accepted commit in the repository the remote pushes to. Only the latest run of
 each app and name counts, and only `completed` with conclusion `success` passes.
+Runs of one workflow for both `push` and `pull_request` on the same commit share
+that identity, so the newer one decides, as in GitHub branch protection. A remote
+with several push URLs is refused.
 Queued, running, failed, cancelled, skipped, neutral, missing or unavailable
 results refuse integration, leave the acceptance in place and change no target.
 Retry the same finish after CI completes; a new HEAD needs its own successful
