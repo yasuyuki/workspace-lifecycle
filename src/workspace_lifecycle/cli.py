@@ -33,6 +33,7 @@ def parser():
     begin.add_argument("--parent"); begin.add_argument("--dependency", action="append", default=[])
     begin.add_argument("--validation-json", type=_json_list, default=[], help="validation argv array; an element equal to {repo} resolves to the current validation checkout, including the integration destination; embedded placeholders are unchanged")
     begin.add_argument("--preflight-json", type=_json_list, required=True)
+    begin.add_argument("--required-checks-json", type=json.loads, default=[], help='JSON array of {"app", "name"} GitHub check runs that must succeed on the exact accepted commit before integration')
     adopt = commands.add_parser('adopt-existing', help='adopt an existing linked checkout as unaccepted current work')
     for name in ('task', 'request', 'remote', 'branch', 'worktree', 'expected-head', 'evidence'):
         adopt.add_argument('--' + name, required=True)
@@ -60,6 +61,11 @@ def parser():
     validation.add_argument('--validation-json', type=_json_list, required=True,
         help='nonempty argv executed by finish in the candidate and integration checkout')
     validation.add_argument('--evidence', required=True, help='durable reference explaining the correction')
+    required = commands.add_parser('update-required-checks', help='replace the remote checks one task requires before integration by exact CAS')
+    required.add_argument('--task', required=True)
+    required.add_argument('--expected-json', type=json.loads, required=True, help='current required checks; [] when none')
+    required.add_argument('--required-checks-json', type=json.loads, required=True, help='JSON array of {"app", "name"}; [] removes the requirement')
+    required.add_argument('--evidence', required=True, help='durable reference explaining the change')
     sync = commands.add_parser('sync', help='resume the same task by an exact same-name remote merge; does not accept or integrate work')
     for name in ('task', 'expected-head', 'remote-head', 'evidence'):
         sync.add_argument('--' + name, required=True)
@@ -84,7 +90,10 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
-        if args.command == "begin": result = service.begin(args.repo, task=args.task, request=args.request, remote=args.remote, branch=args.branch, worktree=args.worktree, parent=args.parent, dependencies=args.dependency, validation=args.validation_json, preflight=args.preflight_json)
+        if args.command == "begin": result = service.begin(args.repo, task=args.task, request=args.request, remote=args.remote, branch=args.branch, worktree=args.worktree, parent=args.parent, dependencies=args.dependency, validation=args.validation_json, preflight=args.preflight_json, required_checks=args.required_checks_json)
+        elif args.command == 'update-required-checks':
+            result = service.update_required_checks(args.repo, task=args.task, expected=args.expected_json,
+                                                    required_checks=args.required_checks_json, evidence=args.evidence)
         elif args.command == 'adopt-existing':
             from .adoption import adopt_existing
             result = adopt_existing(args.repo, task=args.task, request=args.request, remote=args.remote,

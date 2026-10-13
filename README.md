@@ -179,6 +179,25 @@ record: all four alternatives (`commit`, `restore`, `archive`, and
 `owner-resolution`) must be reviewed with irreversible-harm evidence, a remaining
 owner and a next action.
 
+A repository that relies on remote CI names the checks that integration needs
+with `begin --required-checks-json`, a JSON array of `{"app", "name"}` GitHub
+check runs such as `{"app": "github-actions", "name": "test (ubuntu-latest, 3.10)"}`.
+The repository's workflow defines the checks. Before creating an integration
+merge, finish asks GitHub through the `gh` CLI for those check runs on the exact
+accepted commit in the repository the remote pushes to. Only the latest run of
+each app and name counts, and only `completed` with conclusion `success` passes.
+Runs of one workflow for both `push` and `pull_request` on the same commit share
+that identity, so the newer one decides, as in GitHub branch protection. A remote
+with several push URLs is refused.
+Queued, running, failed, cancelled, skipped, neutral, missing or unavailable
+results refuse integration, leave the acceptance in place and change no target.
+Retry the same finish after CI completes; a new HEAD needs its own successful
+checks. The interrupted merge keeps that proof and is refused if the remote's
+repository changes. Tasks without required checks never query GitHub. Change an
+existing task's requirement with `update-required-checks`, which compares the
+exact current array and records durable evidence; it is refused while an
+operation is pending. Topic HEAD success does not prove the merge result itself.
+
 Finish validates before and after the owned actions, commits only the planned
 source, runs the configured push preflight, and verifies the remote tip. It then
 follows the declared parent or remote-default integration edge using the normal
