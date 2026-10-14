@@ -129,18 +129,95 @@ class ValidationUpdateTests(unittest.TestCase):
                 self.update()
         self.assertEqual(self.state.read_bytes(), before)
 
-    def test_pending_failed_finish_is_preserved(self):
-        plan = self.f.topic.parent / 'plan.json'
-        plan.write_text('{}')
+    def failed_finish(self):
+        """Register a validator that cannot pass and leave its untouched finish intent."""
         missing = ['git', 'cat-file', '-e', 'HEAD:missing-required-file']
         self.update(validation=missing)
+        (self.f.topic / 'feature.txt').write_text('done\n')
+        self.f.task = 'current'
+        self.plan = self.f.topic.parent / 'plan.json'
+        self.plan.write_text(json.dumps(self.f.source_plan(self.f.topic, 'feature.txt')))
         with self.assertRaisesRegex(LifecycleError, 'configured validation failed'):
-            service.finish(self.f.topic, task='current', plan_path=str(plan), result_ref='issue/11')
+            service.finish(self.f.topic, task='current', plan_path=str(self.plan), result_ref='issue/31')
+        self.intent = service.status(self.f.topic, 'current')['intent']
+        return missing
+
+    def edit_intent(self, change):
+        from workspace_lifecycle.state import locked_state, save_state
+        with locked_state(self.f.topic) as (directory, state):
+            change(state['intents']['current'])
+            save_state(directory, state)
+
+    def test_effectless_failed_finish_is_corrected_accepted_and_retired(self):
+        missing = self.failed_finish()
+        self.update(expected_validation=missing, evidence='issue/31 correction')
+        current = service.status(self.f.topic, 'current')
+        self.assertNotIn('intent', current)
+        released = current['finish_receipts'][-1]
+        self.assertEqual({k: released[k] for k in self.intent}, self.intent)
+        self.assertEqual(released['validation_update']['from'], missing)
+        self.assertEqual(released['validation_update']['to'], self.new)
+        self.assertEqual(released['validation_update']['evidence'], 'issue/31 correction')
+        self.assertEqual((self.f.topic / 'feature.txt').read_text(), 'done\n')
+        service.update_preflight(self.f.topic, task='current', expected_preflight=self.f.preflight,
+                                 preflight=list(self.f.preflight), evidence='issue/31 preflight')
+        service.update_required_checks(self.f.topic, task='current', expected=[],
+                                       required_checks=[], evidence='issue/31 checks')
+        result = service.finish(self.f.topic, task='current', plan_path=str(self.plan), result_ref='issue/31')
+        self.assertTrue(result['accepted'])
+        self.assertEqual(service.status(self.f.topic, 'current')['acceptance']['validation']['postcommit']['argv'], self.new)
+        self.assertEqual((self.f.root / 'feature.txt').read_text(), 'done\n')
+        retired = service.retire(self.f.root, task='current', result_ref='issue/31', users_released=True)
+        self.assertTrue(retired['retired'])
+        self.assertEqual(retired['receipt']['finish_receipts'][-1], released)
+
+    def test_finish_intent_with_effects_or_other_identity_is_kept(self):
+        missing = self.failed_finish()
+        other = '0' * len(self.head)
+        changes = {
+            'commit tree': lambda i: i.update(commit_tree=other),
+            'commit': lambda i: i.update(committed=other),
+            'archive': lambda i: i['actions'].update({'feature.txt': {'kind': 'archive', 'phase': 'copying'}}),
+            'restore': lambda i: i['actions'].update({'feature.txt': {'kind': 'restore', 'phase': 'resolved'}}),
+            'synchronization': lambda i: i.update(synchronization={}),
+            'unknown field': lambda i: i.update(unexpected=True),
+            'missing identity': lambda i: i.pop('identity'),
+            'other identity': lambda i: i['identity'].update(worktree_id=[0, 0]),
+            'other initial HEAD': lambda i: i.update(initial_head=other),
+            'other revision HEAD': lambda i: i.update(head_revision={'head': other, 'evidence': 'x'}),
+            'merge': lambda i: i.update(kind='merge'),
+        }
+        for name, change in changes.items():
+            with self.subTest(name):
+                self.edit_intent(change)
+                before = self.state.read_bytes()
+                with self.assertRaisesRegex(LifecycleError, 'pending|accepted'):
+                    self.update(expected_validation=missing)
+                self.assertEqual(self.state.read_bytes(), before)
+                self.edit_intent(lambda i: (i.clear(), i.update(json.loads(json.dumps(self.intent)))))
+        self.update(expected_validation=missing)
+        self.assertNotIn('intent', service.status(self.f.topic, 'current'))
+
+    def test_effectless_release_refuses_staged_index_lease_and_stale_cas(self):
+        missing = self.failed_finish()
         before = self.state.read_bytes()
+        git(self.f.topic, 'add', 'feature.txt')
         with self.assertRaisesRegex(LifecycleError, 'pending'):
             self.update(expected_validation=missing)
+        git(self.f.topic, 'reset', '-q', '--', 'feature.txt')
+        with guard(self.f.topic, 'current'):
+            with self.assertRaisesRegex(LifecycleError, 'in use'):
+                self.update(expected_validation=missing)
+        with self.assertRaisesRegex(LifecycleError, 'CAS mismatch'):
+            self.update(expected_validation=self.old)
+        with patch.object(service, 'save_state', side_effect=OSError('interrupted save')):
+            with self.assertRaisesRegex(LifecycleError, 'interrupted save'):
+                self.update(expected_validation=missing)
         self.assertEqual(self.state.read_bytes(), before)
-        self.assertIn('intent', service.status(self.f.topic, 'current'))
+        self.update(expected_validation=missing)
+        with self.assertRaisesRegex(LifecycleError, 'CAS mismatch'):
+            self.update(expected_validation=missing)
+        self.assertEqual(len(service.status(self.f.topic, 'current')['finish_receipts']), 1)
 
     def test_atomic_save_interruption_preserves_registration(self):
         before = self.state.read_bytes()
