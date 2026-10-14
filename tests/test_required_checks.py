@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from workspace_lifecycle import checks
 from workspace_lifecycle.errors import LifecycleError
+from workspace_lifecycle.adoption import adopt_existing
 from workspace_lifecycle.service import begin, finish, status, update_required_checks
 
 
@@ -71,7 +72,7 @@ class RequiredChecksTest(unittest.TestCase):
     def start(self, task, required=(TEST,), validation=("git", "diff", "--check")):
         begin(self.root, task=task, request="issue/" + task, remote="origin", branch="topic/" + task,
               worktree=str(self.topic), validation=list(validation), preflight=self.preflight,
-              required_checks=[dict(c) for c in required])
+              required_checks=None if required is None else [dict(c) for c in required])
         (self.topic / "feature.txt").write_text(task + "\n")
         import hashlib
         self.plan = Path(self.temp.name) / ("plan-" + task + ".json")
@@ -93,6 +94,19 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertEqual(self.trunk(), before)
         self.assertFalse((self.root / "feature.txt").exists())
         self.assertNotIn("integrated", status(self.topic, task))
+
+    def declare(self, content):
+        """Publish a repository declaration on trunk; None removes it."""
+        path = self.root / ".github" / "required-checks.json"
+        if content is None:
+            run(self.root, "rm", "-q", ".github/required-checks.json")
+        else:
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(content if isinstance(content, str) else json.dumps(content))
+            run(self.root, "add", ".github/required-checks.json")
+        run(self.root, "commit", "-qm", "declare required checks")
+        run(self.root, "push", "-q", "origin", "trunk")
+        return run(self.root, "rev-parse", "HEAD")
 
     def accepted(self, task):
         return status(self.topic, task)["acceptance"]["commit"]
@@ -269,6 +283,134 @@ class RequiredChecksTest(unittest.TestCase):
                       worktree=str(self.topic), validation=["git", "diff", "--check"],
                       preflight=self.preflight, required_checks=value)
         self.assertFalse(self.topic.exists())
+
+    def test_declared_checks_are_inherited_and_gate_integration(self):
+        declared_at = self.declare([TEST, LINT])
+        self.start("inherit", required=None)
+        record = status(self.topic, "inherit")
+        self.assertEqual(record["required_checks"], [TEST, LINT])
+        policy = record["required_checks_policy"]
+        self.assertEqual((policy["path"], policy["commit"], policy["checks"]),
+                         (".github/required-checks.json", declared_at, [TEST, LINT]))
+        self.assertEqual(policy["blob"], run(self.root, "rev-parse", declared_at + ":.github/required-checks.json"))
+        self.refused("inherit", "missing")
+        commit = self.accepted("inherit")
+        self.github.add("example/repo", commit, TEST)
+        self.github.add("example/repo", commit, LINT, "completed", "failure")
+        self.refused("inherit", '"state": "failure"')
+        self.github.add("example/repo", commit, LINT)
+        self.assertEqual(self.finish("inherit")["integration"]["destination"], "trunk")
+        integrated = status(self.topic, "inherit")["integrated"]
+        self.assertEqual(integrated["required_checks_policy"]["commit"], declared_at)
+        self.assertEqual([c["name"] for c in integrated["remote_checks"]["checks"]], [TEST["name"], LINT["name"]])
+
+    def test_explicit_checks_must_include_the_declaration(self):
+        self.declare([TEST])
+        for explicit in ([], [LINT]):
+            with self.subTest(explicit=explicit), self.assertRaisesRegex(LifecycleError, "omit"):
+                self.start("weak", required=explicit)
+            self.assertFalse(self.topic.exists())
+            self.assertIsNone(run_optional(self.root, "rev-parse", "--verify", "refs/heads/topic/weak"))
+        self.start("strong", required=(LINT, TEST))
+        self.assertEqual(status(self.topic, "strong")["required_checks"], [LINT, TEST])
+        commit = self.accepted_after_refusal("strong")
+        self.github.add("example/repo", commit, TEST)
+        self.refused("strong", "missing")
+        self.github.add("example/repo", commit, LINT)
+        self.assertEqual(self.finish("strong")["integration"]["destination"], "trunk")
+
+    def accepted_after_refusal(self, task):
+        self.refused(task, "missing")
+        return self.accepted(task)
+
+    def test_invalid_or_unreadable_declaration_refuses_begin(self):
+        for content, message in (("not json", "invalid"), ('{"app": "x", "name": "y"}', "invalid"),
+                                 (json.dumps([TEST, TEST]), "distinct"), ('[{"name": "x"}]', "invalid")):
+            with self.subTest(content=content):
+                self.declare(content)
+                with self.assertRaisesRegex(LifecycleError, message):
+                    self.start("bad", required=None)
+                with self.assertRaisesRegex(LifecycleError, message):
+                    self.start("bad", required=(TEST,))
+                self.assertFalse(self.topic.exists())
+        self.declare(None)
+        link = subprocess.run(["git", "-C", str(self.root), "hash-object", "-w", "--stdin"], input="elsewhere.json",
+                              check=True, text=True, capture_output=True).stdout.strip()
+        run(self.root, "update-index", "--add", "--cacheinfo", "120000," + link + ",.github/required-checks.json")
+        run(self.root, "commit", "-qm", "link"); run(self.root, "push", "-q", "origin", "trunk")
+        with self.assertRaisesRegex(LifecycleError, "regular file"):
+            self.start("bad", required=None)
+        run(self.root, "remote", "set-url", "origin", str(Path(self.temp.name) / "missing.git"))
+        with self.assertRaises(LifecycleError):
+            self.start("bad", required=None)
+        self.assertFalse(self.topic.exists())
+        self.assertIsNone(run_optional(self.root, "config", "--get-regexp", "^branch\\..*\\.workspacetask$"))
+
+    def test_task_checkout_cannot_weaken_the_declaration(self):
+        self.declare([TEST])
+        self.start("local", required=None)
+        (self.topic / ".github" / "required-checks.json").write_text("[]")
+        run(self.topic, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "-qam", "weaken in the topic")
+        self.refused("local", "missing")
+        with self.assertRaisesRegex(LifecycleError, "omit"):
+            update_required_checks(self.root, task="local", expected=[TEST], required_checks=[], evidence="issue/33")
+        self.assertEqual(status(self.topic, "local")["required_checks"], [TEST])
+
+    def test_declaration_added_after_begin_closes_the_gate_until_updated(self):
+        self.start("legacy", required=None)
+        self.assertNotIn("required_checks", status(self.topic, "legacy"))
+        self.assertIsNone(status(self.topic, "legacy")["required_checks_policy"]["blob"])
+        declared_at = self.declare([TEST])
+        self.refused("legacy", "omit")
+        self.assertEqual(self.github.queries, [])
+        with self.assertRaisesRegex(LifecycleError, "omit"):
+            update_required_checks(self.root, task="legacy", expected=[], required_checks=[LINT], evidence="issue/33")
+        update_required_checks(self.root, task="legacy", expected=[], required_checks=[TEST], evidence="issue/33")
+        record = status(self.topic, "legacy")
+        self.assertEqual(record["required_checks_policy"]["commit"], declared_at)
+        self.assertEqual(record["required_checks_updates"][-1]["policy"]["checks"], [TEST])
+        self.github.add("example/repo", self.accepted("legacy"), TEST)
+        self.assertEqual(self.finish("legacy")["integration"]["destination"], "trunk")
+
+    def test_removed_declaration_keeps_the_task_requirement_until_updated(self):
+        self.declare([TEST])
+        self.start("removed", required=None)
+        self.declare(None)
+        self.refused("removed", "missing")
+        update_required_checks(self.root, task="removed", expected=[TEST], required_checks=[], evidence="issue/33")
+        self.assertEqual(self.finish("removed")["integration"]["destination"], "trunk")
+
+    def test_child_inherits_the_default_branch_declaration_not_its_parent_branch(self):
+        declared_at = self.declare([TEST])
+        parent = Path(self.temp.name) / "parent"
+        begin(self.root, task="parent", request="issue/parent", remote="origin", branch="topic/parent",
+              worktree=str(parent), validation=["git", "diff", "--check"], preflight=self.preflight)
+        (parent / ".github" / "required-checks.json").write_text("[]")
+        run(parent, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qam", "weaken")
+        begin(self.root, task="child", request="issue/child", remote="origin", branch="topic/child",
+              worktree=str(self.topic), parent="parent", validation=["git", "diff", "--check"],
+              preflight=self.preflight)
+        record = status(self.topic, "child")
+        self.assertEqual((record["required_checks"], record["required_checks_policy"]["commit"]), ([TEST], declared_at))
+        self.assertEqual(run(self.topic, "rev-parse", "HEAD"), run(parent, "rev-parse", "HEAD"))
+
+    def test_adoption_inherits_the_declaration(self):
+        self.declare([TEST])
+        run(self.root, "worktree", "add", "-q", "-b", "topic/adopt", str(self.topic))
+        values = dict(task="adopt", request="issue/adopt", remote="origin", branch="topic/adopt",
+                      worktree=str(self.topic), expected_head=run(self.topic, "rev-parse", "HEAD"),
+                      evidence="existing checked-out work reviewed", validation=["git", "diff", "--check"],
+                      preflight=self.preflight)
+        with self.assertRaisesRegex(LifecycleError, "omit"):
+            adopt_existing(self.root, required_checks=[], **values)
+        adopt_existing(self.root, **values)
+        self.assertEqual(status(self.topic, "adopt")["required_checks"], [TEST])
+
+
+def run_optional(cwd, *args):
+    result = subprocess.run(["git", "-C", str(cwd), *args], text=True, capture_output=True)
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 class RepositoryIdentityTest(unittest.TestCase):

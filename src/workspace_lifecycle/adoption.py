@@ -7,9 +7,10 @@ import re
 from pathlib import Path
 import stat
 
+from . import checks
 from .errors import LifecycleError
 from .git import common_dir, current_branch, git, head, remote_default, top, worktree_records
-from .service import _index_protection, _lease, _no_links, _now, _operation_check, _snapshot
+from .service import _index_protection, _lease, _no_links, _now, _operation_check, _required_checks_fields, _snapshot
 from .state import locked_state, save_state
 
 
@@ -184,9 +185,10 @@ def _bindings(repo, task, branch, retry):
 
 def adopt_existing(repo, *, task, request, remote, branch, worktree, expected_head,
                    evidence, validation, preflight, parent=None, dependencies=None,
-                   hold_reason=None, next_action=None, preserved_data=None):
+                   hold_reason=None, next_action=None, preserved_data=None, required_checks=None):
     from .preserved import contracts
     preserved_data = contracts(preserved_data, task)
+    required_checks = None if required_checks is None else checks.parse(required_checks)
     repo = Path(repo).resolve()
     dependencies = dependencies or []
     if any(not isinstance(v, str) or not v.strip() or '\0' in v or '\n' in v
@@ -213,6 +215,8 @@ def adopt_existing(repo, *, task, request, remote, branch, worktree, expected_he
                    parent=parent, dependencies=dependencies, validation=validation,
                    preflight=preflight, hold_reason=hold_reason, next_action=next_action,
                    preserved_data=preserved_data)
+    if required_checks is not None:
+        desired['required_checks'] = required_checks
     with ExitStack() as stack:
         for name in sorted(set([task] + dependencies + ([parent] if parent else []))):
             stack.enter_context(_lease(repo, name))
@@ -246,8 +250,10 @@ def adopt_existing(repo, *, task, request, remote, branch, worktree, expected_he
             check_claims(target, preserved_data, state)
             snapshot = _capture(repo, target, branch, expected_head, preserved_data)
             if not intent:
+                policy = checks.current(repo, remote)
                 intent = {'kind': 'adopt-existing', 'desired': desired, 'integration': integration,
-                          'snapshot': snapshot, 'at': _now()}
+                          'snapshot': snapshot, 'required_checks': checks.select(policy, required_checks),
+                          'required_checks_policy': policy, 'at': _now()}
                 state['intents'][task] = intent
                 save_state(directory, state)
             if snapshot != intent['snapshot'] or _capture(repo, target, branch, expected_head, preserved_data) != snapshot:
@@ -265,7 +271,8 @@ def adopt_existing(repo, *, task, request, remote, branch, worktree, expected_he
                                  'preserved_data': preserved_data,
                                  'preserved_snapshot': snapshot['preserved_data'],
                                  'protected_paths': sorted(name for name, value in snapshot['directories'].items()
-                                                           if isinstance(value, dict) and ('git_dir' in value or 'preserved_data_boundary' in value))}}
+                                                           if isinstance(value, dict) and ('git_dir' in value or 'preserved_data_boundary' in value))},
+                    **_required_checks_fields(intent)}
             if hold_reason:
                 item['hold'] = {'reason': hold_reason, 'next_action': next_action, 'at': _now()}
             state['tasks'][task] = item
