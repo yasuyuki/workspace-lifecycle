@@ -215,7 +215,8 @@ def update_validation(repo, *, task: str, expected_head: str,
     with _lease(repo, task):
         with locked_state(repo) as (directory, state):
             item = _task(state, task)
-            if task in state.get('intents', {}) or item.get('retire'):
+            intent = state['intents'].get(task)
+            if item.get('retire'):
                 raise LifecycleError('pending task operation prevents validation update')
             if item.get('acceptance'):
                 raise LifecycleError('accepted task validation cannot be replaced')
@@ -224,6 +225,8 @@ def update_validation(repo, *, task: str, expected_head: str,
             if expected_head != head(repo):
                 raise LifecycleError('validation update HEAD mismatch; supply the exact full commit OID')
             _operation_check(repo, 'validation update')
+            if intent and not _effectless_finish(intent, identity, expected_head):
+                raise LifecycleError('pending task operation prevents validation update')
             if item.get('validation') != expected_validation:
                 raise LifecycleError('validation CAS mismatch')
             receipt = {'from': list(expected_validation), 'to': list(validation),
@@ -231,10 +234,30 @@ def update_validation(repo, *, task: str, expected_head: str,
             _operation_check(repo, 'validation update')
             if _finish_identity(repo, task, branch) != identity or head(repo) != expected_head:
                 raise LifecycleError('HEAD or identity changed during validation update')
+            if intent and _index_paths(repo):
+                raise LifecycleError('pending task operation prevents validation update')
             item['validation'] = list(validation)
             item.setdefault('validation_updates', []).append(receipt)
+            if intent:
+                # A finish that failed before any recorded effect only pins the
+                # old validator. Its receipt outlives retirement like a revision.
+                item.setdefault('finish_receipts', []).append({**intent, 'validation_update': receipt})
+                state['intents'].pop(task)
             save_state(directory, state)
     return {'task': task, 'validation': list(validation)}
+
+
+_FINISH_INTENT_FIELDS = {'kind', 'initial_head', 'plan_digest', 'result_ref', 'actions', 'at', 'identity'}
+
+
+def _effectless_finish(intent, identity, current_head):
+    """True only for a finish intent that recorded no effect on this exact checkout."""
+    revision = intent.get('head_revision')
+    return (intent.get('kind') == 'finish' and intent.get('actions') == {}
+            and _FINISH_INTENT_FIELDS <= set(intent) <= _FINISH_INTENT_FIELDS | {'head_revision'}
+            and intent['identity'] == identity and intent['initial_head'] == current_head
+            and (revision is None or (isinstance(revision, dict) and set(revision) == {'head', 'evidence'}
+                                      and revision['head'] == current_head)))
 
 
 def update_required_checks(repo, *, task: str, expected: list[dict],

@@ -69,8 +69,12 @@ The correction retains the task, dirty ownership, holds, dependencies, and
 preflight. Each correction records both commands, identity, HEAD, and evidence.
 It does not execute validation or grant acceptance. Active use, pending lifecycle
 or Git operations, and accepted tasks are refused. Old acceptance remains tied
-to its original validator. Resolve a pending operation through its existing
-recovery contract before attempting a correction.
+to its original validator. A finish that failed before recording any effect
+(no archive, restore, staged index, commit tree, commit or synchronization) on
+the same checkout and HEAD is released by the correction: its intent moves to
+the task's finish receipts with the correction, and the next ordinary `finish`
+starts a new one. Resolve any other pending operation through its existing
+recovery contract first.
 
 Use `adopt-existing` instead of `begin` to continue an existing checkout, including a nondefault primary checkout or a
 linked checkout nested below it.
