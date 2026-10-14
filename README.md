@@ -183,11 +183,27 @@ record: all four alternatives (`commit`, `restore`, `archive`, and
 `owner-resolution`) must be reviewed with irreversible-harm evidence, a remaining
 owner and a next action.
 
-A repository that relies on remote CI names the checks that integration needs
-with `begin --required-checks-json`, a JSON array of `{"app", "name"}` GitHub
-check runs such as `{"app": "github-actions", "name": "test (ubuntu-latest, 3.10)"}`.
-The repository's workflow defines the checks. Before creating an integration
-merge, finish asks GitHub through the `gh` CLI for those check runs on the exact
+A repository that relies on remote CI declares the checks every task's
+integration needs in a tracked `.github/required-checks.json` on its remote
+default branch: a JSON array of `{"app", "name"}` GitHub check runs such as
+`{"app": "github-actions", "name": "test (ubuntu-latest, 3.10)"}`. The
+repository's workflow defines the checks; the declaration names them exactly.
+`begin` and `adopt-existing` read it from the freshly fetched remote default
+commit, also for a child task, so an unaccepted change in a task or parent
+branch cannot weaken it. Without `--required-checks-json` the task requires the
+declared set. An explicit array may add checks but must include every declared
+one, so `[]` is refused while a declaration exists. Only an absent file means no
+declaration; an invalid file, a non-regular entry or an unreachable remote is
+refused. The task records the declaration's commit, blob and checks as
+`required_checks_policy`.
+
+Before creating an integration merge, finish reads the declaration again from
+the remote default branch. A check declared since the task began refuses
+integration until `update-required-checks` adds it; a removed declaration
+leaves the task's recorded requirement in place until an update removes it.
+`update-required-checks` applies the same rule against the current declaration
+and records it with the change. A pending integration keeps the decision it
+started with. Finish then asks GitHub through the `gh` CLI for those check runs on the exact
 accepted commit in the repository the remote pushes to. Only the latest run of
 each app and name counts, and only `completed` with conclusion `success` passes.
 Runs of one workflow for both `push` and `pull_request` on the same commit share
@@ -201,6 +217,8 @@ repository changes. Tasks without required checks never query GitHub. Change an
 existing task's requirement with `update-required-checks`, which compares the
 exact current array and records durable evidence; it is refused while an
 operation is pending. Topic HEAD success does not prove the merge result itself.
+Repositories without a declaration behave as before, except that begin, adoption and finish fetch the remote default
+branch to look for one.
 
 Finish validates before and after the owned actions, commits only the planned
 source, runs the configured push preflight, and verifies the remote tip. It then

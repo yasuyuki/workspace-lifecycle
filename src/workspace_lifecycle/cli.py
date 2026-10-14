@@ -33,7 +33,10 @@ def parser():
     begin.add_argument("--parent"); begin.add_argument("--dependency", action="append", default=[])
     begin.add_argument("--validation-json", type=_json_list, default=[], help="validation argv array; an element equal to {repo} resolves to the current validation checkout, including the integration destination; embedded placeholders are unchanged")
     begin.add_argument("--preflight-json", type=_json_list, required=True)
-    begin.add_argument("--required-checks-json", type=json.loads, default=[], help='JSON array of {"app", "name"} GitHub check runs that must succeed on the exact accepted commit before integration')
+    checks_help = ('JSON array of {"app", "name"} GitHub check runs that must succeed on the exact accepted commit '
+                   'before integration; omitted, the remote default branch .github/required-checks.json decides, '
+                   'and an explicit array must include every check declared there')
+    begin.add_argument("--required-checks-json", type=json.loads, help=checks_help)
     adopt = commands.add_parser('adopt-existing', help='adopt an existing linked checkout as unaccepted current work')
     for name in ('task', 'request', 'remote', 'branch', 'worktree', 'expected-head', 'evidence'):
         adopt.add_argument('--' + name, required=True)
@@ -42,6 +45,7 @@ def parser():
     adopt.add_argument('--preflight-json', type=_json_list, required=True)
     adopt.add_argument('--preserved-data-json', type=json.loads, help='explicit foreign retired payload boundaries with current payload/admin identities and evidence references')
     adopt.add_argument('--hold-reason'); adopt.add_argument('--next-action')
+    adopt.add_argument('--required-checks-json', type=json.loads, help=checks_help)
     status = commands.add_parser("status"); status.add_argument("--task")
     producer = commands.add_parser('register-owner-receipt', help='bind an exact producer generation before it writes outputs')
     for name in ('task', 'owner', 'generation', 'receipt'):
@@ -65,7 +69,7 @@ def parser():
     required = commands.add_parser('update-required-checks', help='replace the remote checks one task requires before integration by exact CAS')
     required.add_argument('--task', required=True)
     required.add_argument('--expected-json', type=json.loads, required=True, help='current required checks; [] when none')
-    required.add_argument('--required-checks-json', type=json.loads, required=True, help='JSON array of {"app", "name"}; [] removes the requirement')
+    required.add_argument('--required-checks-json', type=json.loads, required=True, help='JSON array of {"app", "name"} including every check the remote default branch .github/required-checks.json declares; [] removes an undeclared requirement')
     required.add_argument('--evidence', required=True, help='durable reference explaining the change')
     sync = commands.add_parser('sync', help='resume the same task by an exact same-name remote merge; does not accept or integrate work')
     for name in ('task', 'expected-head', 'remote-head', 'evidence'):
@@ -102,7 +106,7 @@ def main(argv=None):
                 evidence=args.evidence, parent=args.parent, dependencies=args.dependency,
                 validation=args.validation_json, preflight=args.preflight_json,
                 hold_reason=args.hold_reason, next_action=args.next_action,
-                preserved_data=args.preserved_data_json)
+                preserved_data=args.preserved_data_json, required_checks=args.required_checks_json)
         elif args.command == 'sync':
             result = service.synchronize(args.repo, task=args.task, expected_head=args.expected_head,
                                          remote_head=args.remote_head, evidence=args.evidence)

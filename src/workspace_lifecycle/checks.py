@@ -1,8 +1,10 @@
 """Required remote checks for integrating one exact accepted commit.
 
-The repository owns which checks exist; a task names the ones integration
-needs. Only the latest GitHub check run of each required app and name on the
-exact commit counts, and only ``completed`` with conclusion ``success`` passes.
+The repository owns which checks exist and may declare the ones every task
+needs in a tracked file on its remote default branch. A task requires at least
+that declared set. Only the latest GitHub check run of each required app and
+name on the exact commit counts, and only ``completed`` with conclusion
+``success`` passes.
 """
 from __future__ import annotations
 
@@ -11,7 +13,9 @@ import re
 import subprocess
 
 from .errors import LifecycleError
-from .git import git
+from .git import git, head, remote_default
+
+DECLARATION = '.github/required-checks.json'
 
 _GITHUB = re.compile(r'^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)'
                      r'([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$')
@@ -30,6 +34,44 @@ def parse(value) -> list[dict]:
     if len({(c['app'], c['name']) for c in checks}) != len(checks):
         raise LifecycleError('required checks must be distinct')
     return checks
+
+
+def declared(repo, commit: str) -> dict:
+    """The checks the repository declares at ``commit``; only an absent file declares none."""
+    policy = {'path': DECLARATION, 'commit': commit}
+    entry = git(repo, 'ls-tree', '--full-tree', commit, '--', DECLARATION)
+    if not entry:
+        return {**policy, 'blob': None, 'checks': []}
+    mode, kind, blob = entry.partition('\t')[0].split()
+    if kind != 'blob' or mode not in ('100644', '100755'):
+        raise LifecycleError(DECLARATION + ' must be a regular file at ' + commit)
+    try:
+        return {**policy, 'blob': blob, 'checks': parse(json.loads(git(repo, 'cat-file', 'blob', blob)))}
+    except (ValueError, LifecycleError) as exc:
+        raise LifecycleError('invalid ' + DECLARATION + ' at ' + commit + ': ' + str(exc))
+
+
+def current(repo, remote: str) -> dict:
+    """The declaration on the remote default branch as fetched now, never the checkout."""
+    default = remote_default(repo, remote)
+    git(repo, 'fetch', remote, 'refs/heads/' + default)
+    return declared(repo, head(repo, 'FETCH_HEAD'))
+
+
+def require(policy: dict, selected: list[dict]) -> None:
+    missing = [check for check in policy['checks'] if check not in selected]
+    if missing:
+        raise LifecycleError('required checks omit ' + json.dumps(missing) + ' declared by '
+                             + policy['path'] + ' at ' + policy['commit']
+                             + '; require them with update-required-checks and durable evidence')
+
+
+def select(policy: dict, explicit: list[dict] | None) -> list[dict]:
+    """The declared set when omitted; otherwise an explicit superset of it."""
+    if explicit is None:
+        return list(policy['checks'])
+    require(policy, explicit)
+    return explicit
 
 
 def github_repository(url: str) -> str:
