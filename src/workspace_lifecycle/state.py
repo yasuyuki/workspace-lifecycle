@@ -32,8 +32,9 @@ def _atomic(path: Path, value: dict) -> None:
 
 @contextmanager
 def locked_state(repo, create: bool = False):
-    directory = state_dir(repo)
-    legacy = common_dir(repo) / "agent-branches" / "state.json"
+    common = common_dir(repo)
+    directory = common / "workspace-lifecycle"
+    legacy = common / "agent-branches" / "state.json"
     if legacy.exists():
         raise LifecycleError("legacy agent-branches registry exists; migration is not authorized")
     if create: directory.mkdir(parents=True, exist_ok=True)

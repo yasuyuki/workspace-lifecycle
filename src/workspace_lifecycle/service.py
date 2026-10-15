@@ -451,26 +451,32 @@ def _index_paths(repo):
 
 def _index_protection(repo):
     result = subprocess.run(['git', '-C', str(repo), 'ls-files', '-v', '-z'], capture_output=True, check=True)
-    if any(row[:1].islower() or row[:1] == b'S' for row in result.stdout.split(b'\0') if row):
+    tags = {row[:1] for row in result.stdout.split(b'\0') if row}
+    if any(tag.islower() or tag == b'S' for tag in tags):
         raise LifecycleError('index assume-unchanged/skip-worktree flags require explicit owner resolution')
-    if git(repo, 'ls-files', '--unmerged'):
+    if b'M' in tags:
         raise LifecycleError('unmerged index must be resolved in its existing worktree')
 
 
 def _operation_check(target, operation='adoption'):
     _index_protection(target)
-    for name in ('MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD',
-                 'rebase-merge', 'rebase-apply', 'sequencer', 'BISECT_START', 'BISECT_LOG', 'index.lock'):
-        path = Path(git(target, 'rev-parse', '--path-format=absolute', '--git-path', name))
+    names = ('MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD',
+             'rebase-merge', 'rebase-apply', 'sequencer', 'BISECT_START', 'BISECT_LOG', 'index.lock')
+    paths = git(target, 'rev-parse', '--path-format=absolute',
+                *(arg for name in names for arg in ('--git-path', name))).splitlines()
+    if len(paths) != len(names):
+        raise LifecycleError('Git operation paths could not be resolved before ' + operation)
+    for name, path in zip(names, map(Path, paths)):
         if path.exists() or path.is_symlink():
             raise LifecycleError('existing Git operation must be resolved before ' + operation + ': ' + name)
 
 
 def _finish_identity(repo, task_id, branch):
-    if (branch_for_task(repo, task_id) != branch or top(repo) != task_worktree(repo, branch)
-            or current_branch(repo) != branch or bound_task(repo) != task_id):
+    toplevel, admin = git(repo, 'rev-parse', '--show-toplevel', '--absolute-git-dir').splitlines()
+    if (branch_for_task(repo, task_id) != branch or Path(toplevel).resolve() != task_worktree(repo, branch)
+            or current_branch(repo) != branch or bound_task(repo, branch) != task_id):
         raise LifecycleError('finish must run in the bound task worktree')
-    admin = Path(git(repo, 'rev-parse', '--absolute-git-dir')).resolve()
+    admin = Path(admin).resolve()
     return {'task': task_id, 'branch': branch, 'worktree': str(repo), 'git_dir': str(admin),
             'worktree_id': [repo.stat().st_dev, repo.stat().st_ino],
             'git_dir_id': [admin.stat().st_dev, admin.stat().st_ino]}
