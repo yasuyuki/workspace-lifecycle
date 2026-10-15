@@ -9,7 +9,7 @@ description = "Git-native workspace acceptance, completion and retirement"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 
 [project.urls]
 Source = "https://github.com/yasuyuki/workspace-lifecycle"
