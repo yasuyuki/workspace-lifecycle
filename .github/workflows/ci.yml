@@ -13,6 +13,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # Git's bin\git.exe relaunches mingw64\bin\git.exe for every call, and
+      # the tests make tens of thousands of Git calls.
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value "$env:ProgramFiles\Git\mingw64\bin"
       - run: python -m pip install build twine
       - run: python -m build
       - shell: bash
@@ -27,6 +32,7 @@ jobs:
             runtime="$RUNNER_TEMP/lifecycle-runtime/bin"
           fi
           "$runtime/python" -m pip install --no-index dist/*.whl
+          "$runtime/python" -m pip install pytest==9.1.1 pytest-xdist==3.8.0
           cd "$RUNNER_TEMP"
           "$runtime/workspace-lifecycle" --version
-          "$runtime/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -v
+          "$runtime/python" -m pytest -n auto -p no:cacheprovider -v "$GITHUB_WORKSPACE/tests"
