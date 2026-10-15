@@ -377,7 +377,7 @@ and durable result reference. Use command help for the exact arguments.
 
 Use the installed command's `--help` for exact arguments and JSON output. The
 package's tests and workflow build an isolated wheel and run its tests from
-outside the source checkout on Linux and Windows with Python 3.10 and 3.12.
+outside the source checkout on Linux and Windows with Python 3.10, 3.12 and 3.14.
 
 The checkout shim is a one-way entry to this package, not a legacy schema
 adapter. Existing `agent-branches` hooks must stay on their pinned source until
