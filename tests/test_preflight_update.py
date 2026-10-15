@@ -1,9 +1,13 @@
 """The public preflight migration preserves an existing task's Git and work state."""
 import json
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
+import workspace_lifecycle
 from workspace_lifecycle.errors import LifecycleError
 from workspace_lifecycle.leases import guard
 from workspace_lifecycle.service import begin, finish, hold, retire, status, update_preflight
@@ -111,6 +115,118 @@ class PreflightUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(LifecycleError, 'unknown task'):
             update_preflight(self.f.root, task='current', expected_preflight=self.new,
                              preflight=self.old, evidence='issue/16')
+
+
+class LifecyclePythonTests(unittest.TestCase):
+    """A task whose preflight names {lifecycle_python} survives install changes untouched."""
+    def setUp(self):
+        self.f = test_lifecycle.LifecycleTest('runTest')
+        self.f.setUp()
+        self.addCleanup(self.f.tearDown)
+        self.base = Path(self.f.temp.name)
+        self.f.task = 'moved'
+        self.placeholder = ['{lifecycle_python}', '-m', 'workspace_lifecycle.push', '{repo}',
+                            '--user-intent', 'push']
+
+    def install(self, name, *, without=()):
+        """An isolated lifecycle install: its own interpreter and its own package copy."""
+        home = self.base / name
+        subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(home)], check=True)
+        python = home / ('Scripts/python.exe' if sys.platform == 'win32' else 'bin/python')
+        purelib = subprocess.run([str(python), '-c', 'import sysconfig; print(sysconfig.get_paths()["purelib"])'],
+                                 check=True, capture_output=True, text=True).stdout.strip()
+        package = Path(purelib) / 'workspace_lifecycle'
+        shutil.copytree(Path(workspace_lifecycle.__file__).parent, package,
+                        ignore=shutil.ignore_patterns('__pycache__'))
+        for module in without:
+            (package / module).unlink()
+        return python
+
+    def cli(self, python, *argv, repo=None):
+        return subprocess.run([str(python), '-m', 'workspace_lifecycle', '--repo', str(repo or self.f.topic), *argv],
+                              capture_output=True, text=True, cwd=self.base)
+
+    def begin(self, python, preflight):
+        begun = self.cli(python, 'begin', '--task', 'moved', '--request', 'issue/25', '--remote', 'origin',
+                         '--branch', 'topic/moved', '--worktree', str(self.f.topic),
+                         '--validation-json', '["git", "diff", "--check"]',
+                         '--preflight-json', json.dumps(preflight), repo=self.f.root)
+        self.assertEqual(begun.returncode, 0, begun.stderr)
+
+    def plan(self, name):
+        (self.f.topic / name).write_text(name + '\n')
+        plan = self.base / (name + '.plan.json')
+        plan.write_text(json.dumps(self.f.source_plan(self.f.topic, name)))
+        return str(plan)
+
+    def finish(self, python, plan):
+        return self.cli(python, 'finish', '--task', 'moved', '--plan', plan, '--result-ref', 'issue/25')
+
+    def remote_branches(self):
+        return test_lifecycle.run(self.f.root, 'ls-remote', '--heads', 'origin')
+
+    def test_finish_uses_the_new_install_after_the_old_one_is_gone(self):
+        old, new = self.install('old'), self.install('new')
+        incomplete = self.install('incomplete', without=('push.py',))
+        self.begin(old, self.placeholder)
+        shutil.rmtree(old.parents[1])
+        plan = self.plan('moved.txt')
+        before = self.remote_branches()
+        refused = self.finish(incomplete, plan)
+        self.assertEqual(refused.returncode, 2, refused.stdout)
+        self.assertIn('push preflight failed', refused.stderr)
+        self.assertEqual(self.remote_branches(), before)
+        finished = self.finish(new, plan)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertTrue(json.loads(finished.stdout)['accepted'])
+        self.assertEqual((self.f.root / 'moved.txt').read_text(), 'moved.txt\n')
+        self.assertEqual(status(self.f.topic, 'moved')['preflight'], self.placeholder)
+
+    def test_preflight_runs_on_the_finishing_interpreter_with_other_elements_unchanged(self):
+        new = self.install('new')
+        observed = self.base / 'observed.json'
+        script = ('import json, subprocess, sys; '
+                  'open(sys.argv[2], "a").write(json.dumps({"python": sys.executable, "argv": sys.argv[1:]}) + "\\n"); '
+                  'b = subprocess.check_output(["git", "branch", "--show-current"], text=True).strip(); '
+                  'print(json.dumps({"decision": "push", "reason": "fixture", '
+                  '"push_argv": ["git", "push", "origin", "HEAD:refs/heads/" + b]}))')
+        self.begin(sys.executable, ['{lifecycle_python}', '-c', script, '{repo}', str(observed), 'x{lifecycle_python}'])
+        finished = self.finish(new, self.plan('seen.txt'))
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        calls = [json.loads(line) for line in observed.read_text().splitlines()]
+        self.assertEqual({Path(call['python']).resolve() for call in calls}, {new.resolve()})
+        self.assertEqual({Path(call['argv'][0]).resolve() for call in calls},
+                         {self.f.topic.resolve(), self.f.root.resolve()})
+        self.assertEqual({tuple(call['argv'][1:]) for call in calls}, {(str(observed), 'x{lifecycle_python}')})
+
+    def test_pinned_install_fails_closed_until_one_cas_update(self):
+        old, new = self.install('old'), self.install('new')
+        pinned = [str(old), '-m', 'workspace_lifecycle.push', '{repo}', '--user-intent', 'push']
+        self.begin(old, pinned)
+        migrated = self.cli(new, 'update-preflight', '--task', 'moved',
+                            '--expected-preflight-json', json.dumps(pinned),
+                            '--preflight-json', json.dumps(self.placeholder), '--evidence', 'issue/25 migration')
+        self.assertEqual(migrated.returncode, 0, migrated.stderr)
+        self.assertEqual(status(self.f.topic, 'moved')['preflight_update']['from'], pinned)
+        shutil.rmtree(old.parents[1])
+        finished = self.finish(new, self.plan('migrated.txt'))
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertTrue(json.loads(finished.stdout)['accepted'])
+
+    def test_missing_pinned_interpreter_refuses_push(self):
+        gone = self.base / 'gone' / 'python'
+        self.begin(sys.executable, [str(gone), '-m', 'workspace_lifecycle.push', '{repo}'])
+        refused = self.finish(sys.executable, self.plan('t.txt'))
+        self.assertEqual(refused.returncode, 2, refused.stdout)
+        self.assertNotIn('topic/moved', self.remote_branches())
+
+    def test_unknown_own_interpreter_refuses_push(self):
+        self.begin(sys.executable, self.placeholder)
+        plan = self.plan('t.txt')
+        with mock.patch('sys.executable', ''):
+            with self.assertRaisesRegex(LifecycleError, 'own interpreter'):
+                finish(self.f.topic, task='moved', plan_path=plan, result_ref='issue/25')
+        self.assertNotIn('topic/moved', self.remote_branches())
 
 
 if __name__ == '__main__':

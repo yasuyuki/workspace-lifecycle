@@ -330,8 +330,11 @@ def _validate(repo: Path, argv: list[str]) -> dict:
 
 def _push(repo: Path, preflight: list[str], expected_branch: str, expected_remote=None, expected_head=None) -> dict:
     remote_url = git(repo, 'remote', 'get-url', expected_remote) if expected_remote else None
-    argv = [str(repo) if value == "{repo}" else value for value in preflight]
     if "{repo}" not in preflight: raise LifecycleError("preflight argv must contain literal {repo}")
+    if "{lifecycle_python}" in preflight and not os.sys.executable:
+        raise LifecycleError("this lifecycle cannot name its own interpreter for {lifecycle_python}")
+    values = {"{repo}": str(repo), "{lifecycle_python}": os.sys.executable}
+    argv = [values.get(value, value) for value in preflight]
     result = subprocess.run(argv, cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode: raise LifecycleError("push preflight failed")
     try: decision = json.loads(result.stdout)
