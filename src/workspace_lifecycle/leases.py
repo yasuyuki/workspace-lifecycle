@@ -452,9 +452,8 @@ def run(repo, task, argv, cwd, before_spawn=None, child_env=None):
                 for number in (signal.SIGINT, signal.SIGBREAK):
                     previous[number] = signal.signal(number, forward_console)
             else:
-                # Python 3.10 supports preexec_fn rather than process_group.
                 _linux_subreaper()
-                options['preexec_fn'] = os.setpgrp
+                options['process_group'] = 0
                 def forward(number, _frame):
                     if child is not None:
                         try:

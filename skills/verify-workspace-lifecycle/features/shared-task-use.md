@@ -18,7 +18,7 @@ Contract sources:
 
 ## Prerequisites
 
-Python 3.10+ with `venv` and `pip`, Git, and network access for the setuptools
+Python 3.12+ with `venv` and `pip`, Git, and network access for the setuptools
 build backend. The helper builds everything else in its scratch directory: the
 venv, a bare remote `remote.git` on branch `trunk`, its clone `root`, the task
 worktree `topic` and the recorder `session.py`. The commands run with

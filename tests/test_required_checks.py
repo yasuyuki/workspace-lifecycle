@@ -19,7 +19,7 @@ def run(cwd, *args):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.strip()
 
 
-TEST = {"app": "github-actions", "name": "test (ubuntu-latest, 3.10)"}
+TEST = {"app": "github-actions", "name": "test (ubuntu-latest, 3.12)"}
 LINT = {"app": "github-actions", "name": "lint"}
 
 
