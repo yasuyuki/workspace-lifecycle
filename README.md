@@ -202,8 +202,14 @@ the remote default branch. A check declared since the task began refuses
 integration until `update-required-checks` adds it; a removed declaration
 leaves the task's recorded requirement in place until an update removes it.
 `update-required-checks` applies the same rule against the current declaration
-and records it with the change. A pending integration keeps the decision it
-started with. Finish then asks GitHub through the `gh` CLI for those check runs on the exact
+and records it with the change. When the accepted commit itself changes the
+declaration from both the remote default one and the one at their merge base,
+finish reads that declaration from the commit's Git tree and also requires each
+check it declares; checks the task already requires stay required, so a removal
+or rename cannot weaken the gate. An invalid or non-regular declaration there is
+refused. The merge intent and integration record keep it as
+`source_checks_policy` with its base and `added` checks. A pending integration
+keeps the decision it started with. Finish then asks GitHub through the `gh` CLI for those check runs on the exact
 accepted commit in the repository the remote pushes to. Only the latest run of
 each app and name counts, and only `completed` with conclusion `success` passes.
 Runs of one workflow for both `push` and `pull_request` on the same commit share

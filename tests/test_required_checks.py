@@ -1,4 +1,5 @@
 import json
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -407,6 +408,112 @@ class RequiredChecksTest(unittest.TestCase):
         adopt_existing(self.root, **values)
         self.assertEqual(status(self.topic, "adopt")["required_checks"], [TEST])
 
+
+    def propose(self, content):
+        """Commit a declaration change in the task topic; None deletes it."""
+        path = self.topic / ".github" / "required-checks.json"
+        if content is None:
+            run(self.topic, "rm", "-q", ".github/required-checks.json")
+        else:
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(content if isinstance(content, str) else json.dumps(content))
+            run(self.topic, "add", ".github/required-checks.json")
+        run(self.topic, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "-qm", "propose required checks")
+
+    def test_declaration_added_by_the_task_gates_its_own_commit(self):
+        self.start("introduce", required=None)
+        self.propose([TEST])
+        self.refused("introduce", "missing")
+        self.assertNotIn("required_checks", status(self.topic, "introduce"))
+        commit = self.accepted("introduce")
+        self.github.add("example/repo", run(self.root, "rev-parse", "trunk"), TEST)
+        self.github.add("example/repo", commit, TEST, app="other-app")
+        self.refused("introduce", "missing")
+        for status_, conclusion in (("in_progress", None), ("completed", "skipped"), ("completed", "failure")):
+            with self.subTest(status=status_, conclusion=conclusion):
+                self.github.add("example/repo", commit, TEST, status_, conclusion)
+                self.refused("introduce", '"state": "' + (conclusion or status_) + '"')
+        self.github.add("example/repo", commit, TEST)
+        self.assertEqual(self.finish("introduce")["integration"]["destination"], "trunk")
+        integrated = status(self.topic, "introduce")["integrated"]
+        proposed = integrated["source_checks_policy"]
+        self.assertEqual((proposed["commit"], proposed["checks"], proposed["added"], proposed["base"]["blob"]),
+                         (commit, [TEST], [TEST], None))
+        self.assertEqual(proposed["blob"], run(self.root, "rev-parse", commit + ":.github/required-checks.json"))
+        self.assertEqual([(c["name"], c["state"]) for c in integrated["remote_checks"]["checks"]],
+                         [(TEST["name"], "success")])
+
+    def test_interrupted_merge_keeps_the_added_declaration_proof(self):
+        marker = Path(self.temp.name) / "block-target-validation"
+        validation = [sys.executable, "-c",
+                      "import os,sys; sys.exit(os.path.exists(sys.argv[1]) and os.getcwd() == sys.argv[2])",
+                      str(marker), str(self.root.resolve())]
+        self.start("resume-added", required=None, validation=validation)
+        self.propose([TEST])
+        self.refused("resume-added", "missing")
+        self.github.add("example/repo", self.accepted("resume-added"), TEST)
+        marker.write_text("")
+        with self.assertRaisesRegex(LifecycleError, "configured validation failed"):
+            self.finish("resume-added")
+        self.assertEqual(status(self.topic, "resume-added")["intent"]["source_checks_policy"]["added"], [TEST])
+        marker.unlink()
+        self.github.unavailable = True
+        self.assertEqual(self.finish("resume-added")["integration"]["destination"], "trunk")
+        integrated = status(self.topic, "resume-added")["integrated"]
+        self.assertEqual(integrated["source_checks_policy"]["added"], [TEST])
+        self.assertEqual([c["name"] for c in integrated["remote_checks"]["checks"]], [TEST["name"]])
+
+    def test_success_before_a_new_head_does_not_cover_the_added_declaration(self):
+        self.start("stale", required=None)
+        self.propose([TEST])
+        self.refused("stale", "missing")
+        self.github.add("example/repo", self.accepted("stale"), TEST)
+        self.propose([TEST, LINT])
+        self.plan.write_text("{}")
+        self.refused("stale", "missing")
+
+    def test_changed_declaration_requires_new_checks_without_dropping_old_ones(self):
+        self.declare([TEST])
+        self.start("rename", required=None)
+        self.propose([LINT])
+        self.refused("rename", "missing")
+        commit = self.accepted("rename")
+        self.github.add("example/repo", commit, TEST)
+        self.refused("rename", re.escape(LINT["name"]))
+        self.github.runs.clear()
+        self.github.add("example/repo", commit, LINT)
+        self.refused("rename", re.escape(TEST["name"]))
+        self.github.add("example/repo", commit, TEST)
+        self.assertEqual(self.finish("rename")["integration"]["destination"], "trunk")
+        integrated = status(self.topic, "rename")["integrated"]
+        self.assertEqual(integrated["source_checks_policy"]["added"], [LINT])
+        self.assertEqual([c["name"] for c in integrated["remote_checks"]["checks"]], [TEST["name"], LINT["name"]])
+
+    def test_removed_declaration_in_the_task_keeps_the_declared_checks(self):
+        self.declare([TEST])
+        self.start("drop", required=None)
+        self.propose(None)
+        self.refused("drop", "missing")
+        self.github.add("example/repo", self.accepted("drop"), TEST)
+        self.assertEqual(self.finish("drop")["integration"]["destination"], "trunk")
+        proposed = status(self.topic, "drop")["integrated"]["source_checks_policy"]
+        self.assertEqual((proposed["blob"], proposed["added"]), (None, []))
+
+    def test_broken_declaration_in_the_task_refuses_integration(self):
+        self.start("broken", required=None)
+        self.propose("not json")
+        self.refused("broken", "invalid")
+        self.propose(json.dumps([TEST, TEST]))
+        self.plan.write_text("{}")
+        self.refused("broken", "distinct")
+        link = subprocess.run(["git", "-C", str(self.topic), "hash-object", "-w", "--stdin"], input="elsewhere.json",
+                              check=True, text=True, capture_output=True).stdout.strip()
+        run(self.topic, "update-index", "--cacheinfo", "120000," + link + ",.github/required-checks.json")
+        run(self.topic, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "link")
+        run(self.topic, "checkout", "--", ".github/required-checks.json")
+        self.refused("broken", "regular file")
+        self.assertEqual(self.github.queries, [])
 
 def run_optional(cwd, *args):
     result = subprocess.run(["git", "-C", str(cwd), *args], text=True, capture_output=True)

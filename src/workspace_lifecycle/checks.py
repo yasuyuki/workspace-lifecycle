@@ -58,6 +58,24 @@ def current(repo, remote: str) -> dict:
     return declared(repo, head(repo, 'FETCH_HEAD'))
 
 
+def source(repo, commit: str, policy: dict, selected: list[dict]) -> dict | None:
+    """The declaration ``commit`` changes relative to the trusted ``policy``, if any.
+
+    One it inherits unchanged from its merge base with ``policy`` does not land.
+    Its checks join ``selected`` as ``added``; a removal or weakening adds nothing,
+    so ``selected`` keeps every check the task already requires.
+    """
+    def entry(revision):
+        return git(repo, 'rev-parse', '--verify', '-q', revision + ':' + DECLARATION, optional=True)
+
+    base = git(repo, 'merge-base', commit, policy['commit'], optional=True)
+    if entry(commit) in ({policy['blob']} | ({entry(base)} if base else set())):
+        return None
+    proposed = declared(repo, commit)
+    return {**proposed, 'base': {'commit': policy['commit'], 'blob': policy['blob']},
+            'added': [check for check in proposed['checks'] if check not in selected]}
+
+
 def require(policy: dict, selected: list[dict]) -> None:
     missing = [check for check in policy['checks'] if check not in selected]
     if missing:

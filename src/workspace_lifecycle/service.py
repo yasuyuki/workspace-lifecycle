@@ -1076,12 +1076,17 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
         # Query outside the state lock; the leases pin this task and its target.
         # A declaration added or strengthened since the task began closes the gate
         # until the task requires it too; a pending merge keeps its decision.
-        policy = None
+        # A declaration the accepted commit itself changes must pass on that commit.
+        policy = proposed = None
         if not settled:
             policy = checks.current(repo, item['remote'])
             checks.require(policy, required_checks)
-        repository = checks.repository(repo, item['remote']) if required_checks else None
-        gate = checks.verify(repository, gated, required_checks) if required_checks and gated and not settled else None
+            proposed = checks.source(repo, gated, policy, required_checks) if gated else None
+        elif pending:
+            proposed = pending.get('source_checks_policy')
+        gated_checks = required_checks + (proposed['added'] if proposed else [])
+        repository = checks.repository(repo, item['remote']) if gated_checks else None
+        gate = checks.verify(repository, gated, gated_checks) if gated_checks and gated and not settled else None
         with locked_state(repo) as (directory, state):
             item = _task(state, task_id)
             if item.get('hold') or not item.get('acceptance'):
@@ -1121,10 +1126,10 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                 if intent and (intent['kind'] != 'merge' or intent['source'] != source_commit
                                or intent['target'] != target_branch):
                     raise LifecycleError('pending integration identity differs; preserve the existing operation')
-                if required_checks:
+                if gated_checks:
                     proof = intent.get('remote_checks') if intent else gate
                     if (not proof or proof['commit'] != source_commit or proof['repository'] != repository
-                            or [{'app': c['app'], 'name': c['name']} for c in proof['checks']] != required_checks):
+                            or [{'app': c['app'], 'name': c['name']} for c in proof['checks']] != gated_checks):
                         raise LifecycleError('required check evidence does not match the exact accepted commit and remote')
                 if not intent:
                     holder = item.get('integration_synchronization', {})
@@ -1160,8 +1165,9 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                             target_head = synced['commit']
                     intent = {'kind': 'merge', 'source': source_commit, 'target': target_branch,
                               'target_head': target_head, 'result_ref': result_ref, 'at': _now(),
-                              **({'remote_checks': gate} if required_checks else {}),
-                              **({'required_checks_policy': policy} if policy else {})}
+                              **({'remote_checks': gate} if gated_checks else {}),
+                              **({'required_checks_policy': policy} if policy else {}),
+                              **({'source_checks_policy': proposed} if proposed else {})}
                     state['intents'][task_id] = intent; save_state(directory, state)
                 pending_sync = intent.get('synchronization')
                 if pending_sync and not pending_sync.get('commit'):
@@ -1234,9 +1240,9 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                 pushed = _push(target_worktree, item['preflight'], target_branch, item['remote'], expected_head=merged)
                 record = {'destination': target_branch, 'commit': merged, 'source': source_commit,
                           'validation': evidence, 'push': pushed, 'result_ref': result_ref, 'at': _now(),
-                          **({'remote_checks': intent['remote_checks']} if required_checks else {}),
-                          **({'required_checks_policy': intent['required_checks_policy']}
-                             if 'required_checks_policy' in intent else {})}
+                          **({'remote_checks': intent['remote_checks']} if gated_checks else {}),
+                          **{key: intent[key] for key in ('required_checks_policy', 'source_checks_policy')
+                             if key in intent}}
                 item['integrated'] = record
                 if parent:
                     parent['acceptance'] = {**parent['acceptance'], 'commit': merged,
