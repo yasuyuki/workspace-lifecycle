@@ -44,7 +44,11 @@ workspace-lifecycle --help
 Begin a task with an explicit request, remote, branch, absolute worktree,
 validation argv and preflight argv. See `begin --help` for validation checkout
 placeholders. The preflight must contain the literal
-`{repo}` placeholder. `status` reports the selected task and its live Git state;
+`{repo}` placeholder. An element equal to `{lifecycle_python}` runs with the
+interpreter of the lifecycle that is finishing the task, so a preflight such as
+`["{lifecycle_python}", "-m", "workspace_lifecycle.push", "{repo}"]` keeps
+working after the lifecycle install moves or changes version. Name an absolute
+interpreter instead when the preflight belongs to a different runtime. `status` reports the selected task and its live Git state;
 `hold` records a reason and next action. Parent and dependency tasks must
 already exist and are checked again before integration.
 
@@ -468,3 +472,9 @@ held tasks launch with a stderr notice instead of a refusal, and refusals carry
 
 Version 0.5.1 also launches a repository that has both a legacy registry and
 lifecycle state unmanaged; 0.5.0 still refused it.
+
+Version 0.8.0 resolves a preflight element equal to `{lifecycle_python}` to the
+running lifecycle's interpreter. A task whose preflight names its own install
+by path needs one `update-preflight` to this form; later install changes need
+none. 0.8.0 also requires the checks a task adds to
+`.github/required-checks.json` on that task's own accepted commit.

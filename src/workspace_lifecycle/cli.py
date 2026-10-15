@@ -32,7 +32,10 @@ def parser():
     for name in ("task", "request", "remote", "branch", "worktree"): begin.add_argument("--" + name, required=True)
     begin.add_argument("--parent"); begin.add_argument("--dependency", action="append", default=[])
     begin.add_argument("--validation-json", type=_json_list, default=[], help="validation argv array; an element equal to {repo} resolves to the current validation checkout, including the integration destination; embedded placeholders are unchanged")
-    begin.add_argument("--preflight-json", type=_json_list, required=True)
+    preflight_help = ("push preflight argv array; it must contain an element equal to {repo}, which resolves to the "
+                      "checkout being pushed; an element equal to {lifecycle_python} resolves to the interpreter "
+                      "running this lifecycle; embedded placeholders are unchanged")
+    begin.add_argument("--preflight-json", type=_json_list, required=True, help=preflight_help)
     checks_help = ('JSON array of {"app", "name"} GitHub check runs that must succeed on the exact accepted commit '
                    'before integration; omitted, the remote default branch .github/required-checks.json decides, '
                    'and an explicit array must include every check declared there')
@@ -42,7 +45,7 @@ def parser():
         adopt.add_argument('--' + name, required=True)
     adopt.add_argument('--parent'); adopt.add_argument('--dependency', action='append', default=[])
     adopt.add_argument('--validation-json', type=_json_list, required=True, help="validation argv array; an element equal to {repo} resolves to the current validation checkout, including the integration destination; embedded placeholders are unchanged")
-    adopt.add_argument('--preflight-json', type=_json_list, required=True)
+    adopt.add_argument('--preflight-json', type=_json_list, required=True, help=preflight_help)
     adopt.add_argument('--preserved-data-json', type=json.loads, help='explicit foreign retired payload boundaries with current payload/admin identities and evidence references')
     adopt.add_argument('--hold-reason'); adopt.add_argument('--next-action')
     adopt.add_argument('--required-checks-json', type=json.loads, help=checks_help)
@@ -55,7 +58,7 @@ def parser():
     update = commands.add_parser('update-preflight', help='replace one current task preflight by exact argv CAS')
     update.add_argument('--task', required=True)
     update.add_argument('--expected-preflight-json', type=_json_list, required=True)
-    update.add_argument('--preflight-json', type=_json_list, required=True)
+    update.add_argument('--preflight-json', type=_json_list, required=True, help=preflight_help)
     update.add_argument('--evidence', required=True)
     validation = commands.add_parser('update-validation',
         help='correct an unaccepted task validator by exact argv and HEAD CAS in its bound checkout; '
