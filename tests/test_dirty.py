@@ -629,19 +629,19 @@ finish(repo, task=os.environ['WORKSPACE_LIFECYCLE_TASK'], plan_path=str(plan),
         import workspace_lifecycle.service as service
         actual, validations = service._validate, {'count': 0}
 
-        def move_after_postvalidation(repo, argv):
+        def move_after_last_task_validation(repo, argv):
             outcome = actual(repo, argv)
             validations['count'] += 1
-            if validations['count'] == 2:
+            if validations['count'] == 1:
                 self._owner_commit('owner-d.txt', 'D\n')
             return outcome
 
-        with patch('workspace_lifecycle.service._validate', side_effect=move_after_postvalidation):
+        with patch('workspace_lifecycle.service._validate', side_effect=move_after_last_task_validation):
             with self.assertRaises(LifecycleError):
                 finish(self.topic, task=task, plan_path=str(revised), result_ref='issue/' + task,
                        revision_head=revised_head,
                        revision_evidence='issue review records the exact descendant head')
-        self.assertEqual(validations['count'], 2)
+        self.assertEqual(validations['count'], 1)
         with locked_state(self.topic) as (_, state):
             self.assertNotIn('acceptance', state['tasks'][task])
             self.assertEqual(state['intents'][task]['initial_head'], revised_head)
