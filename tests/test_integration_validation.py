@@ -115,6 +115,74 @@ class IntegrationValidationTest(unittest.TestCase):
         self.assertEqual((self.root / 'remote').read_text(), 'remote accepted\n')
         self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), merged)
 
+    def counted_finish(self, after=None):
+        runs = []
+        native = service._validate
+
+        def validate(repo, argv):
+            evidence = native(repo, argv)
+            runs.append(Path(repo))
+            if after:
+                after(Path(repo), runs)
+            return evidence
+
+        with patch.object(service, '_validate', side_effect=validate):
+            return self.finish(), runs
+
+    def test_unchanged_candidate_validates_once_in_each_checkout(self):
+        self.begin_candidate()
+        result, runs = self.counted_finish()
+        self.assertEqual(runs, [self.topic, self.root])
+        state = service.status(self.topic, 'candidate')
+        validation = state['acceptance']['validation']
+        self.assertEqual(validation['postcommit'], {'argv': validation['precommit']['argv'], 'reused': 'precommit'})
+        self.assertEqual(state['integrated']['validation']['reused'], 'merge')
+        self.assertEqual(state['integrated']['validation']['returncode'], 0)
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), result['integration']['commit'])
+
+    def test_advanced_base_validates_merged_content_once(self):
+        self.begin_candidate()
+        self.remote_commit()
+        _, runs = self.counted_finish()
+        self.assertEqual(runs, [self.topic, self.root])
+        self.assertEqual((self.root / 'remote').read_text(), 'remote accepted\n')
+
+    def test_finish_commit_revalidates_committed_candidate(self):
+        self.begin_candidate(dirty=True)
+        _, runs = self.counted_finish()
+        self.assertEqual(runs, [self.topic, self.topic, self.root])
+        validation = service.status(self.topic, 'candidate')['acceptance']['validation']
+        self.assertEqual(validation['postcommit']['returncode'], 0)
+
+    def test_validator_dirt_is_revalidated_and_refused_as_before(self):
+        self.begin_candidate()
+
+        runs = []
+
+        def generate(repo, runs_so_far):
+            runs[:] = runs_so_far
+            if repo == self.topic and len(runs) == 1:
+                (repo / 'generated.pyc').write_bytes(b'')
+
+        with self.assertRaisesRegex(LifecycleError, 'unresolved dirty'):
+            self.counted_finish(generate)
+        self.assertEqual(runs, [self.topic, self.topic])
+        self.assertNotIn('acceptance', service.status(self.topic, 'candidate'))
+
+    def test_remote_advance_after_merge_validation_revalidates_final_result(self):
+        self.begin_candidate()
+        raced = []
+
+        def advance(repo, runs):
+            if repo == self.root and not raced:
+                raced.append(self.remote_commit())
+
+        result, runs = self.counted_finish(advance)
+        merged = result['integration']['commit']
+        self.assertEqual(runs, [self.topic, self.root, self.root, self.root])
+        self.assertIn(raced[0], git(self.root, 'rev-list', '--parents', '-1', merged).split())
+        self.assertNotIn('reused', service.status(self.topic, 'candidate')['integrated']['validation'])
+
     def test_legacy_failed_fast_forward_resumes_original_source_plan_and_result(self):
         self.begin_candidate(dirty=True)
         plan = self.plan.read_bytes()
@@ -228,8 +296,8 @@ class IntegrationValidationTest(unittest.TestCase):
         self.assertEqual(observations[0], (self.parent_validation, remote, False))
         self.assertIn((self.validation, remote, True), observations)
         self.assertIn((self.parent_validation, remote, True), observations)
-        self.assertIn((self.validation, merged, True), observations)
-        self.assertIn((self.parent_validation, merged, True), observations)
+        self.assertNotIn(merged, [observed for _, observed, _ in observations])
+        self.assertEqual(service.status(self.parent, 'parent')['acceptance']['validation']['reused'], 'merge')
         self.assertEqual((self.root / 'candidate').read_text(), 'candidate accepted\n')
         self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/topic/parent'), merged)
         self.assertEqual(service.status(self.parent, 'parent')['acceptance']['commit'], merged)

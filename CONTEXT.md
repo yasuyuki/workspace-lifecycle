@@ -31,3 +31,13 @@ _Avoid_: install、固定した python
 **Install**:
 配置された lifecycle の一つの実体。呼び手が preflight の中にその実体の interpreter を書くことがある。その記述は呼び手が書いたコマンドの一部であり、task が別に持つ事実ではない。そう書いた task は、その install が退役する前に preflight replacement が要る。
 _Avoid_: running lifecycle、task
+
+### 検証
+
+**Validation input**:
+一回の validation が読みうるものの全体。task の validation argv、実行する checkout、その checkout の HEAD の内容と、index・未追跡・ignored・preserved data を含む作業中の内容である。tree が同じでも、checkout が違えば同じ validation input ではない。
+_Avoid_: tree hash、同じ commit
+
+**Reused validation**:
+同じ finish の中で、validation input が直前に成功した run と変わっていない段階が、その run を自分の証拠とすること。receipt は再利用元の段階を示し、新しい run とは書かない。別の finish、別の checkout、失敗した run からは再利用しない。
+_Avoid_: cache、省略された validation、検証済み tree

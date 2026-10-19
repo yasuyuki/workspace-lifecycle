@@ -234,7 +234,12 @@ Finish validates before and after the owned actions, commits only the planned
 source, runs the configured push preflight, and verifies the remote tip. It then
 follows the declared parent or remote-default integration edge using the normal
 Git `merge --no-ff --no-commit` contract, revalidates, pushes and records the
-result. A hold, dependency failure, changed accepted HEAD, dirty target, conflict,
+result. Within one finish, a stage whose checkout is clean and still holds the
+content its previous successful run validated reuses that run instead of
+validating again: after owned actions that changed nothing, and after the merge
+commit when no synchronization followed. Its receipt names the reused stage.
+Changed content, a new task commit, synchronization or validator output runs
+validation again. A hold, dependency failure, changed accepted HEAD, dirty target, conflict,
 or failed validation remains a refusal to resolve in the existing task. Retry the
 same plan after repairing the operation. If the ownership review or required
 cleanup changes, `--revise-plan-evidence` explicitly records that decision and
@@ -478,3 +483,8 @@ running lifecycle's interpreter. A task whose preflight names its own install
 by path needs one `update-preflight` to this form; later install changes need
 none. 0.8.0 also requires the checks a task adds to
 `.github/required-checks.json` on that task's own accepted commit.
+
+Version 0.8.1 validates once per unchanged checkout within one finish. A clean
+task checkout whose owned actions changed nothing reuses its first run, and the
+integration target reuses its merge validation unless synchronization followed.
+The receipt marks such a stage with `reused`.
