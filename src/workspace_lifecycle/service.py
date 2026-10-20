@@ -648,6 +648,14 @@ def _primary_workspace_data(repo: Path, task: dict, dirty: dict[str, str]) -> se
     return {name for name, kind in dirty.items() if kind == '!!' or baseline.get(name) == kind}
 
 
+def _refuse_pending_merge(state, branch):
+    # A pending merge may hold an unpushed commit that failed validation in
+    # this branch's checkout; nothing may accept, build on or push it.
+    for other, operation in state['intents'].items():
+        if operation.get('kind') == 'merge' and operation['target'] == branch:
+            raise LifecycleError('pending integration of ' + other + ' holds ' + branch)
+
+
 def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = 'workspace lifecycle completion', users_released: bool = False, revision_evidence: str | None = None, preservation_evidence: str | None = None, revision_head: str | None = None) -> dict:
     repo = Path(repo).resolve(); plan = _plan(Path(plan_path)); task_id = task
     reclaim_evidence = _durable_preservation_evidence(preservation_evidence)
@@ -669,6 +677,7 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
             _check_preserved_plan(task, plan)
             if task.get('hold'):
                 raise LifecycleError('task is held: ' + json.dumps(task['hold']))
+            _refuse_pending_merge(state, branch)
             _index_protection(repo)
             intent = state['intents'].get(task_id)
             if intent and intent.get('identity', identity) != identity:
@@ -1147,6 +1156,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                             or [{'app': c['app'], 'name': c['name']} for c in proof['checks']] != gated_checks):
                         raise LifecycleError('required check evidence does not match the exact accepted commit and remote')
                 if not intent:
+                    _refuse_pending_merge(state, target_branch)
                     holder = item.get('integration_synchronization', {})
                     pending = holder.get('synchronization')
                     if pending and pending.get('commit') == head(target_worktree):
@@ -1211,34 +1221,23 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                     if merge_head != source_commit:
                         raise LifecycleError('native merge identity differs from the requested source')
                     _index_protection(target_worktree)
-                # Both the child and its parent contract must hold for the new
-                # parent identity before it can progress to the next edge.
-                checked_head = head(target_worktree)
-                checked_tree = git(target_worktree, 'write-tree')
-                evidence = _validate(target_worktree, item['validation'])
-                parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
-                _check_preserved(target_worktree, parent or {})
-                if head(target_worktree) != checked_head or git(target_worktree, 'write-tree') != checked_tree:
-                    raise LifecycleError('integration HEAD or index changed during validation')
-                if git(target_worktree, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True) != merge_head:
-                    raise LifecycleError('integration merge state changed during validation')
-                dirty = _snapshot(target_worktree, excluded=_preserved_paths(parent or {}))
-                if any(code in ('??', '!!') or code[1] != ' ' for code in dirty.values()):
-                    raise LifecycleError('merge validation left unstaged or private data; resolve in this target')
-                if not intent.get('merged'):
+                    _check_preserved(target_worktree, parent or {})
+                    dirty = _snapshot(target_worktree, excluded=_preserved_paths(parent or {}))
+                    if any(code in ('??', '!!') or code[1] != ' ' for code in dirty.values()):
+                        raise LifecycleError('integration merge has unstaged or private data; resolve in this target')
+                    checked_head = head(target_worktree)
                     intent['merge_tree'] = git(target_worktree, 'write-tree'); save_state(directory, state)
                     git(target_worktree, 'commit', '-m', 'Merge workspace task ' + task_id)
                     committed = head(target_worktree)
                     parents = (git(target_worktree, 'rev-list', '--parents', '-1', committed) or '').split()[1:]
-                    if parents != [checked_head, source_commit] or git(target_worktree, 'rev-parse', 'HEAD^{tree}') != checked_tree:
-                        raise LifecycleError('integration commit changed from the validated merge')
+                    if parents != [checked_head, source_commit] or git(target_worktree, 'rev-parse', 'HEAD^{tree}') != intent['merge_tree']:
+                        raise LifecycleError('integration commit changed from the staged merge')
                     intent['merged'] = committed; save_state(directory, state)
                 if _snapshot(target_worktree, excluded=_preserved_paths(parent or {})):
                     raise LifecycleError('integration commit left dirty content')
                 merged = intent.get('synchronization', {}).get('commit') or intent['merged']
                 remote_head = _remote_tip(repo, item['remote'], target_branch)
                 pending_sync = intent.get('synchronization')
-                synchronized = False
                 if remote_head != merged or (pending_sync and not pending_sync.get('commit')):
                     git(repo, 'fetch', item['remote'], 'refs/heads/' + target_branch)
                     if git(repo, 'merge-base', '--is-ancestor', remote_head, merged, optional=True) is None or (pending_sync and not pending_sync.get('commit')):
@@ -1248,15 +1247,12 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                             evidence=result_ref, validation=[item['validation']] + ([parent['validation']] if parent else []),
                             holder=intent, persist=lambda: save_state(directory, state), workspace_record=parent)
                         merged = synced['commit']
-                        synchronized = True
-                # The clean target still holds the exact tree validated above in
-                # this checkout; only the merge commit was recorded since.
-                if not synchronized and git(target_worktree, 'rev-parse', merged + '^{tree}') == checked_tree:
-                    evidence = {**evidence, 'reused': 'merge'}
-                    parent_evidence = {**parent_evidence, 'reused': 'merge'} if parent else None
-                else:
-                    evidence = _validate(target_worktree, item['validation'])
-                    parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
+                # Validate the commit about to be pushed, not the merge state
+                # before it: a validator may read HEAD's metadata, not only its
+                # tree. Both the child and its parent contract must hold for the
+                # new parent identity before it can progress to the next edge.
+                evidence = _validate(target_worktree, item['validation'])
+                parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
                 _check_preserved(target_worktree, parent or {})
                 if head(target_worktree) != merged or _snapshot(target_worktree, excluded=_preserved_paths(parent or {})):
                     raise LifecycleError('integration changed during final validation')
