@@ -136,7 +136,7 @@ class IntegrationValidationTest(unittest.TestCase):
         state = service.status(self.topic, 'candidate')
         validation = state['acceptance']['validation']
         self.assertEqual(validation['postcommit'], {'argv': validation['precommit']['argv'], 'reused': 'precommit'})
-        self.assertEqual(state['integrated']['validation']['reused'], 'merge')
+        self.assertNotIn('reused', state['integrated']['validation'])
         self.assertEqual(state['integrated']['validation']['returncode'], 0)
         self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), result['integration']['commit'])
 
@@ -169,18 +169,62 @@ class IntegrationValidationTest(unittest.TestCase):
         self.assertEqual(runs, [self.topic, self.topic])
         self.assertNotIn('acceptance', service.status(self.topic, 'candidate'))
 
-    def test_remote_advance_after_merge_validation_revalidates_final_result(self):
+    def test_remote_advance_during_merge_validates_synchronized_result(self):
         self.begin_candidate()
         raced = []
+        native = service._index_protection
 
-        def advance(repo, runs):
-            if repo == self.root and not raced:
+        def advance(repo):
+            if Path(repo) == self.root and not raced:
                 raced.append(self.remote_commit())
+            return native(repo)
 
-        result, runs = self.counted_finish(advance)
+        with patch.object(service, '_index_protection', side_effect=advance):
+            result, runs = self.counted_finish()
         merged = result['integration']['commit']
-        self.assertEqual(runs, [self.topic, self.root, self.root, self.root])
+        self.assertEqual(runs, [self.topic, self.root, self.root])
         self.assertIn(raced[0], git(self.root, 'rev-list', '--parents', '-1', merged).split())
+        self.assertNotIn('reused', service.status(self.topic, 'candidate')['integrated']['validation'])
+
+    def test_validator_rejecting_the_merge_commit_blocks_push(self):
+        self.validation[:] = [sys.executable, '-c',
+                              "import subprocess, sys; subject = subprocess.check_output("
+                              "['git', 'log', '-1', '--format=%s'], text=True); "
+                              "sys.exit(subject.startswith('Merge workspace task'))"]
+        self.begin_candidate()
+        base = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        for _ in range(2):
+            with self.assertRaisesRegex(LifecycleError, 'configured validation failed'):
+                self.finish()
+            state = service.status(self.topic, 'candidate')
+            self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), base)
+            self.assertNotIn('integrated', state)
+            merged = state['intent']['merged']
+            self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), merged)
+            self.assertEqual(git(self.root, 'rev-list', '--parents', '-1', merged).split()[1:],
+                             [base, self.source])
+        second = self.base / 'second'
+        service.begin(self.root, task='second', request='issue/13', remote='origin',
+                      branch='topic/second', worktree=str(second),
+                      validation=[sys.executable, '-c', 'pass'], preflight=self.preflight)
+        self.configure(second)
+        self.commit(second, 'second', 'second\n')
+        with self.assertRaisesRegex(LifecycleError, 'pending integration'):
+            service.finish(second, task='second', plan_path=str(self.plan), result_ref='result/13')
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), base)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), merged)
+
+    def test_final_validation_observes_the_pushed_merge_commit(self):
+        observed = self.base / 'observed'
+        self.validation[:] = [sys.executable, '-c',
+                              "import subprocess, sys; open(sys.argv[1], 'a').write(subprocess.check_output("
+                              "['git', 'rev-list', '--parents', '-1', 'HEAD'], text=True))", str(observed)]
+        self.begin_candidate()
+        base = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        result = self.finish()
+        merged = result['integration']['commit']
+        self.assertEqual(observed.read_text().splitlines()[-1].split(), [merged, base, self.source])
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), merged)
         self.assertNotIn('reused', service.status(self.topic, 'candidate')['integrated']['validation'])
 
     def test_legacy_failed_fast_forward_resumes_original_source_plan_and_result(self):
@@ -294,10 +338,8 @@ class IntegrationValidationTest(unittest.TestCase):
             result = self.finish()
         merged = result['integration']['commit']
         self.assertEqual(observations[0], (self.parent_validation, remote, False))
-        self.assertIn((self.validation, remote, True), observations)
-        self.assertIn((self.parent_validation, remote, True), observations)
-        self.assertNotIn(merged, [observed for _, observed, _ in observations])
-        self.assertEqual(service.status(self.parent, 'parent')['acceptance']['validation']['reused'], 'merge')
+        self.assertEqual(observations[1:], [(self.validation, merged, True), (self.parent_validation, merged, True)])
+        self.assertNotIn('reused', service.status(self.parent, 'parent')['acceptance']['validation'])
         self.assertEqual((self.root / 'candidate').read_text(), 'candidate accepted\n')
         self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/topic/parent'), merged)
         self.assertEqual(service.status(self.parent, 'parent')['acceptance']['commit'], merged)

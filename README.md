@@ -233,11 +233,13 @@ branch to look for one.
 Finish validates before and after the owned actions, commits only the planned
 source, runs the configured push preflight, and verifies the remote tip. It then
 follows the declared parent or remote-default integration edge using the normal
-Git `merge --no-ff --no-commit` contract, revalidates, pushes and records the
-result. Within one finish, a stage whose checkout is clean and still holds the
-content its previous successful run validated reuses that run instead of
-validating again: after owned actions that changed nothing, and after the merge
-commit when no synchronization followed. Its receipt names the reused stage.
+Git `merge --no-ff --no-commit` contract, commits the merge, validates that
+exact commit, pushes and records the result. A failed validation leaves the
+unpushed merge commit and its pending intent in the target; finish of the same
+task resumes it, and no other task integrates into that target meanwhile.
+Within one finish, the task checkout reuses its first successful run after owned
+actions that changed nothing, so HEAD and content are unchanged. Its receipt
+names the reused stage.
 Changed content, a new task commit, synchronization or validator output runs
 validation again. A hold, dependency failure, changed accepted HEAD, dirty target, conflict,
 or failed validation remains a refusal to resolve in the existing task. Retry the
@@ -488,3 +490,8 @@ Version 0.8.1 validates once per unchanged checkout within one finish. A clean
 task checkout whose owned actions changed nothing reuses its first run, and the
 integration target reuses its merge validation unless synchronization followed.
 The receipt marks such a stage with `reused`.
+
+Version 0.8.2 validates the integration target once, on the merge commit it
+pushes. 0.8.1 validated the uncommitted merge and pushed the commit made from it
+unvalidated, so a validator reading HEAD's message or parents could pass a commit
+it rejects. A target holding another task's pending merge refuses new integration.

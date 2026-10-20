@@ -35,9 +35,9 @@ _Avoid_: running lifecycle、task
 ### 検証
 
 **Validation input**:
-一回の validation が読みうるものの全体。task の validation argv、実行する checkout、その checkout の HEAD の内容と、index・未追跡・ignored・preserved data を含む作業中の内容である。tree が同じでも、checkout が違えば同じ validation input ではない。
+一回の validation が読みうるものの全体。task の validation argv、実行する checkout、その checkout の HEAD commit（tree だけでなく message・parents などの metadata を含む）と、index・未追跡・ignored・preserved data を含む作業中の内容である。tree が同じでも、checkout が違えば、また merge 中の状態とその merge commit のように HEAD commit が違えば、同じ validation input ではない。
 _Avoid_: tree hash、同じ commit
 
 **Reused validation**:
-同じ finish の中で、validation input が直前に成功した run と変わっていない段階が、その run を自分の証拠とすること。receipt は再利用元の段階を示し、新しい run とは書かない。別の finish、別の checkout、失敗した run からは再利用しない。
+同じ finish の中で、validation input が直前に成功した run と変わっていない段階が、その run を自分の証拠とすること。receipt は再利用元の段階を示し、新しい run とは書かない。別の finish、別の checkout、別の HEAD commit、失敗した run からは再利用しない。
 _Avoid_: cache、省略された validation、検証済み tree
