@@ -236,7 +236,8 @@ follows the declared parent or remote-default integration edge using the normal
 Git `merge --no-ff --no-commit` contract, commits the merge, validates that
 exact commit, pushes and records the result. A failed validation leaves the
 unpushed merge commit and its pending intent in the target; finish of the same
-task resumes it, and no other task integrates into that target meanwhile.
+task resumes it. Meanwhile, no other task integrates into that target and the task
+owning a target branch cannot finish.
 Within one finish, the task checkout reuses its first successful run after owned
 actions that changed nothing, so HEAD and content are unchanged. Its receipt
 names the reused stage.
@@ -494,4 +495,5 @@ The receipt marks such a stage with `reused`.
 Version 0.8.2 validates the integration target once, on the merge commit it
 pushes. 0.8.1 validated the uncommitted merge and pushed the commit made from it
 unvalidated, so a validator reading HEAD's message or parents could pass a commit
-it rejects. A target holding another task's pending merge refuses new integration.
+it rejects. A target holding another task's pending merge refuses new integration
+and the finish of its own task.

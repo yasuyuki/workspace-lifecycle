@@ -648,6 +648,14 @@ def _primary_workspace_data(repo: Path, task: dict, dirty: dict[str, str]) -> se
     return {name for name, kind in dirty.items() if kind == '!!' or baseline.get(name) == kind}
 
 
+def _refuse_pending_merge(state, branch):
+    # A pending merge may hold an unpushed commit that failed validation in
+    # this branch's checkout; nothing may accept, build on or push it.
+    for other, operation in state['intents'].items():
+        if operation.get('kind') == 'merge' and operation['target'] == branch:
+            raise LifecycleError('pending integration of ' + other + ' holds ' + branch)
+
+
 def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = 'workspace lifecycle completion', users_released: bool = False, revision_evidence: str | None = None, preservation_evidence: str | None = None, revision_head: str | None = None) -> dict:
     repo = Path(repo).resolve(); plan = _plan(Path(plan_path)); task_id = task
     reclaim_evidence = _durable_preservation_evidence(preservation_evidence)
@@ -669,6 +677,7 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
             _check_preserved_plan(task, plan)
             if task.get('hold'):
                 raise LifecycleError('task is held: ' + json.dumps(task['hold']))
+            _refuse_pending_merge(state, branch)
             _index_protection(repo)
             intent = state['intents'].get(task_id)
             if intent and intent.get('identity', identity) != identity:
@@ -1147,11 +1156,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                             or [{'app': c['app'], 'name': c['name']} for c in proof['checks']] != gated_checks):
                         raise LifecycleError('required check evidence does not match the exact accepted commit and remote')
                 if not intent:
-                    # A pending merge may hold an unpushed commit that failed
-                    # validation; another edge must not build on it.
-                    for other, operation in state['intents'].items():
-                        if operation.get('kind') == 'merge' and operation['target'] == target_branch:
-                            raise LifecycleError('pending integration of ' + other + ' holds ' + target_branch)
+                    _refuse_pending_merge(state, target_branch)
                     holder = item.get('integration_synchronization', {})
                     pending = holder.get('synchronization')
                     if pending and pending.get('commit') == head(target_worktree):

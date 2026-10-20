@@ -214,6 +214,24 @@ class IntegrationValidationTest(unittest.TestCase):
         self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), base)
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), merged)
 
+    def test_parent_finish_refuses_a_rejected_child_merge_commit(self):
+        self.validation[:] = [sys.executable, '-c',
+                              "import subprocess, sys; subject = subprocess.check_output("
+                              "['git', 'log', '-1', '--format=%s'], text=True); "
+                              "sys.exit(subject.startswith('Merge workspace task'))"]
+        self.begin_parent()
+        accepted = git(self.remote, 'rev-parse', 'refs/heads/topic/parent')
+        trunk = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        with self.assertRaisesRegex(LifecycleError, 'configured validation failed'):
+            self.finish()
+        merged = service.status(self.topic, 'candidate')['intent']['merged']
+        self.assertEqual(git(self.parent, 'rev-parse', 'HEAD'), merged)
+        with self.assertRaisesRegex(LifecycleError, 'pending integration of candidate'):
+            service.finish(self.parent, task='parent', plan_path=str(self.plan), result_ref='result/parent2')
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/topic/parent'), accepted)
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), trunk)
+        self.assertEqual(service.status(self.parent, 'parent')['acceptance']['commit'], accepted)
+
     def test_final_validation_observes_the_pushed_merge_commit(self):
         observed = self.base / 'observed'
         self.validation[:] = [sys.executable, '-c',
