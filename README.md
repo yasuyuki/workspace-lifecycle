@@ -222,7 +222,12 @@ with several push URLs is refused.
 Queued, running, failed, cancelled, skipped, neutral, missing or unavailable
 results refuse integration, leave the acceptance in place and change no target.
 Retry the same finish after CI completes; a new HEAD needs its own successful
-checks. The interrupted merge keeps that proof and is refused if the remote's
+checks. That retry reuses the saved acceptance and neither validates nor pushes
+the task checkout again when the checkout is completely clean and its HEAD,
+plan, result reference, checkout identity, validation and preflight argv,
+remote fetch and push URLs and remote topic tip are those the acceptance
+recorded. Any difference, data waived at acceptance, or an acceptance saved by
+an earlier version validates and accepts again. The interrupted merge keeps that proof and is refused if the remote's
 repository changes. Tasks without required checks never query GitHub. Change an
 existing task's requirement with `update-required-checks`, which compares the
 exact current array and records durable evidence; it is refused while an
@@ -497,3 +502,8 @@ pushes. 0.8.1 validated the uncommitted merge and pushed the commit made from it
 unvalidated, so a validator reading HEAD's message or parents could pass a commit
 it rejects. A target holding another task's pending merge refuses new integration
 and the finish of its own task.
+
+Version 0.8.3 resumes integration from a saved acceptance. Repeating finish
+after required checks were missing or running no longer validates and pushes the
+unchanged task checkout again or replaces its acceptance. Acceptances saved by
+earlier versions lack the recorded finish inputs and are accepted once more.

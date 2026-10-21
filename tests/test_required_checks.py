@@ -8,10 +8,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from workspace_lifecycle import checks
+from workspace_lifecycle import checks, service
 from workspace_lifecycle.errors import LifecycleError
 from workspace_lifecycle.adoption import adopt_existing
-from workspace_lifecycle.service import begin, finish, status, update_required_checks
+from workspace_lifecycle.service import begin, finish, status, update_preflight, update_required_checks
 
 
 def run(cwd, *args):
@@ -193,6 +193,82 @@ class RequiredChecksTest(unittest.TestCase):
         self.plan.write_text("{}")
         self.refused("moved", "missing")
         self.assertNotEqual(self.accepted("moved"), first)
+
+    def counted(self, task):
+        log = Path(self.temp.name) / ("validations-" + task)
+        self.start(task, validation=[sys.executable, "-c",
+            "import os,sys; open(sys.argv[1], 'a').write(os.getcwd() + '\\n')", str(log)])
+        self.refused(task, "missing")
+        return lambda where: [Path(line).resolve() for line in log.read_text().splitlines()].count(Path(where).resolve())
+
+    def test_resume_after_checks_reuses_the_saved_acceptance(self):
+        validations = self.counted("resume")
+        accepted = status(self.topic, "resume")["acceptance"]
+        commit = accepted["commit"]
+        self.github.add("example/repo", commit, TEST, "queued", None)
+        self.refused("resume", '"state": "queued"')
+        self.github.add("example/repo", commit, TEST)
+        with patch("workspace_lifecycle.service._push", wraps=service._push) as pushes:
+            result = self.finish("resume")
+        self.assertEqual(validations(self.topic), 2, "no topic validation after acceptance")
+        self.assertEqual([Path(call.args[0]) for call in pushes.call_args_list], [self.root.resolve()])
+        self.assertEqual(status(self.topic, "resume")["acceptance"], accepted)
+        self.assertEqual(validations(self.root.resolve()), 1)
+        self.assertEqual(result["integration"]["commit"], self.trunk())
+        self.assertEqual(run(self.root, "rev-parse", "HEAD^2"), commit)
+
+    def accepts_again(self, task, change, refusal="missing"):
+        validations = self.counted(task)
+        accepted = status(self.topic, task)["acceptance"]
+        change()
+        self.refused(task, refusal)
+        self.assertGreater(validations(self.topic), 2, "the changed finish validated again")
+        return accepted
+
+    def test_resume_without_saved_finish_input_accepts_again(self):
+        def legacy():
+            from workspace_lifecycle.state import locked_state, save_state
+            with locked_state(self.topic) as (directory, state):
+                del state["tasks"]["legacy"]["acceptance"]["finish_input"]; save_state(directory, state)
+        accepted = self.accepts_again("legacy", legacy)
+        self.assertNotEqual(status(self.topic, "legacy")["acceptance"]["accepted_at"], accepted["accepted_at"])
+
+    def test_resume_with_another_result_or_plan_accepts_again(self):
+        def other_result():
+            self.finish = lambda name: finish(self.topic, task=name, plan_path=str(self.plan), result_ref="issue/other")
+        self.accepts_again("result", other_result)
+        self.assertEqual(status(self.topic, "result")["acceptance"]["result_ref"], "issue/other")
+        del self.finish
+        self.tearDown(); self.setUp()
+
+        def other_plan():
+            plan = json.loads(self.plan.read_text()); plan["commit"][0]["evidence"] = "reviewed again"
+            self.plan.write_text(json.dumps(plan))
+        self.accepts_again("plan", other_plan)
+
+    def test_resume_with_another_preflight_accepts_again(self):
+        changed = self.preflight + ["--user-intent", "push"]
+        self.accepts_again("preflight", lambda: update_preflight(
+            self.topic, task="preflight", expected_preflight=self.preflight, preflight=changed, evidence="issue/preflight"))
+
+    def test_resume_with_another_push_url_accepts_again(self):
+        mirror = Path(self.temp.name) / "mirror.git"
+        run(self.root, "clone", "-q", "--bare", str(self.remote), str(mirror))
+        self.accepts_again("push-url", lambda: run(self.topic, "remote", "set-url", "--push", "origin", str(mirror)),
+                           "PUSH_REPOSITORY_MISMATCH")
+
+    def test_resume_with_unowned_dirt_validates_and_refuses(self):
+        self.accepts_again("dirty", lambda: (self.topic / "stray.txt").write_text("unowned\n"), "unresolved dirty")
+
+    def test_resume_with_a_moved_topic_remote_does_not_reuse_acceptance(self):
+        validations = self.counted("moved-remote")
+        commit = self.accepted("moved-remote")
+        self.github.add("example/repo", commit, TEST)
+        foreign = run(self.root, "commit-tree", "-p", commit, "-m", "foreign", commit + "^{tree}")
+        run(self.root, "push", "-q", "origin", foreign + ":refs/heads/topic/moved-remote")
+        self.finish("moved-remote")
+        self.assertEqual(validations(self.topic), 3)
+        self.assertEqual(status(self.topic, "moved-remote")["acceptance"]["push"]["remote_observed"], foreign)
 
     def test_interrupted_merge_keeps_its_proof_and_rejects_a_changed_remote(self):
         marker = Path(self.temp.name) / "block-target-validation"

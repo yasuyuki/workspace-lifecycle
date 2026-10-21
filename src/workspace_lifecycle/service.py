@@ -648,6 +648,34 @@ def _primary_workspace_data(repo: Path, task: dict, dirty: dict[str, str]) -> se
     return {name for name, kind in dirty.items() if kind == '!!' or baseline.get(name) == kind}
 
 
+def _finish_input(repo, task, identity, plan_digest):
+    """Everything an acceptance was decided from, besides HEAD and the result."""
+    urls = [git(repo, 'remote', 'get-url', *flag, task['remote']) for flag in ((), ('--push',))]
+    return {'plan_digest': plan_digest, 'identity': identity, 'validation': task['validation'],
+            'preflight': task['preflight'], 'remote': task['remote'],
+            'remote_urls_sha256': hashlib.sha256('\0'.join(urls).encode()).hexdigest()}
+
+
+def _acceptance_holds(repo, task, branch, identity, plan_digest, result_ref):
+    """Whether a saved acceptance still is the outcome of this exact finish.
+
+    Waiting for remote checks ends the call that accepted. Repeating it with
+    unchanged inputs resumes integration; anything else accepts again. Only a
+    fully clean checkout qualifies: waived or producer-owned data may change
+    content under the same names.
+    """
+    accepted = task.get('acceptance')
+    if (not accepted or task.get('exception') or accepted.get('waived_workspace_data')
+            or accepted['commit'] != head(repo) or accepted['result_ref'] != result_ref
+            or accepted.get('finish_input') != _finish_input(repo, task, identity, plan_digest)):
+        return False
+    _operation_check(repo, 'finish')
+    if _snapshot(repo, excluded=_preserved_paths(task)):
+        return False
+    tip = git(repo, 'ls-remote', task['remote'], 'refs/heads/' + branch) or ''
+    return tip.split() == [accepted['commit'], 'refs/heads/' + branch]
+
+
 def _refuse_pending_merge(state, branch):
     # A pending merge may hold an unpushed commit that failed validation in
     # this branch's checkout; nothing may accept, build on or push it.
@@ -736,7 +764,9 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 if (intent['head_revision']['evidence'] != revision_evidence
                         or intent['plan_digest'] != plan_digest or intent['result_ref'] != result_ref):
                     raise LifecycleError('retry HEAD revision with the same head, evidence, plan and result')
-            if accepted_revision_retry or (intent and intent['kind'] != 'finish'):
+            accepted_resume = (not intent and revision_evidence is None
+                               and _acceptance_holds(repo, task, branch, identity, plan_digest, result_ref))
+            if accepted_revision_retry or accepted_resume or (intent and intent['kind'] != 'finish'):
                 # A preserved integration operation belongs to _integrate; do
                 # not replace it or recommit the accepted source on resume.
                 accepted = task.get('acceptance')
@@ -870,7 +900,8 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 task.pop('exception', None)
                 task['acceptance'] = {'commit': commit, 'result_ref': result_ref,
                                       'validation': {'precommit': precommit, 'postcommit': evidence},
-                                      'push': pushed, 'accepted_at': _now()}
+                                      'push': pushed, 'accepted_at': _now(),
+                                      'finish_input': _finish_input(repo, task, identity, plan_digest)}
                 if synchronized_head:
                     task.setdefault('finish_receipts', []).append(intent.copy())
                 if waived:
