@@ -186,6 +186,11 @@ removed. A remaining dirty tree can finish only through the strict exception
 record: all four alternatives (`commit`, `restore`, `archive`, and
 `owner-resolution`) must be reviewed with irreversible-harm evidence, a remaining
 owner and a next action.
+Without that record, dirt no plan entry covers, and dirt or a merge already in
+an untouched integration target, are refused before validation, commit or push,
+naming the first paths. Such a refusal of a finish with no pending intent records none, so
+a corrected plan needs no revision evidence. Dirt that validation creates is
+still refused afterwards.
 
 A repository that relies on remote CI declares the checks every task's
 integration needs in a tracked `.github/required-checks.json` on its remote

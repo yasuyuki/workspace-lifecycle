@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from workspace_lifecycle.errors import LifecycleError
 from workspace_lifecycle import leases
-from workspace_lifecycle.service import begin, finish, hold, reclaim, retire
+from workspace_lifecycle.service import begin, finish, hold, reclaim, retire, status
 from workspace_lifecycle.state import locked_state, save_state
 
 
@@ -379,17 +379,15 @@ finish(repo, task=os.environ['WORKSPACE_LIFECYCLE_TASK'], plan_path=str(plan),
         self.assertEqual(result, "begin-retry")
         self.assertEqual(git(self.topic, "branch", "--show-current"), "topic/begin-retry")
 
-    def test_unknown_dirty_can_be_resolved_by_explicit_reviewed_plan_revision(self):
+    def test_unknown_dirty_refusal_leaves_no_intent_so_a_reviewed_plan_needs_no_revision(self):
         task = self.start()
         (self.topic / 'owned.txt').write_text('owned\n')
         plan = self.plan("revision.json", {})
-        with self.assertRaises(LifecycleError):
+        with self.assertRaisesRegex(LifecycleError, 'completion exception: owned.txt;'):
             finish(self.topic, task=task, plan_path=str(plan), result_ref='issue/dirty')
+        self.assertNotIn('intent', status(self.topic, task))
         plan.write_text(json.dumps({'commit': [self.entry(task, 'owned.txt')]}))
-        with self.assertRaises(LifecycleError):
-            finish(self.topic, task=task, plan_path=str(plan), result_ref='issue/dirty')
-        result = finish(self.topic, task=task, plan_path=str(plan), result_ref='issue/dirty',
-                        revision_evidence='ownership investigation confirms task-authored source')
+        result = finish(self.topic, task=task, plan_path=str(plan), result_ref='issue/dirty')
         self.assertTrue(result['accepted'])
 
 

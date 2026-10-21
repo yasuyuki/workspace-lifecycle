@@ -169,6 +169,40 @@ class IntegrationValidationTest(unittest.TestCase):
         self.assertEqual(runs, [self.topic, self.topic])
         self.assertNotIn('acceptance', service.status(self.topic, 'candidate'))
 
+    def assert_refused_untouched(self, refusal):
+        head = git(self.topic, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(LifecycleError, refusal):
+            self.finish()
+        state = service.status(self.topic, 'candidate')
+        self.assertEqual(git(self.topic, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.remote, 'for-each-ref', 'refs/heads/topic/candidate'), '')
+        self.assertNotIn('acceptance', state)
+        self.assertNotIn('intent', state)
+
+    def test_preexisting_unowned_dirt_is_refused_before_validation(self):
+        self.begin_candidate(dirty=True)
+        (self.topic / '__pycache__').mkdir()
+        (self.topic / '__pycache__' / 'm.pyc').write_bytes(b'')
+        (self.topic / 'stray.txt').write_text('unowned\n')
+        git(self.topic, 'config', 'core.excludesFile', str(self.base / 'ignore'))
+        (self.base / 'ignore').write_text('__pycache__/\n')
+        with patch.object(service, '_validate', side_effect=AssertionError('validated')):
+            self.assert_refused_untouched(r'completion exception: __pycache__/m\.pyc, stray\.txt;')
+
+    def test_preexisting_target_dirt_is_refused_before_validation(self):
+        self.begin_candidate(dirty=True)
+        (self.root / 'stray.txt').write_text('unowned\n')
+        with patch.object(service, '_validate', side_effect=AssertionError('validated')):
+            self.assert_refused_untouched('integration target has unrelated dirty or merge state: stray.txt')
+        (self.root / 'stray.txt').unlink()
+        self.remote_commit('side', 'side\n', branch='side')
+        git(self.root, 'fetch', 'origin', 'side')
+        git(self.root, 'merge', '--no-ff', '--no-commit', 'FETCH_HEAD')
+        with patch.object(service, '_validate', side_effect=AssertionError('validated')):
+            self.assert_refused_untouched('merge state: MERGE_HEAD, side')
+        git(self.root, 'merge', '--abort')
+        self.assertTrue(self.finish()['accepted'])
+
     def test_remote_advance_during_merge_validates_synchronized_result(self):
         self.begin_candidate()
         raced = []

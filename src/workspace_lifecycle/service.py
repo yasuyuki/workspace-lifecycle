@@ -443,8 +443,56 @@ def _exception(plan, paths):
             or categories != {'commit', 'restore', 'archive', 'owner-resolution'}
             or not exception.get('remaining_owner') or not exception.get('next_action')
             or any(not x.get('irreversible_harm') or not x.get('evidence') for x in alternatives)):
-        raise LifecycleError('unresolved dirty is not a completion exception: review all applicable alternatives and preserve evidence/owner/next action')
+        raise LifecycleError('unresolved dirty is not a completion exception: ' + _preview(paths)
+                             + '; review all applicable alternatives and preserve evidence/owner/next action')
     return {**exception, 'paths': sorted(paths), 'at': _now()}
+
+
+def _preview(paths, limit=5):
+    names = sorted(paths)
+    return ', '.join(names[:limit]) + (f' (and {len(names) - limit} more)' if len(names) > limit else '')
+
+
+def _unexcused_dirty(repo, task, dirty):
+    """Dirt finish must refuse unless the plan declares a completion exception."""
+    if task.get('owner_receipts'):
+        from .producers import owned_dirty_paths
+        owned_outputs = owned_dirty_paths(repo, task)
+        dirty = {name: kind for name, kind in dirty.items() if name not in owned_outputs}
+    waived = _primary_workspace_data(repo, task, dirty)
+    return {name: kind for name, kind in dirty.items() if name not in waived}, waived
+
+
+def _initial_target_dirt(repo, state, item, source_head):
+    """Dirt or merge state _integrate would refuse in a target it has not touched yet.
+
+    A pending synchronization or a recorded integration of this same source
+    makes _integrate skip that check, and another task's pending merge is
+    refused by _integrate itself, so they are left to it. This is only a
+    snapshot taken without the target lease; _integrate checks again.
+    """
+    direction = item['integration']
+    parent = state['tasks'].get(direction['task']) if direction['kind'] == 'task' else None
+    try:
+        target_branch = (branch_for_task(repo, direction['task']) if direction['kind'] == 'task'
+                         else remote_default(repo, item['remote']))
+        target = task_worktree(repo, target_branch)
+    except LifecycleError:
+        return []
+    pending = item.get('integration_synchronization', {}).get('synchronization')
+    if ((source_head and (item.get('integrated') or {}).get('source') == source_head)
+            or (pending and (not pending.get('commit') or pending['commit'] == head(target)))
+            or any(operation.get('kind') == 'merge' and operation['target'] == target_branch
+                   for operation in state['intents'].values())):
+        return []
+    return _target_dirt(target, parent, optional_locks=False)
+
+
+def _target_dirt(target, parent, optional_locks=True):
+    dirt = sorted(_snapshot(target, optional_locks=optional_locks, excluded=_preserved_paths(parent or {})))
+    if git(target, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True):
+        dirt.insert(0, 'MERGE_HEAD')
+    return dirt
 
 
 def _index_paths(repo):
@@ -707,7 +755,7 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 raise LifecycleError('task is held: ' + json.dumps(task['hold']))
             _refuse_pending_merge(state, branch)
             _index_protection(repo)
-            intent = state['intents'].get(task_id)
+            intent = entry_intent = state['intents'].get(task_id)
             if intent and intent.get('identity', identity) != identity:
                 raise LifecycleError('finish intent task or worktree identity changed')
             accepted_revision_retry = False
@@ -837,7 +885,26 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 dirty = _snapshot(repo, excluded=_preserved_paths(task))
                 uncovered = set(dirty) - set(all_paths)
                 # Safe owned actions run first. Remaining dirt is never waived
-                # merely because it existed before this session.
+                # merely because it existed before this session. No plan action
+                # touches uncovered dirt, so refuse what the final check would
+                # refuse before validation, commit and push; the final check
+                # still catches dirt that validation creates.
+                leftover, _ = _unexcused_dirty(repo, task, {name: dirty[name] for name in uncovered})
+                early = None
+                if leftover:
+                    try:
+                        _exception(plan, leftover)
+                    except LifecycleError as exc:
+                        early = exc
+                else:
+                    source_head = None if commit_paths and not intent.get('committed') else head(repo)
+                    target_dirt = _initial_target_dirt(repo, state, task, source_head)
+                    if target_dirt:
+                        early = LifecycleError('integration target has unrelated dirty or merge state: ' + _preview(target_dirt))
+                if early:
+                    if entry_intent is None:
+                        state['intents'].pop(task_id); save_state(directory, state)
+                    raise early
                 validated_head = head(repo)
                 if validated_head not in {intent['initial_head'], intent.get('committed'), synchronized_head}:
                     raise LifecycleError('HEAD changed before finish validation')
@@ -881,13 +948,7 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 if _finish_identity(repo, task_id, branch) != identity or head(repo) != expected_finish_head:
                     raise LifecycleError('HEAD or identity changed during finish validation')
                 _operation_check(repo, 'finish validation')
-                final_dirty = _snapshot(repo, excluded=_preserved_paths(task))
-                if task.get('owner_receipts'):
-                    from .producers import owned_dirty_paths
-                    owned_outputs = owned_dirty_paths(repo, task)
-                    final_dirty = {name: kind for name, kind in final_dirty.items() if name not in owned_outputs}
-                waived = _primary_workspace_data(repo, task, final_dirty)
-                final_dirty = {name: kind for name, kind in final_dirty.items() if name not in waived}
+                final_dirty, waived = _unexcused_dirty(repo, task, _snapshot(repo, excluded=_preserved_paths(task)))
                 if final_dirty:
                     exception = _exception(plan, final_dirty)
                     task['exception'] = exception
@@ -1196,8 +1257,9 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                     elif pending and not pending.get('commit'):
                         target_head = pending['local']
                     else:
-                        if _snapshot(target_worktree, excluded=_preserved_paths(parent or {})) or git(target_worktree, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True):
-                            raise LifecycleError('integration target has unrelated dirty or merge state')
+                        dirt = _target_dirt(target_worktree, parent)
+                        if dirt:
+                            raise LifecycleError('integration target has unrelated dirty or merge state: ' + _preview(dirt))
                         target_head = head(target_worktree)
                         if parent and target_head != parent['acceptance']['commit']:
                             raise LifecycleError('parent HEAD differs from its accepted identity')
