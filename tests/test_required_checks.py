@@ -327,6 +327,44 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertEqual(result["integration"]["parent"]["destination"], "trunk")
         self.assertEqual((self.root / "child.txt").read_text(), "child\n")
 
+    def test_parent_resumes_from_the_acceptance_its_child_integration_saved(self):
+        import hashlib
+        parent = Path(self.temp.name) / "parent"; log = Path(self.temp.name) / "validations-parent"
+        begin(self.root, task="parent", request="issue/parent", remote="origin", branch="topic/parent",
+              worktree=str(parent), preflight=self.preflight, required_checks=[TEST],
+              validation=[sys.executable, "-c", "import os,sys; open(sys.argv[1], 'a').write(os.getcwd() + '\\n')", str(log)])
+        (parent / "parent.txt").write_bytes(b"parent\n")
+        parent_plan = Path(self.temp.name) / "plan-parent.json"
+        parent_plan.write_text(json.dumps({"commit": [{
+            "path": "parent.txt", "classification": "source", "owner": "parent",
+            "evidence": "created by this disposable task", "safe_to_commit": True,
+            "sha256": hashlib.sha256(b"parent\n").hexdigest()}]}))
+        finish_parent = lambda: finish(parent, task="parent", plan_path=str(parent_plan), result_ref="issue/parent")
+        with self.assertRaisesRegex(LifecycleError, "missing"):
+            finish_parent()
+        begin(self.root, task="child", request="issue/child", remote="origin", branch="topic/child",
+              worktree=str(self.topic), parent="parent", validation=["git", "diff", "--check"],
+              preflight=self.preflight, required_checks=[])
+        (self.topic / "feature.txt").write_bytes(b"child\n")
+        self.plan = Path(self.temp.name) / "plan-child.json"
+        self.plan.write_text(json.dumps({"commit": [{
+            "path": "feature.txt", "classification": "source", "owner": "child",
+            "evidence": "created by this disposable task", "safe_to_commit": True,
+            "sha256": hashlib.sha256(b"child\n").hexdigest()}]}))
+        with self.assertRaisesRegex(LifecycleError, "missing"):
+            self.finish("child")
+        merged = status(parent, "parent")["acceptance"]
+        self.assertEqual(merged["child_integration"]["task"], "child")
+        self.assertEqual(merged["commit"], run(parent, "rev-parse", "HEAD"))
+        validations = lambda: [Path(line).resolve() for line in log.read_text().splitlines()].count(parent.resolve())
+        before = validations()
+        self.github.add("example/repo", merged["commit"], TEST)
+        result = finish_parent()
+        self.assertEqual(validations(), before, "the merged parent acceptance is reused")
+        self.assertEqual(status(parent, "parent")["acceptance"], merged)
+        self.assertEqual(result["integration"]["destination"], "trunk")
+        self.assertEqual((self.root / "feature.txt").read_text(), "child\n")
+
     def test_update_requires_exact_previous_checks_and_no_pending_operation(self):
         self.start("update", required=())
         with self.assertRaisesRegex(LifecycleError, "CAS mismatch"):
