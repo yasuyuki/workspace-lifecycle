@@ -199,7 +199,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.start(task, validation=[sys.executable, "-c",
             "import os,sys; open(sys.argv[1], 'a').write(os.getcwd() + '\\n')", str(log)])
         self.refused(task, "missing")
-        return lambda where: log.read_text().splitlines().count(str(where))
+        return lambda where: [Path(line).resolve() for line in log.read_text().splitlines()].count(Path(where).resolve())
 
     def test_resume_after_checks_reuses_the_saved_acceptance(self):
         validations = self.counted("resume")
