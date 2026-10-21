@@ -257,8 +257,13 @@ class RequiredChecksTest(unittest.TestCase):
         self.accepts_again("push-url", lambda: run(self.topic, "remote", "set-url", "--push", "origin", str(mirror)),
                            "PUSH_REPOSITORY_MISMATCH")
 
-    def test_resume_with_unowned_dirt_validates_and_refuses(self):
-        self.accepts_again("dirty", lambda: (self.topic / "stray.txt").write_text("unowned\n"), "unresolved dirty")
+    def test_resume_with_unowned_dirt_refuses_before_validation(self):
+        validations = self.counted("dirty")
+        accepted = status(self.topic, "dirty")["acceptance"]
+        (self.topic / "stray.txt").write_text("unowned\n")
+        self.refused("dirty", "unresolved dirty is not a completion exception: stray.txt")
+        self.assertEqual(validations(self.topic), 2)
+        self.assertEqual(status(self.topic, "dirty")["acceptance"], accepted)
 
     def test_resume_with_a_moved_topic_remote_does_not_reuse_acceptance(self):
         validations = self.counted("moved-remote")
