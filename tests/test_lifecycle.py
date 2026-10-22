@@ -906,6 +906,47 @@ class FinishRetireReclaimTests(unittest.TestCase):
         self.assertEqual(receipt['result_ref'], 'issue/1')
         self.assertEqual(receipt['reclaim_phase'], 'reclaimed')
 
+    def _cli_finish(self, cwd):
+        begin(self.root, task='one', request='issue/1', remote='origin', branch='topic/one',
+              worktree=str(self.topic), validation=['git', 'diff', '--check'], preflight=self.preflight)
+        (self.topic / 'feature.txt').write_text('done\n')
+        plan = Path(self.temp.name) / 'plan-one.json'
+        self.host.task = 'one'
+        plan.write_text(json.dumps(self.host.source_plan(self.topic, 'feature.txt')))
+        return subprocess.run([sys.executable, '-m', 'workspace_lifecycle', '--repo', str(self.topic),
+                               'finish', '--task', 'one', '--plan', str(plan), '--result-ref', 'issue/1',
+                               '--users-released', '--reclaim-preservation-evidence', self.evidence],
+                              cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def _assert_reclaimed(self, retirement):
+        self.assertTrue(retirement['retired'])
+        self.assertTrue(retirement['reclaim']['reclaimed'])
+        self.assertFalse(self.topic.exists())
+        self.assertFalse(Path(retirement['receipt']['recovery_path']).exists())
+        self.assertFalse(Path(retirement['receipt']['admin_archive_path']).exists())
+        self.assertEqual(run(self.root, 'rev-parse', 'refs/heads/topic/one'), retirement['receipt']['commit'])
+
+    def test_finish_outside_its_worktree_retires_and_reclaims_in_one_command(self):
+        done = self._cli_finish(self.temp.name)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self._assert_reclaimed(json.loads(done.stdout)['retirement'])
+
+    def test_finish_inside_its_worktree_returns_the_command_that_retires_it(self):
+        done = self._cli_finish(self.topic)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        retirement = json.loads(done.stdout)['retirement']
+        self.assertTrue(retirement['pending'])
+        self.assertFalse(retirement['retired'])
+        self.assertTrue((self.topic / 'feature.txt').exists())
+        self.assertEqual(self._state()['tasks']['one']['retire']['preservation_evidence'], self.evidence)
+        follow = retirement['next']
+        self.assertNotEqual(Path(follow['cwd']).resolve(), self.topic.resolve())
+        self.assertNotIn(self.topic.resolve(), Path(follow['cwd']).resolve().parents)
+        resumed = subprocess.run(follow['argv'], cwd=follow['cwd'], text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self._assert_reclaimed(json.loads(resumed.stdout))
+
     def test_finish_evidence_without_release_defers_delete(self):
         result = self._accept(users_released=False, preservation_evidence=self.evidence)
         self.assertNotIn('retirement', result)

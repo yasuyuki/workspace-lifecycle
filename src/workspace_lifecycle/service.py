@@ -549,7 +549,7 @@ def _finish_identity(repo, task_id, branch):
     toplevel, admin = git(repo, 'rev-parse', '--show-toplevel', '--absolute-git-dir').splitlines()
     if (branch_for_task(repo, task_id) != branch or Path(toplevel).resolve() != task_worktree(repo, branch)
             or current_branch(repo) != branch or bound_task(repo, branch) != task_id):
-        raise LifecycleError('finish must run in the bound task worktree')
+        raise LifecycleError('finish --repo must name the bound task worktree')
     admin = Path(admin).resolve()
     return {'task': task_id, 'branch': branch, 'worktree': str(repo), 'git_dir': str(admin),
             'worktree_id': [repo.stat().st_dev, repo.stat().st_ino],
@@ -1006,10 +1006,24 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
             remote = _task(state, task_id)['remote']
         control = task_worktree(repo, remote_default(repo, remote))
         retire(control, task=task_id, result_ref=result_ref, users_released=True, request_only=True)
+        # The recorded request carries the release and preservation evidence, so
+        # this one command resumes retirement and reclaim from outside the task.
+        resume = {'cwd': str(control), 'argv': [os.sys.executable, '-m', 'workspace_lifecycle', '--repo', str(control),
+                                                'retire', '--task', task_id, '--result-ref', result_ref]}
+        cwd = Path.cwd().resolve()
+        if cwd == repo or repo in cwd.parents:
+            # On Windows the shell that started finish keeps this directory open
+            # until finish exits, so the worktree cannot move during this call.
+            result['retirement'] = {'pending': True, 'retired': False, 'next': resume,
+                                    'reason': 'finish ran inside its task worktree; run next from outside it'}
+            return result
         try:
             result['retirement'] = retire(control, task=task_id, result_ref=result_ref)
         except (LifecycleError, ValueError, OSError) as exc:
-            result['retirement'] = {'pending': True, 'reason': str(exc)}
+            result['retirement'] = {'pending': True, 'retired': False, 'reason': str(exc), 'next': resume}
+        else:
+            if result['retirement'].get('reclaim', {}).get('error'):
+                result['retirement']['next'] = resume
     return result
 
 
@@ -1555,7 +1569,8 @@ def retire(repo, *, task: str, result_ref: str, users_released: bool = False, re
                 workspace = Path(request['path']) if request else task_worktree(repo, branch)
                 if workspace == Path(worktree_records(repo)[0]['worktree']).resolve():
                     raise LifecycleError('primary checkout cannot retire')
-                if not request_only and (repo == workspace or workspace in repo.parents or Path.cwd() == workspace or workspace in Path.cwd().parents):
+                cwd = Path.cwd().resolve()
+                if not request_only and (repo == workspace or workspace in repo.parents or cwd == workspace or workspace in cwd.parents):
                     raise LifecycleError('retire must run outside its target worktree')
                 for dependency in (Path(__file__).resolve(), Path(os.sys.executable).resolve()):
                     if workspace == dependency or workspace in dependency.parents:
