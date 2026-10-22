@@ -39,6 +39,24 @@ python -m pip install .
 workspace-lifecycle --help
 ```
 
+To test the source of a checkout, run `python -B tests/run.py` from it with
+Python 3.12+ and Git on `PATH`; it needs no other package. It copies the
+checkout's tracked and untracked, non-ignored files to a temporary directory, so
+uncommitted changes are tested and no bytecode or build output is left behind.
+A disposable virtual environment imports that copy, never an installed
+`workspace-lifecycle`, and each test runs in its own process. Inherited
+`WORKSPACE_LIFECYCLE_*` bindings, `PYTHONPATH`, `PYTHONHOME` and `VIRTUAL_ENV`
+are removed from the tests' environment. Name unittest modules or tests to run a
+subset; `-j` sets the number of concurrent tests, by default 8 or the processor
+count if lower. Failed tests are printed with their output and the exit code is
+1; a test that fails to import or an empty selection also fails. CI runs the
+same entry with `--wheel` on the built wheel. To validate a lifecycle task of
+this repository with it, register for example:
+
+```console
+--validation-json '["C:/path/to/python.exe", "-B", "tests/run.py"]'
+```
+
 ## Lifecycle
 
 Begin a task with an explicit request, remote, branch, absolute worktree,
