@@ -195,8 +195,13 @@ without continuing work does not belong in this API. After adoption, use the
 ordinary `status`, `run`, reviewed `finish`, integration and retirement contract;
 unmet acceptance or holds remain unmet, including for already-pushed branches.
 
-Finish from the bound task worktree with a durable result reference and a JSON
-plan. The plan may contain `commit`, `restore`, `archive`, and `exception`
+Finish names the bound task worktree with `--repo` and takes a durable result
+reference and a JSON plan. Run it from a directory outside that worktree when it
+should also retire it: a checkout cannot move while a shell's current directory
+is inside it on Windows, so `finish --users-released` started inside the
+worktree records the retirement request and returns `retirement.next`, the
+`cwd` and `argv` of the one `retire` command that completes retirement and its
+reclaim from outside. The plan may contain `commit`, `restore`, `archive`, and `exception`
 only. Each file entry names an exact relative path, classification, task owner,
 ownership evidence and SHA-256. `commit` entries additionally require
 `safe_to_commit: true`; ignored, unknown, secret, user-owned and other data are
@@ -532,3 +537,9 @@ Version 0.8.3 resumes integration from a saved acceptance. Repeating finish
 after required checks were missing or running no longer validates and pushes the
 unchanged task checkout again or replaces its acceptance. Acceptances saved by
 earlier versions lack the recorded finish inputs and are accepted once more.
+
+Version 0.8.4 makes `finish --users-released` started inside its task worktree
+return the retirement request with `retirement.next`, the exact `retire`
+command and directory that complete retirement and reclaim, instead of failing
+its own retirement on the current directory. Started outside the worktree with
+`--repo`, the same finish retires and reclaims in one command.
