@@ -296,6 +296,17 @@ class LeaseTests(unittest.TestCase):
         child.communicate(timeout=15)
         self.assertEqual(child.returncode, 0)
 
+    @unittest.skipUnless(Path('/proc').is_dir(), 'Linux /proc process inspection')
+    def test_process_exiting_while_its_stat_is_read_is_gone(self):
+        original = Path.read_text
+        def exited(path, *args, **kwargs):
+            if path.name == 'stat' and path.parent.name.isdecimal():
+                raise ProcessLookupError(3, 'No such process', str(path))
+            return original(path, *args, **kwargs)
+        with patch.object(Path, 'read_text', exited):
+            self.assertIsNone(leases._identity(os.getpid()))
+            self.assertFalse(leases._group_active(os.getpgrp()))
+
 
 if __name__ == '__main__':
     unittest.main()
