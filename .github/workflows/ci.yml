@@ -22,17 +22,6 @@ jobs:
       - run: python -m build
       - shell: bash
         run: python -m twine check --strict dist/*
-      - name: Install and test outside checkout
+      - name: Test the wheel outside checkout
         shell: bash
-        run: |
-          python -m venv "$RUNNER_TEMP/lifecycle-runtime"
-          if [ "$RUNNER_OS" = Windows ]; then
-            runtime="$RUNNER_TEMP/lifecycle-runtime/Scripts"
-          else
-            runtime="$RUNNER_TEMP/lifecycle-runtime/bin"
-          fi
-          "$runtime/python" -m pip install --no-index dist/*.whl
-          "$runtime/python" -m pip install pytest==9.1.1 pytest-xdist==3.8.0
-          cd "$RUNNER_TEMP"
-          "$runtime/workspace-lifecycle" --version
-          "$runtime/python" -m pytest -n auto -p no:cacheprovider -v "$GITHUB_WORKSPACE/tests"
+        run: python -B tests/run.py --wheel dist/*.whl
