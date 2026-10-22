@@ -226,7 +226,8 @@ def _identity(pid):
         if fields[0] == 'Z':
             return None
         return Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':' + fields[19]
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # A process that exits between opening and reading its stat raises ESRCH.
         if Path('/proc').is_dir():
             return None
         raise ValueError('process creation identity is unavailable on this OS')
@@ -240,7 +241,7 @@ def _group_active(pgid):
             continue
         try:
             fields = (directory / 'stat').read_text().rsplit(')', 1)[1].split()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
         if int(fields[2]) == pgid and fields[0] != 'Z':
             return True
@@ -264,7 +265,7 @@ def _linux_descendants():
             continue
         try:
             fields = (directory / 'stat').read_text().rsplit(')', 1)[1].split()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
         pid = int(directory.name)
         parents[pid] = int(fields[1])
