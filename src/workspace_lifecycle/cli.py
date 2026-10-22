@@ -62,7 +62,8 @@ def parser():
     update.add_argument('--evidence', required=True)
     validation = commands.add_parser('update-validation',
         help='correct an unaccepted task validator by exact argv and HEAD CAS in its bound checkout; '
-        'releases a pending finish that recorded no effect')
+        'releases a pending finish that recorded no effect and keeps one whose '
+        'recorded commit and actions completed')
     validation.add_argument('--task', required=True)
     validation.add_argument('--expected-head', required=True, help='exact full current commit OID')
     validation.add_argument('--expected-validation-json', type=_json_list, required=True)

@@ -135,7 +135,8 @@ class IntegrationValidationTest(unittest.TestCase):
         self.assertEqual(runs, [self.topic, self.root])
         state = service.status(self.topic, 'candidate')
         validation = state['acceptance']['validation']
-        self.assertEqual(validation['postcommit'], {'argv': validation['precommit']['argv'], 'reused': 'precommit'})
+        self.assertEqual(list(validation), ['postcommit'])
+        self.assertEqual(validation['postcommit']['returncode'], 0)
         self.assertNotIn('reused', state['integrated']['validation'])
         self.assertEqual(state['integrated']['validation']['returncode'], 0)
         self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), result['integration']['commit'])
@@ -147,14 +148,66 @@ class IntegrationValidationTest(unittest.TestCase):
         self.assertEqual(runs, [self.topic, self.root])
         self.assertEqual((self.root / 'remote').read_text(), 'remote accepted\n')
 
-    def test_finish_commit_revalidates_committed_candidate(self):
-        self.begin_candidate(dirty=True)
-        _, runs = self.counted_finish()
-        self.assertEqual(runs, [self.topic, self.topic, self.root])
-        validation = service.status(self.topic, 'candidate')['acceptance']['validation']
-        self.assertEqual(validation['postcommit']['returncode'], 0)
+    def source_plan(self, name):
+        return {'commit': [{
+            'path': name, 'classification': 'source', 'owner': 'candidate',
+            'evidence': 'review/candidate-source', 'safe_to_commit': True,
+            'sha256': hashlib.sha256((self.topic / name).read_bytes()).hexdigest()}]}
 
-    def test_validator_dirt_is_revalidated_and_refused_as_before(self):
+    def test_finish_commit_validates_the_final_topic_head_once(self):
+        observed = self.base / 'observed'
+        self.validation[-1] += ("; import subprocess, sys; open(sys.argv[1], 'a').write("
+                                "subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True))")
+        self.validation.append(str(observed))
+        self.begin_candidate(dirty=True)
+        initial = git(self.topic, 'rev-parse', 'HEAD')
+        result, runs = self.counted_finish()
+        self.assertEqual(runs, [self.topic, self.root])
+        state = service.status(self.topic, 'candidate')
+        accepted = state['acceptance']['commit']
+        self.assertEqual(git(self.topic, 'rev-list', '--parents', '-1', accepted).split()[1:], [initial])
+        self.assertEqual(observed.read_text().split(), [accepted, result['integration']['commit']])
+        self.assertEqual(list(state['acceptance']['validation']), ['postcommit'])
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/topic/candidate'), accepted)
+
+    def test_restore_and_commit_validate_the_topic_once(self):
+        self.begin_candidate(dirty=True)
+        (self.topic / 'base').write_text('regenerated\n')
+        plan = json.loads(self.plan.read_text())
+        plan['restore'] = [{'path': 'base', 'classification': 'reproducible', 'owner': 'candidate',
+                            'evidence': 'review/regenerated', 'regeneration': {'evidence': 'rebuild verified'},
+                            'sha256': hashlib.sha256((self.topic / 'base').read_bytes()).hexdigest()}]
+        self.plan.write_text(json.dumps(plan))
+        _, runs = self.counted_finish()
+        self.assertEqual(runs, [self.topic, self.root])
+        self.assertEqual((self.topic / 'base').read_text(), 'base\n')
+
+    def test_rejected_restore_only_finish_is_corrected_and_resumed(self):
+        rejecting = [sys.executable, '-c', 'raise SystemExit(1)']
+        self.validation[:] = rejecting
+        self.begin_candidate()
+        (self.topic / 'base').write_text('regenerated\n')
+        self.plan.write_text(json.dumps({'restore': [{
+            'path': 'base', 'classification': 'reproducible', 'owner': 'candidate',
+            'evidence': 'review/regenerated', 'regeneration': {'evidence': 'rebuild verified'},
+            'sha256': hashlib.sha256((self.topic / 'base').read_bytes()).hexdigest()}]}))
+        with self.assertRaisesRegex(LifecycleError, 'configured validation failed'):
+            self.finish()
+        intent = service.status(self.topic, 'candidate')['intent']
+        self.assertEqual([a['phase'] for a in intent['actions'].values()], ['resolved'])
+        self.assertNotIn('committed', intent)
+        self.assertEqual((self.topic / 'base').read_text(), 'base\n')
+        self.assertEqual(git(self.remote, 'for-each-ref', 'refs/heads/topic/candidate'), '')
+        service.update_validation(self.topic, task='candidate', expected_head=self.source,
+                                  expected_validation=rejecting, validation=[sys.executable, '-c', 'pass'],
+                                  evidence='issue/39 correction')
+        self.assertEqual(service.status(self.topic, 'candidate')['intent'], intent)
+        result, runs = self.counted_finish()
+        self.assertEqual(runs, [self.topic, self.root])
+        self.assertEqual(result['commit'], self.source)
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/topic/candidate'), self.source)
+
+    def test_validator_dirt_is_refused_after_one_run(self):
         self.begin_candidate()
 
         runs = []
@@ -166,8 +219,96 @@ class IntegrationValidationTest(unittest.TestCase):
 
         with self.assertRaisesRegex(LifecycleError, 'unresolved dirty'):
             self.counted_finish(generate)
-        self.assertEqual(runs, [self.topic, self.topic])
+        self.assertEqual(runs, [self.topic])
         self.assertNotIn('acceptance', service.status(self.topic, 'candidate'))
+        self.assertEqual(git(self.remote, 'for-each-ref', 'refs/heads/topic/candidate'), '')
+
+    def test_rejected_finish_commit_pushes_nothing_until_corrected(self):
+        self.validation[:] = [sys.executable, '-c',
+                              "import subprocess, sys; subject = subprocess.check_output("
+                              "['git', 'log', '-1', '--format=%s'], text=True); "
+                              "sys.exit(subject.strip() == 'workspace lifecycle completion')"]
+        rejecting = list(self.validation)
+        self.begin_candidate(dirty=True)
+        initial = git(self.topic, 'rev-parse', 'HEAD')
+        trunk = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        for _ in range(2):
+            with self.assertRaisesRegex(LifecycleError, 'configured validation failed'):
+                self.finish()
+            state = service.status(self.topic, 'candidate')
+            rejected = state['intent']['committed']
+            self.assertEqual(git(self.topic, 'rev-parse', 'HEAD'), rejected)
+            self.assertEqual(git(self.topic, 'rev-list', '--parents', '-1', rejected).split()[1:], [initial])
+            self.assertNotIn('acceptance', state)
+            self.assertEqual(git(self.remote, 'for-each-ref', 'refs/heads/topic/candidate'), '')
+            self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), trunk)
+        second = self.base / 'second'
+        empty = self.base / 'empty.json'
+        empty.write_text('{}')
+        service.begin(self.root, task='second', request='issue/13', remote='origin',
+                      branch='topic/second', worktree=str(second),
+                      validation=[sys.executable, '-c', 'pass'], preflight=self.preflight)
+        self.configure(second)
+        self.commit(second, 'second', 'second\n')
+        self.assertTrue(service.finish(second, task='second', plan_path=str(empty), result_ref='result/13')['accepted'])
+        trunk = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        self.assertNotEqual(subprocess.run(['git', '-C', str(self.remote), 'merge-base', '--is-ancestor',
+                                            rejected, trunk]).returncode, 0)
+        service.update_validation(self.topic, task='candidate', expected_head=rejected,
+                                  expected_validation=rejecting, validation=[sys.executable, '-c', 'pass'],
+                                  evidence='issue/39 correction')
+        result, runs = self.counted_finish()
+        self.assertEqual(runs, [self.topic, self.root])
+        self.assertEqual(result['commit'], rejected)
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/topic/candidate'), rejected)
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), result['integration']['commit'])
+
+    def test_rejected_finish_commit_is_fixed_by_a_revised_plan(self):
+        self.begin_candidate(dirty=True)
+        (self.topic / 'candidate').write_text('candidate broken\n')
+        self.plan.write_text(json.dumps(self.source_plan('candidate')))
+        with self.assertRaisesRegex(LifecycleError, 'configured validation failed'):
+            self.finish()
+        rejected = git(self.topic, 'rev-parse', 'HEAD')
+        self.assertEqual(service.status(self.topic, 'candidate')['intent']['committed'], rejected)
+        self.assertEqual(git(self.remote, 'for-each-ref', 'refs/heads/topic/candidate'), '')
+        (self.topic / 'candidate').write_text('candidate accepted\n')
+        self.plan.write_text(json.dumps(self.source_plan('candidate')))
+        runs = []
+        native = service._validate
+
+        def validate(repo, argv):
+            runs.append(Path(repo))
+            return native(repo, argv)
+
+        with patch.object(service, '_validate', side_effect=validate):
+            result = service.finish(self.topic, task='candidate', plan_path=str(self.plan),
+                                    result_ref='result/12', revision_evidence='review/candidate-fix')
+        self.assertEqual(runs, [self.topic, self.root])
+        self.assertEqual(git(self.topic, 'rev-list', '--parents', '-1', result['commit']).split()[1:], [rejected])
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/topic/candidate'), result['commit'])
+        self.assertEqual((self.root / 'candidate').read_text(), 'candidate accepted\n')
+
+    def test_rejected_parent_commit_blocks_child_integration(self):
+        self.begin_parent()
+        accepted = git(self.remote, 'rev-parse', 'refs/heads/topic/parent')
+        trunk = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        (self.parent / 'parent-deny').write_text('rejected parent change\n')
+        plan = self.base / 'parent-plan.json'
+        plan.write_text(json.dumps({'commit': [{
+            'path': 'parent-deny', 'classification': 'source', 'owner': 'parent',
+            'evidence': 'review/parent-source', 'safe_to_commit': True,
+            'sha256': hashlib.sha256((self.parent / 'parent-deny').read_bytes()).hexdigest()}]}))
+        with self.assertRaisesRegex(LifecycleError, 'configured validation failed'):
+            service.finish(self.parent, task='parent', plan_path=str(plan), result_ref='result/parent2')
+        rejected = git(self.parent, 'rev-parse', 'HEAD')
+        self.assertNotEqual(rejected, accepted)
+        with self.assertRaises(LifecycleError):
+            self.finish()
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/topic/parent'), accepted)
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), trunk)
+        self.assertEqual(service.status(self.parent, 'parent')['acceptance']['commit'], accepted)
+        self.assertEqual(git(self.parent, 'rev-parse', 'HEAD'), rejected)
 
     def assert_refused_untouched(self, refusal):
         head = git(self.topic, 'rev-parse', 'HEAD')

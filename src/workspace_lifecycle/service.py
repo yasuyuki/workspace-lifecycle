@@ -235,7 +235,8 @@ def update_validation(repo, *, task: str, expected_head: str,
             if expected_head != head(repo):
                 raise LifecycleError('validation update HEAD mismatch; supply the exact full commit OID')
             _operation_check(repo, 'validation update')
-            if intent and not _effectless_finish(intent, identity, expected_head):
+            effectless = intent and _effectless_finish(intent, identity, expected_head)
+            if intent and not effectless and not _recorded_finish(repo, intent, identity, expected_head):
                 raise LifecycleError('pending task operation prevents validation update')
             if item.get('validation') != expected_validation:
                 raise LifecycleError('validation CAS mismatch')
@@ -248,9 +249,10 @@ def update_validation(repo, *, task: str, expected_head: str,
                 raise LifecycleError('pending task operation prevents validation update')
             item['validation'] = list(validation)
             item.setdefault('validation_updates', []).append(receipt)
-            if intent:
+            if effectless:
                 # A finish that failed before any recorded effect only pins the
                 # old validator. Its receipt outlives retirement like a revision.
+                # A finish with recorded effects stays pending and resumes them.
                 item.setdefault('finish_receipts', []).append({**intent, 'validation_update': receipt})
                 state['intents'].pop(task)
             save_state(directory, state)
@@ -268,6 +270,27 @@ def _effectless_finish(intent, identity, current_head):
             and intent['identity'] == identity and intent['initial_head'] == current_head
             and (revision is None or (isinstance(revision, dict) and set(revision) == {'head', 'evidence'}
                                       and revision['head'] == current_head)))
+
+
+def _recorded_finish(repo, intent, identity, current_head):
+    """True for a finish whose every effect completed and is recorded at this HEAD.
+
+    Validation follows preservation and the commit, so a rejected validator
+    leaves this state; the pending finish resumes it with the corrected one."""
+    if (intent.get('kind') != 'finish' or intent.get('identity') != identity
+            or not set(intent) <= _FINISH_INTENT_FIELDS | {'head_revision', 'commit_tree', 'committed'}
+            or not _FINISH_INTENT_FIELDS <= set(intent)
+            or any(action.get('phase') != 'resolved' for action in intent['actions'].values())):
+        return False
+    revision = intent.get('head_revision')
+    if revision is not None and (not isinstance(revision, dict) or set(revision) != {'head', 'evidence'}
+                                 or revision['head'] != intent['initial_head']):
+        return False
+    if 'committed' not in intent:
+        return 'commit_tree' not in intent and intent['initial_head'] == current_head
+    parents = (git(repo, 'rev-list', '--parents', '-n', '1', current_head) or '').split()
+    return (intent['committed'] == current_head and parents[1:] == [intent['initial_head']]
+            and git(repo, 'rev-parse', current_head + '^{tree}') == intent.get('commit_tree'))
 
 
 def update_required_checks(repo, *, task: str, expected: list[dict],
@@ -905,20 +928,18 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     if entry_intent is None:
                         state['intents'].pop(task_id); save_state(directory, state)
                     raise early
-                validated_head = head(repo)
-                if validated_head not in {intent['initial_head'], intent.get('committed'), synchronized_head}:
-                    raise LifecycleError('HEAD changed before finish validation')
-                precommit = _validate(repo, task['validation'])
-                _check_preserved(repo, task)
-                if _finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head:
-                    raise LifecycleError('HEAD or identity changed during finish validation')
-                _operation_check(repo, 'finish validation')
-                _check_preserved_plan(task, plan)
+                start_head = head(repo)
+                if start_head not in {intent['initial_head'], intent.get('committed'), synchronized_head}:
+                    raise LifecycleError('HEAD changed before finish preservation')
+                _operation_check(repo, 'finish preservation')
+                # Validation runs once, after preservation and the commit, on the
+                # exact HEAD that is pushed. A failure leaves the recorded commit
+                # and actions in this intent; the same plan resumes them.
                 _resolve_files(repo, plan, intent, directory, state)
                 _check_preserved(repo, task)
                 _checked_paths(repo, plan.get('commit', []), need='source', owner=task_id,
                     completed=set(commit_paths) if synchronized_head and intent.get('committed') else None)
-                if _finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head:
+                if _finish_identity(repo, task_id, branch) != identity or head(repo) != start_head:
                     raise LifecycleError('HEAD or identity changed during finish preservation')
                 if _index_paths(repo) - set(commit_paths):
                     raise LifecycleError('validation or cleanup staged unrelated changes')
@@ -928,21 +949,15 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                         raise LifecycleError('index changed before task commit')
                     if _index_paths(repo):
                         intent['commit_tree'] = git(repo, 'write-tree'); save_state(directory, state)
-                        if _finish_identity(repo, task_id, branch) != identity or head(repo) != validated_head:
+                        if _finish_identity(repo, task_id, branch) != identity or head(repo) != start_head:
                             raise LifecycleError('HEAD or identity changed before finish commit')
                         git(repo, 'commit', '-m', message)
                         committed_head = head(repo)
                         parents = (git(repo, 'rev-list', '--parents', '-n', '1', committed_head) or '').split()
-                        if parents[1:] != [validated_head] or git(repo, 'rev-parse', committed_head + '^{tree}') != intent['commit_tree']:
+                        if parents[1:] != [start_head] or git(repo, 'rev-parse', committed_head + '^{tree}') != intent['commit_tree']:
                             raise LifecycleError('finish commit identity changed')
                         intent['committed'] = committed_head; save_state(directory, state)
-                # A clean checkout at the same HEAD is the precommit input again:
-                # same argv, cwd and content. Validator output or any other
-                # change leaves dirt or moves HEAD and is validated again.
-                if not dirty and head(repo) == validated_head and not _snapshot(repo, excluded=_preserved_paths(task)):
-                    evidence = {'argv': precommit['argv'], 'reused': 'precommit'}
-                else:
-                    evidence = _validate(repo, task['validation'])
+                evidence = _validate(repo, task['validation'])
                 _check_preserved(repo, task)
                 expected_finish_head = synchronized_head or intent.get('committed') or intent['initial_head']
                 if _finish_identity(repo, task_id, branch) != identity or head(repo) != expected_finish_head:
@@ -960,7 +975,7 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 pushed = _push(repo, task['preflight'], branch, task['remote'], expected_head=commit)
                 task.pop('exception', None)
                 task['acceptance'] = {'commit': commit, 'result_ref': result_ref,
-                                      'validation': {'precommit': precommit, 'postcommit': evidence},
+                                      'validation': {'postcommit': evidence},
                                       'push': pushed, 'accepted_at': _now(),
                                       'finish_input': _finish_input(repo, task, identity, plan_digest)}
                 if synchronized_head:

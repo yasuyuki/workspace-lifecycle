@@ -178,16 +178,16 @@ class LifecycleTest(unittest.TestCase):
         pending = status(self.topic, "validate")["intent"]
         self.assertEqual(pending["result_ref"], "issue/143")
         self.assertEqual(pending["initial_head"], initial_head)
-        self.assertNotIn("committed", pending)
-        self.assertEqual(run(self.topic, "rev-parse", "HEAD"), initial_head)
+        self.assertEqual(run(self.topic, "rev-parse", "HEAD"), pending["committed"])
+        self.assertEqual(run(self.topic, "rev-parse", "HEAD^"), initial_head)
+        self.assertEqual(run(self.root, "ls-remote", str(self.remote), "refs/heads/topic/validate"), "")
 
         gate.write_text("continue\n")
         result = finish(self.topic, task="validate", plan_path=str(plan), result_ref="issue/143")
         self.assertTrue(result["accepted"])
-        self.assertNotEqual(result["commit"], initial_head)
+        self.assertEqual(result["commit"], pending["committed"])
         task = status(self.topic, "validate")
         expected_task_argv = [*validation[:3], str(self.topic.resolve()), *validation[4:]]
-        self.assertEqual(task["acceptance"]["validation"]["precommit"]["argv"], expected_task_argv)
         self.assertEqual(task["acceptance"]["validation"]["postcommit"]["argv"], expected_task_argv)
         self.assertEqual(task["integrated"]["validation"]["argv"],
                          [*validation[:3], str(self.root.resolve()), *validation[4:]])
