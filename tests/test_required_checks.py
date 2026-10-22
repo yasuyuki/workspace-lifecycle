@@ -210,7 +210,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.github.add("example/repo", commit, TEST)
         with patch("workspace_lifecycle.service._push", wraps=service._push) as pushes:
             result = self.finish("resume")
-        self.assertEqual(validations(self.topic), 2, "no topic validation after acceptance")
+        self.assertEqual(validations(self.topic), 1, "no topic validation after acceptance")
         self.assertEqual([Path(call.args[0]) for call in pushes.call_args_list], [self.root.resolve()])
         self.assertEqual(status(self.topic, "resume")["acceptance"], accepted)
         self.assertEqual(validations(self.root.resolve()), 1)
@@ -222,7 +222,7 @@ class RequiredChecksTest(unittest.TestCase):
         accepted = status(self.topic, task)["acceptance"]
         change()
         self.refused(task, refusal)
-        self.assertGreater(validations(self.topic), 2, "the changed finish validated again")
+        self.assertGreater(validations(self.topic), 1, "the changed finish validated again")
         return accepted
 
     def test_resume_without_saved_finish_input_accepts_again(self):
@@ -262,7 +262,7 @@ class RequiredChecksTest(unittest.TestCase):
         accepted = status(self.topic, "dirty")["acceptance"]
         (self.topic / "stray.txt").write_text("unowned\n")
         self.refused("dirty", "unresolved dirty is not a completion exception: stray.txt")
-        self.assertEqual(validations(self.topic), 2)
+        self.assertEqual(validations(self.topic), 1)
         self.assertEqual(status(self.topic, "dirty")["acceptance"], accepted)
 
     def test_resume_with_a_moved_topic_remote_does_not_reuse_acceptance(self):
@@ -272,7 +272,7 @@ class RequiredChecksTest(unittest.TestCase):
         foreign = run(self.root, "commit-tree", "-p", commit, "-m", "foreign", commit + "^{tree}")
         run(self.root, "push", "-q", "origin", foreign + ":refs/heads/topic/moved-remote")
         self.finish("moved-remote")
-        self.assertEqual(validations(self.topic), 3)
+        self.assertEqual(validations(self.topic), 2)
         self.assertEqual(status(self.topic, "moved-remote")["acceptance"]["push"]["remote_observed"], foreign)
 
     def test_interrupted_merge_keeps_its_proof_and_rejects_a_changed_remote(self):

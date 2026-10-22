@@ -95,8 +95,11 @@ to its original validator. A finish that failed before recording any effect
 (no archive, restore, staged index, commit tree, commit or synchronization) on
 the same checkout and HEAD is released by the correction: its intent moves to
 the task's finish receipts with the correction, and the next ordinary `finish`
-starts a new one. Resolve any other pending operation through its existing
-recovery contract first.
+starts a new one. A finish whose validation failed after its commit and completed
+actions stays pending with them. The correction then requires HEAD to be that
+recorded commit, and the next `finish` with the same plan validates and pushes
+it. Resolve any other pending operation through its existing recovery contract
+first.
 
 Use `adopt-existing` instead of `begin` to continue an existing checkout, including a nondefault primary checkout or a
 linked checkout nested below it.
@@ -258,19 +261,18 @@ operation is pending. Topic HEAD success does not prove the merge result itself.
 Repositories without a declaration behave as before, except that begin, adoption and finish fetch the remote default
 branch to look for one.
 
-Finish validates before and after the owned actions, commits only the planned
-source, runs the configured push preflight, and verifies the remote tip. It then
+Finish runs the owned actions, commits only the planned source, validates once
+on that exact HEAD, runs the configured push preflight, and verifies the remote
+tip. A failed validation keeps the local commit and completed actions in the
+pending intent and pushes nothing. Retry the same plan after correcting the
+validator, or revise the plan to commit a fix on top. It then
 follows the declared parent or remote-default integration edge using the normal
 Git `merge --no-ff --no-commit` contract, commits the merge, validates that
 exact commit, pushes and records the result. A failed validation leaves the
 unpushed merge commit and its pending intent in the target; finish of the same
 task resumes it. Meanwhile, no other task integrates into that target and the task
 owning a target branch cannot finish.
-Within one finish, the task checkout reuses its first successful run after owned
-actions that changed nothing, so HEAD and content are unchanged. Its receipt
-names the reused stage.
-Changed content, a new task commit, synchronization or validator output runs
-validation again. A hold, dependency failure, changed accepted HEAD, dirty target, conflict,
+Validator output is refused by the dirty check that follows validation. A hold, dependency failure, changed accepted HEAD, dirty target, conflict,
 or failed validation remains a refusal to resolve in the existing task. Retry the
 same plan after repairing the operation. If the ownership review or required
 cleanup changes, `--revise-plan-evidence` explicitly records that decision and

@@ -129,14 +129,23 @@ class ValidationUpdateTests(unittest.TestCase):
                 self.update()
         self.assertEqual(self.state.read_bytes(), before)
 
-    def failed_finish(self):
-        """Register a validator that cannot pass and leave its untouched finish intent."""
+    def failed_finish(self, commit=False):
+        """Register a validator that cannot pass and leave the finish intent it fails.
+
+        Without a planned commit the intent records no effect; with one, it
+        records the local finish commit that validation rejected."""
         missing = ['git', 'cat-file', '-e', 'HEAD:missing-required-file']
         self.update(validation=missing)
         (self.f.topic / 'feature.txt').write_text('done\n')
         self.f.task = 'current'
         self.plan = self.f.topic.parent / 'plan.json'
-        self.plan.write_text(json.dumps(self.f.source_plan(self.f.topic, 'feature.txt')))
+        if commit:
+            self.plan.write_text(json.dumps(self.f.source_plan(self.f.topic, 'feature.txt')))
+        else:
+            git(self.f.topic, 'add', 'feature.txt')
+            git(self.f.topic, 'commit', '-m', 'feature')
+            self.head = head(self.f.topic)
+            self.plan.write_text('{}')
         with self.assertRaisesRegex(LifecycleError, 'configured validation failed'):
             service.finish(self.f.topic, task='current', plan_path=str(self.plan), result_ref='issue/31')
         self.intent = service.status(self.f.topic, 'current')['intent']
@@ -178,7 +187,7 @@ class ValidationUpdateTests(unittest.TestCase):
             'commit tree': lambda i: i.update(commit_tree=other),
             'commit': lambda i: i.update(committed=other),
             'archive': lambda i: i['actions'].update({'feature.txt': {'kind': 'archive', 'phase': 'copying'}}),
-            'restore': lambda i: i['actions'].update({'feature.txt': {'kind': 'restore', 'phase': 'resolved'}}),
+            'restore': lambda i: i['actions'].update({'feature.txt': {'kind': 'restore', 'phase': 'restoring'}}),
             'synchronization': lambda i: i.update(synchronization={}),
             'unknown field': lambda i: i.update(unexpected=True),
             'missing identity': lambda i: i.pop('identity'),
@@ -198,13 +207,46 @@ class ValidationUpdateTests(unittest.TestCase):
         self.update(expected_validation=missing)
         self.assertNotIn('intent', service.status(self.f.topic, 'current'))
 
+    def test_failed_finish_with_recorded_commit_is_corrected_and_resumed(self):
+        initial = self.head
+        missing = self.failed_finish(commit=True)
+        rejected = head(self.f.topic)
+        self.assertEqual(self.intent['committed'], rejected)
+        self.assertEqual(git(self.f.topic, 'rev-list', '--parents', '-n', '1', rejected).split()[1:], [initial])
+        self.assertIsNone(git(self.f.topic, 'ls-remote', '--exit-code', 'origin', 'refs/heads/topic/current', optional=True))
+        other = '0' * len(rejected)
+        for name, change in {'other commit tree': lambda i: i.update(commit_tree=other),
+                             'other initial HEAD': lambda i: i.update(initial_head=other),
+                             'unresolved restore': lambda i: i['actions'].update(
+                                 {'feature.txt': {'kind': 'restore', 'phase': 'restoring'}})}.items():
+            with self.subTest(name):
+                self.edit_intent(change)
+                before = self.state.read_bytes()
+                with self.assertRaisesRegex(LifecycleError, 'pending'):
+                    self.update(expected_head=rejected, expected_validation=missing)
+                self.assertEqual(self.state.read_bytes(), before)
+                self.edit_intent(lambda i: (i.clear(), i.update(json.loads(json.dumps(self.intent)))))
+        self.update(expected_head=rejected, expected_validation=missing, evidence='issue/39 correction')
+        current = service.status(self.f.topic, 'current')
+        self.assertEqual(current['intent'], self.intent)
+        self.assertNotIn('finish_receipts', current)
+        self.assertEqual(current['validation_updates'][-1]['head'], rejected)
+        result = service.finish(self.f.topic, task='current', plan_path=str(self.plan), result_ref='issue/31')
+        self.assertEqual(result['commit'], rejected)
+        current = service.status(self.f.topic, 'current')
+        self.assertEqual(current['acceptance']['validation']['postcommit']['argv'], self.new)
+        self.assertEqual(git(self.f.topic, 'ls-remote', 'origin', 'refs/heads/topic/current').split()[0], rejected)
+        self.assertEqual((self.f.root / 'feature.txt').read_text(), 'done\n')
+
     def test_effectless_release_refuses_staged_index_lease_and_stale_cas(self):
         missing = self.failed_finish()
         before = self.state.read_bytes()
-        git(self.f.topic, 'add', 'feature.txt')
+        (self.f.topic / 'staged.txt').write_text('staged\n')
+        git(self.f.topic, 'add', 'staged.txt')
         with self.assertRaisesRegex(LifecycleError, 'pending'):
             self.update(expected_validation=missing)
-        git(self.f.topic, 'reset', '-q', '--', 'feature.txt')
+        git(self.f.topic, 'reset', '-q', '--', 'staged.txt')
+        (self.f.topic / 'staged.txt').unlink()
         with guard(self.f.topic, 'current'):
             with self.assertRaisesRegex(LifecycleError, 'in use'):
                 self.update(expected_validation=missing)
