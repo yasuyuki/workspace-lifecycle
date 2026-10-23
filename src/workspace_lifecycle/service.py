@@ -755,8 +755,10 @@ def _refuse_pending_merge(state, branch):
             raise LifecycleError('pending integration of ' + other + ' holds ' + branch)
 
 
-def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = 'workspace lifecycle completion', users_released: bool = False, revision_evidence: str | None = None, preservation_evidence: str | None = None, revision_head: str | None = None) -> dict:
+def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = 'workspace lifecycle completion', users_released: bool = False, revision_evidence: str | None = None, preservation_evidence: str | None = None, revision_head: str | None = None, wait_checks: float | None = None) -> dict:
     repo = Path(repo).resolve(); plan = _plan(Path(plan_path)); task_id = task
+    if wait_checks is not None and not 0 < wait_checks < float('inf'):
+        raise LifecycleError('required check wait must be a positive, finite number of seconds')
     reclaim_evidence = _durable_preservation_evidence(preservation_evidence)
     if not isinstance(result_ref, str) or not result_ref.strip():
         raise LifecycleError('durable result reference is required')
@@ -994,6 +996,8 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     if task.get('owner_receipts'):
                         task['owner_release'] = {'result_ref': result_ref, 'commit': commit}
                 state['intents'].pop(task_id, None); save_state(directory, state)
+    if wait_checks is not None:
+        _await_checks(repo, task_id, wait_checks)
     integration = _integrate(repo, task_id, result_ref)
     result = {'task': task_id, 'accepted': True, 'commit': commit, 'result_ref': result_ref, 'integration': integration}
     if users_released:
@@ -1203,6 +1207,30 @@ def synchronize(repo, *, task, expected_head, remote_head, evidence):
             return {'task': task, 'commit': result['commit'], 'synchronization': result}
 
 
+def _check_policy(repo, remote, gated, required_checks):
+    policy = checks.current(repo, remote)
+    checks.require(policy, required_checks)
+    return policy, checks.source(repo, gated, policy, required_checks) if gated else None
+
+
+def _await_checks(repo: Path, task_id: str, seconds: float) -> None:
+    """Wait for the checks the next integration gates on, holding no lease or lock.
+
+    The integration that follows takes its leases and decides again from the
+    state and remote it then reads; this wait only spares a refusal.
+    """
+    with locked_state(repo) as (_, state):
+        item = _task(state, task_id)
+        gated = item['acceptance']['commit']; remote = item['remote']
+        required_checks = item.get('required_checks', [])
+        if state['intents'].get(task_id) or (item.get('integrated') or {}).get('source') == gated:
+            return
+    _, proposed = _check_policy(repo, remote, gated, required_checks)
+    gated_checks = required_checks + (proposed['added'] if proposed else [])
+    if gated_checks:
+        checks.wait(checks.repository(repo, remote), gated, gated_checks, seconds)
+
+
 def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
     """Resume only the declared, accepted edge, then follow its parent to default."""
     with locked_state(repo) as (_, state):
@@ -1224,9 +1252,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
         # A declaration the accepted commit itself changes must pass on that commit.
         policy = proposed = None
         if not settled:
-            policy = checks.current(repo, item['remote'])
-            checks.require(policy, required_checks)
-            proposed = checks.source(repo, gated, policy, required_checks) if gated else None
+            policy, proposed = _check_policy(repo, item['remote'], gated, required_checks)
         elif pending:
             proposed = pending.get('source_checks_policy')
         gated_checks = required_checks + (proposed['added'] if proposed else [])

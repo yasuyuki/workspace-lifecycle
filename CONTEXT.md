@@ -41,3 +41,17 @@ _Avoid_: tree hash、同じ commit
 **Reused validation**:
 同じ finish の中で、validation input が直前に成功した run と変わっていない段階が、その run を自分の証拠とすること。receipt は再利用元の段階を示し、新しい run とは書かない。別の finish、別の checkout、別の HEAD commit、失敗した run からは再利用しない。
 _Avoid_: cache、省略された validation、検証済み tree
+
+### Required checks
+
+**Required check state**:
+受入 commit そのものについて、required check の app と name が一致する最新の GitHub check run が示す状態。一致する run が無ければ missing である。別の commit・別の app・別の名前の check、workflow run の成否はこの状態にならない。
+_Avoid_: CI の結果、workflow run の status
+
+**Pending check**:
+state が missing、または未完了（queued、in_progress など）の required check。待つ理由になるが、成功ではない。
+_Avoid_: 実行中の workflow
+
+**Failed check**:
+完了していて、conclusion が success でない required check。failure・cancelled・timed_out のほか skipped・neutral・action_required も含む。一つでもあれば、ほかの check の完了を待たずに統合しない。
+_Avoid_: run 全体の失敗
