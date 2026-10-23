@@ -4,18 +4,27 @@ The repository owns which checks exist and may declare the ones every task
 needs in a tracked file on its remote default branch. A task requires at least
 that declared set. Only the latest GitHub check run of each required app and
 name on the exact commit counts, and only ``completed`` with conclusion
-``success`` passes.
+``success`` passes. Any other completed conclusion is a failure; a missing or
+unfinished check is pending.
 """
 from __future__ import annotations
 
 import json
 import re
 import subprocess
+import sys
+import time
 
 from .errors import LifecycleError
 from .git import git, head, remote_default
 
 DECLARATION = '.github/required-checks.json'
+
+# GitHub Actions ends a job after 360 minutes unless the workflow sets
+# timeout-minutes, and no declaring workflow sets it.
+DEFAULT_WAIT_SECONDS = 360 * 60
+PENDING = frozenset({'missing', 'queued', 'in_progress', 'waiting', 'requested', 'pending'})
+_POLL_SECONDS = 30
 
 _GITHUB = re.compile(r'^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)'
                      r'([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$')
@@ -111,7 +120,7 @@ def _runs(repository: str, commit: str, name: str) -> list[dict]:
     argv = ['gh', 'api', '--hostname', 'github.com', '--paginate', '-X', 'GET',
             f'repos/{repository}/commits/{commit}/check-runs',
             '-f', 'check_name=' + name, '-f', 'filter=all', '-f', 'per_page=100',
-            '--jq', '.check_runs[] | {id, name, head_sha, status, conclusion, app: .app.slug}']
+            '--jq', '.check_runs[] | {id, name, head_sha, status, conclusion, html_url, app: .app.slug}']
     try:
         result = subprocess.run(argv, text=True, capture_output=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -124,9 +133,8 @@ def _runs(repository: str, commit: str, name: str) -> list[dict]:
         raise LifecycleError('required check status unavailable: unreadable response')
 
 
-def verify(repository: str, commit: str, required: list[dict]) -> dict:
-    """Evidence that every required check succeeded on exactly ``commit``, or a refusal."""
-    results, unmet = [], []
+def _states(repository: str, commit: str, required: list[dict]) -> list[dict]:
+    results = []
     for check in required:
         runs = [run for run in _runs(repository, commit, check['name'])
                 if run.get('app') == check['app'] and run.get('name') == check['name']]
@@ -136,11 +144,43 @@ def verify(repository: str, commit: str, required: list[dict]) -> dict:
         state = ('missing' if latest is None else
                  latest.get('status') if latest.get('status') != 'completed' else
                  latest.get('conclusion') or 'unknown')
-        entry = {**check, 'state': state, **({'run': latest['id']} if latest else {})}
-        results.append(entry)
-        if state != 'success':
-            unmet.append(entry)
+        url = latest.get('html_url') if latest else None
+        results.append({**check, 'state': state, **({'run': latest['id']} if latest else {}),
+                        **({'url': url} if isinstance(url, str) and url else {})})
+    return results
+
+
+def verify(repository: str, commit: str, required: list[dict]) -> dict:
+    """Evidence that every required check succeeded on exactly ``commit``, or a refusal."""
+    results = _states(repository, commit, required)
+    unmet = [entry for entry in results if entry['state'] != 'success']
     if unmet:
         raise LifecycleError('required checks have not succeeded for ' + repository + '@' + commit
                              + ': ' + json.dumps(unmet, sort_keys=True))
     return {'repository': repository, 'commit': commit, 'checks': results}
+
+
+def wait(repository: str, commit: str, required: list[dict], seconds: float) -> None:
+    """Return once every required check succeeded on ``commit``; refuse at the
+    first failed one, or with the unfinished ones when ``seconds`` run out."""
+    deadline = time.monotonic() + seconds; reported = None
+    while True:
+        results = _states(repository, commit, required)
+        failed = [entry for entry in results if entry['state'] not in PENDING | {'success'}]
+        if failed:
+            raise LifecycleError('required checks failed for ' + repository + '@' + commit + ': '
+                                 + json.dumps(failed, sort_keys=True),
+                                 'the accepted commit is kept; rerun the failed check or commit a fix, then run finish again')
+        unmet = [entry for entry in results if entry['state'] != 'success']
+        if not unmet:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise LifecycleError('required checks did not finish within ' + str(seconds) + ' seconds for '
+                                 + repository + '@' + commit + ': ' + json.dumps(unmet, sort_keys=True),
+                                 'the accepted commit is kept; run the same finish again to keep waiting')
+        states = [(entry['name'], entry['state']) for entry in unmet]
+        if states != reported:
+            print('waiting for required checks: ' + json.dumps(dict(states)), file=sys.stderr, flush=True)
+            reported = states
+        time.sleep(min(_POLL_SECONDS, remaining))

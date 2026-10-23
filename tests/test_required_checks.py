@@ -29,18 +29,32 @@ class FakeGitHub:
     def __init__(self):
         self.runs = {}; self.queries = []; self.unavailable = False
 
-    def add(self, repository, commit, check, status="completed", conclusion="success", app=None):
+    def add(self, repository, commit, check, status="completed", conclusion="success", app=None, url=None):
         rows = self.runs.setdefault((repository, commit, check["name"]), [])
         rows.append({"id": 1000 + sum(map(len, self.runs.values())), "name": check["name"],
                      "head_sha": commit, "status": status,
                      "conclusion": conclusion if status == "completed" else None,
-                     "app": app or check["app"]})
+                     "app": app or check["app"], "html_url": url})
 
     def __call__(self, repository, commit, name):
         self.queries.append((repository, commit, name))
         if self.unavailable:
             raise LifecycleError("required check status unavailable: HTTP 502")
         return list(self.runs.get((repository, commit, name), []))
+
+
+class FakeClock:
+    """Monotonic time that advances only by sleeping; each sleep runs the next step."""
+
+    def __init__(self, steps=()):
+        self.now = 0.0; self.steps = list(steps); self.sleeps = []
+
+    def monotonic(self): return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds); self.now += seconds
+        if self.steps:
+            self.steps.pop(0)()
 
 
 class RequiredChecksTest(unittest.TestCase):
@@ -216,6 +230,137 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertEqual(validations(self.root.resolve()), 1)
         self.assertEqual(result["integration"]["commit"], self.trunk())
         self.assertEqual(run(self.root, "rev-parse", "HEAD^2"), commit)
+
+    def waiting(self, task, steps=(), seconds=600):
+        clock = FakeClock(steps)
+        with patch("workspace_lifecycle.checks.time", clock):
+            return finish(self.topic, task=task, plan_path=str(self.plan), result_ref="issue/" + task,
+                          wait_checks=seconds), clock
+
+    def waiting_refused(self, task, message, steps=(), seconds=600):
+        before = self.trunk(); clock = FakeClock(steps)
+        with patch("workspace_lifecycle.checks.time", clock), self.assertRaisesRegex(LifecycleError, message) as caught:
+            finish(self.topic, task=task, plan_path=str(self.plan), result_ref="issue/" + task, wait_checks=seconds)
+        self.assertEqual(self.trunk(), before)
+        self.assertFalse((self.root / "feature.txt").exists())
+        self.assertNotIn("integrated", status(self.topic, task))
+        return caught.exception, clock
+
+    def reported(self, error):
+        return json.loads(str(error).split(": ", 1)[1])
+
+    def test_wait_integrates_once_pending_checks_succeed(self):
+        self.start("wait", required=(TEST, LINT))
+        commit = lambda: self.accepted("wait")
+        def unlocked():
+            # Waiting holds neither the state lock nor the integration target's lease.
+            status(self.topic, "wait")
+            with service._lease(self.root, "@default"):
+                pass
+        steps = [lambda: self.github.add("example/repo", commit(), LINT, "queued", None),
+                 lambda: (unlocked(), self.github.add("example/repo", commit(), TEST, "in_progress", None)),
+                 lambda: self.github.add("example/repo", commit(), LINT),
+                 lambda: self.github.add("example/repo", commit(), TEST)]
+        result, clock = self.waiting("wait", steps)
+        self.assertEqual(result["integration"]["destination"], "trunk")
+        self.assertEqual((self.root / "feature.txt").read_text(), "wait\n")
+        self.assertEqual(clock.sleeps, [30, 30, 30, 30])
+        self.assertEqual(run(self.root, "rev-parse", "HEAD^2"), commit())
+
+    def test_wait_stops_at_the_first_failed_check(self):
+        self.start("fail", required=(TEST, LINT))
+        self.refused("fail", "missing")
+        commit = self.accepted("fail")
+        self.github.add("example/repo", commit, LINT, "in_progress", None)
+        for conclusion in ("failure", "cancelled", "timed_out", "action_required", "skipped", "neutral"):
+            with self.subTest(conclusion=conclusion):
+                url = "https://github.com/example/repo/runs/" + conclusion
+                self.github.add("example/repo", commit, TEST, "in_progress", None)
+                add =lambda: self.github.add("example/repo", commit, TEST, "completed", conclusion, url=url)
+                error, clock = self.waiting_refused("fail", "required checks failed", [add])
+                self.assertEqual(len(clock.sleeps), 1, "no wait for the check still in progress")
+                failed = self.reported(error)
+                self.assertEqual(failed, [{**TEST, "state": conclusion, "run": failed[0]["run"], "url": url}])
+                self.assertIn("finish again", error.recovery)
+        self.assertEqual(self.accepted("fail"), commit)
+
+    def test_wait_ignores_other_commits_apps_names_and_older_runs(self):
+        self.start("foreign-wait")
+        self.refused("foreign-wait", "missing")
+        commit = self.accepted("foreign-wait")
+        self.github.add("example/repo", run(self.root, "rev-parse", "trunk"), TEST)
+        self.github.add("example/repo", commit, TEST, app="other-app")
+        self.github.add("example/repo", commit, {"app": "github-actions", "name": "native-e2e"})
+        error, clock = self.waiting_refused("foreign-wait", "did not finish within 90", seconds=90)
+        self.assertEqual(self.reported(error), [{**TEST, "state": "missing"}])
+        self.assertEqual(clock.sleeps, [30, 30, 30])
+        self.assertIn("finish again", error.recovery)
+        self.github.add("example/repo", commit, TEST)
+        self.github.add("example/repo", commit, TEST, "in_progress", None)
+        error, clock = self.waiting_refused("foreign-wait", "did not finish within 45", seconds=45)
+        self.assertEqual([c["state"] for c in self.reported(error)], ["in_progress"])
+        self.assertEqual(clock.sleeps, [30, 15])
+
+    def test_wait_without_required_checks_queries_nothing(self):
+        self.start("plain-wait", required=())
+        result, clock = self.waiting("plain-wait")
+        self.assertEqual(result["integration"]["destination"], "trunk")
+        self.assertEqual((self.github.queries, clock.sleeps), ([], []))
+
+    def test_wait_rejects_a_nonpositive_limit(self):
+        self.start("limit")
+        for seconds in (0, -1, float("nan"), float("inf")):
+            with self.assertRaisesRegex(LifecycleError, "positive"):
+                finish(self.topic, task="limit", plan_path=str(self.plan), result_ref="issue/limit", wait_checks=seconds)
+        self.assertNotIn("acceptance", status(self.topic, "limit"))
+
+    def test_unavailable_status_during_wait_resumes_the_saved_acceptance(self):
+        validations = self.counted("flaky")
+        accepted = status(self.topic, "flaky")["acceptance"]
+        def outage(): self.github.unavailable = True
+        self.waiting_refused("flaky", "unavailable", [outage])
+        self.github.unavailable = False
+        self.github.add("example/repo", accepted["commit"], TEST)
+        with patch("workspace_lifecycle.service._push", wraps=service._push) as pushes:
+            result, _ = self.waiting("flaky")
+        self.assertEqual(validations(self.topic), 1, "no topic validation after acceptance")
+        self.assertEqual([Path(call.args[0]) for call in pushes.call_args_list], [self.root.resolve()])
+        self.assertEqual(status(self.topic, "flaky")["acceptance"], accepted)
+        self.assertEqual(result["integration"]["commit"], self.trunk())
+
+    def test_a_hold_during_the_wait_refuses_integration(self):
+        from workspace_lifecycle.service import hold
+        self.start("held")
+        self.refused("held", "missing")
+        commit = self.accepted("held")
+        def held():
+            hold(self.topic, "held", "review", "release after review")
+            self.github.add("example/repo", commit, TEST)
+        self.waiting_refused("held", "held", [held])
+
+    def test_a_new_declaration_during_the_wait_refuses_integration(self):
+        self.start("declared")
+        self.refused("declared", "missing")
+        commit = self.accepted("declared")
+        declared = []
+        def declare():
+            declared.append(self.declare([TEST, LINT]))
+            self.github.add("example/repo", commit, TEST)
+        with patch("workspace_lifecycle.checks.time", FakeClock([declare])), self.assertRaisesRegex(LifecycleError, "omit"):
+            finish(self.topic, task="declared", plan_path=str(self.plan), result_ref="issue/declared", wait_checks=600)
+        self.assertEqual(self.trunk(), declared[0])
+        self.assertNotIn("integrated", status(self.topic, "declared"))
+
+    def test_a_moved_source_during_the_wait_refuses_integration(self):
+        self.start("moved-wait")
+        self.refused("moved-wait", "missing")
+        commit = self.accepted("moved-wait")
+        def moved():
+            (self.topic / "feature.txt").write_text("moved\n")
+            run(self.topic, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                "commit", "-qam", "change during the wait")
+            self.github.add("example/repo", commit, TEST)
+        self.waiting_refused("moved-wait", "accepted identity", [moved])
 
     def accepts_again(self, task, change, refusal="missing"):
         validations = self.counted(task)

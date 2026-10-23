@@ -253,7 +253,16 @@ with several push URLs is refused.
 Queued, running, failed, cancelled, skipped, neutral, missing or unavailable
 results refuse integration, leave the acceptance in place and change no target.
 Retry the same finish after CI completes; a new HEAD needs its own successful
-checks. That retry reuses the saved acceptance and neither validates nor pushes
+checks. `finish --wait-checks [SECONDS]` instead waits for them after
+acceptance, holding no lifecycle lock or lease, and then integrates as usual.
+It asks GitHub every 30 seconds and stops as soon as any required check
+completes without success, naming each failed check with its state, run ID and
+GitHub URL. Missing, queued and running checks keep it waiting until SECONDS
+have passed; the default, 21600, is GitHub Actions' default job timeout. A
+failure, timeout, unavailable status or interruption leaves the acceptance in
+place, so repeating the finish resumes from it. State changes are reported on
+stderr; stdout keeps the one final JSON result. Without the option finish
+refuses at once, as before. That retry reuses the saved acceptance and neither validates nor pushes
 the task checkout again when the checkout is completely clean and its HEAD,
 plan, result reference, checkout identity, validation and preflight argv,
 remote fetch and push URLs and remote topic tip are those the acceptance
@@ -537,6 +546,9 @@ Version 0.8.3 resumes integration from a saved acceptance. Repeating finish
 after required checks were missing or running no longer validates and pushes the
 unchanged task checkout again or replaces its acceptance. Acceptances saved by
 earlier versions lack the recorded finish inputs and are accepted once more.
+
+Version 0.8.5 adds `finish --wait-checks`, which waits for the accepted
+commit's required checks and stops at the first failed one.
 
 Version 0.8.4 makes `finish --users-released` started inside its task worktree
 return the retirement request with `retirement.next`, the exact `retire`
