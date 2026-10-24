@@ -160,27 +160,39 @@ def verify(repository: str, commit: str, required: list[dict]) -> dict:
     return {'repository': repository, 'commit': commit, 'checks': results}
 
 
-def wait(repository: str, commit: str, required: list[dict], seconds: float) -> None:
-    """Return once every required check succeeded on ``commit``; refuse at the
-    first failed one, or with the unfinished ones when ``seconds`` run out."""
+def watch(repository: str, commit: str, required: list[dict], seconds: float) -> tuple[str, list[dict]]:
+    """Poll the checks on ``commit``: ``success`` once every one succeeded,
+    ``failed`` at the first failed one, or ``pending`` when ``seconds`` run out."""
     deadline = time.monotonic() + seconds; reported = None
     while True:
         results = _states(repository, commit, required)
-        failed = [entry for entry in results if entry['state'] not in PENDING | {'success'}]
-        if failed:
-            raise LifecycleError('required checks failed for ' + repository + '@' + commit + ': '
-                                 + json.dumps(failed, sort_keys=True),
-                                 'the accepted commit is kept; rerun the failed check or commit a fix, then run finish again')
+        if any(entry['state'] not in PENDING | {'success'} for entry in results):
+            return 'failed', results
         unmet = [entry for entry in results if entry['state'] != 'success']
         if not unmet:
-            return
+            return 'success', results
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise LifecycleError('required checks did not finish within ' + str(seconds) + ' seconds for '
-                                 + repository + '@' + commit + ': ' + json.dumps(unmet, sort_keys=True),
-                                 'the accepted commit is kept; run the same finish again to keep waiting')
+            return 'pending', results
         states = [(entry['name'], entry['state']) for entry in unmet]
         if states != reported:
-            print('waiting for required checks: ' + json.dumps(dict(states)), file=sys.stderr, flush=True)
+            print('waiting for required checks on ' + commit + ': ' + json.dumps(dict(states)),
+                  file=sys.stderr, flush=True)
             reported = states
         time.sleep(min(_POLL_SECONDS, remaining))
+
+
+def wait(repository: str, commit: str, required: list[dict], seconds: float) -> None:
+    """Return once every required check succeeded on ``commit``; refuse at the
+    first failed one, or with the unfinished ones when ``seconds`` run out."""
+    outcome, results = watch(repository, commit, required, seconds)
+    if outcome == 'failed':
+        failed = [entry for entry in results if entry['state'] not in PENDING | {'success'}]
+        raise LifecycleError('required checks failed for ' + repository + '@' + commit + ': '
+                             + json.dumps(failed, sort_keys=True),
+                             'the accepted commit is kept; rerun the failed check or commit a fix, then run finish again')
+    if outcome == 'pending':
+        unmet = [entry for entry in results if entry['state'] != 'success']
+        raise LifecycleError('required checks did not finish within ' + str(seconds) + ' seconds for '
+                             + repository + '@' + commit + ': ' + json.dumps(unmet, sort_keys=True),
+                             'the accepted commit is kept; run the same finish again to keep waiting')
