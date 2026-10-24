@@ -260,11 +260,13 @@ class RequiredChecksTest(unittest.TestCase):
         steps = [lambda: self.github.add("example/repo", commit(), LINT, "queued", None),
                  lambda: (unlocked(), self.github.add("example/repo", commit(), TEST, "in_progress", None)),
                  lambda: self.github.add("example/repo", commit(), LINT),
-                 lambda: self.github.add("example/repo", commit(), TEST)]
+                 lambda: self.github.add("example/repo", commit(), TEST),
+                 lambda: [self.github.add("example/repo", self.trunk(), check) for check in (TEST, LINT)]]
         result, clock = self.waiting("wait", steps)
         self.assertEqual(result["integration"]["destination"], "trunk")
+        self.assertEqual(result["integration_checks"]["state"], "success")
         self.assertEqual((self.root / "feature.txt").read_text(), "wait\n")
-        self.assertEqual(clock.sleeps, [30, 30, 30, 30])
+        self.assertEqual(clock.sleeps, [30, 30, 30, 30, 30])
         self.assertEqual(run(self.root, "rev-parse", "HEAD^2"), commit())
 
     def test_wait_stops_at_the_first_failed_check(self):
@@ -514,6 +516,178 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertEqual(status(parent, "parent")["acceptance"], merged)
         self.assertEqual(result["integration"]["destination"], "trunk")
         self.assertEqual((self.root / "feature.txt").read_text(), "child\n")
+
+    def ready(self, task, required=(TEST,), **kwargs):
+        """A saved acceptance whose own required checks already succeeded."""
+        self.start(task, required=required, **kwargs)
+        self.refused(task, "missing")
+        for check in required:
+            self.github.add("example/repo", self.accepted(task), check)
+
+    def test_without_wait_the_integrated_commit_is_not_queried(self):
+        self.ready("unwaited")
+        result = self.finish("unwaited")
+        self.assertNotIn("integration_checks", result)
+        self.assertNotIn("integration_checks", status(self.topic, "unwaited")["integrated"])
+        self.assertNotIn(self.trunk(), [query[1] for query in self.github.queries])
+
+    def test_wait_holds_until_the_integrated_commit_succeeds(self):
+        self.ready("merged", required=(TEST, LINT))
+        url = "https://github.com/example/repo/runs/merged"
+        steps = [lambda: self.github.add("example/repo", self.trunk(), TEST, "queued", None),
+                 lambda: self.github.add("example/repo", self.trunk(), TEST, "in_progress", None),
+                 lambda: (self.github.add("example/repo", self.trunk(), TEST, url=url),
+                          self.github.add("example/repo", self.trunk(), LINT))]
+        result, clock = self.waiting("merged", steps)
+        merged = self.trunk()
+        self.assertEqual(clock.sleeps, [30, 30, 30], "missing, queued and in_progress are not success")
+        outcome = result["integration_checks"]
+        self.assertEqual((outcome["state"], outcome["commit"], outcome["destination"], outcome["repository"]),
+                         ("success", merged, "trunk", "example/repo"))
+        self.assertEqual([(c["name"], c["state"]) for c in outcome["checks"]],
+                         [(TEST["name"], "success"), (LINT["name"], "success")])
+        self.assertEqual(outcome["checks"][0]["url"], url)
+        self.assertNotIn("next", outcome)
+        integrated = status(self.topic, "merged")["integrated"]
+        self.assertEqual(integrated["integration_checks"], {k: v for k, v in outcome.items() if k != "recorded_on"})
+        self.assertEqual(integrated["remote_checks"]["commit"], self.accepted("merged"))
+        self.assertNotEqual(self.accepted("merged"), merged)
+
+    def test_a_failed_integrated_check_keeps_the_integration_and_the_task(self):
+        from workspace_lifecycle.cli import main
+        self.ready("broken", required=(TEST, LINT))
+        url = "https://github.com/example/repo/runs/broken"
+        def fail():
+            self.github.add("example/repo", self.trunk(), LINT, "in_progress", None)
+            self.github.add("example/repo", self.trunk(), TEST, "completed", "failure", url=url)
+        clock = FakeClock([fail])
+        argv = ["--repo", str(self.topic), "finish", "--task", "broken", "--plan", str(self.plan),
+                "--result-ref", "issue/broken", "--users-released", "--wait-checks", "600"]
+        with patch("workspace_lifecycle.checks.time", clock), \
+                patch("sys.stdout", new_callable=lambda: __import__("io").StringIO()) as out:
+            code = main(argv)
+        body = json.loads(out.getvalue())
+        self.assertEqual((code, body["ok"]), (1, False), body)
+        self.assertEqual(len(clock.sleeps), 1, "no wait for the check still in progress")
+        outcome = body["integration_checks"]
+        self.assertEqual((outcome["state"], outcome["commit"]), ("failed", self.trunk()))
+        self.assertEqual([(c["name"], c["state"]) for c in outcome["checks"]],
+                         [(TEST["name"], "failure"), (LINT["name"], "in_progress")])
+        self.assertEqual(outcome["checks"][0]["url"], url)
+        self.assertIn("revert", outcome["next"])
+        self.assertEqual(body["integration"], {"destination": "trunk", "commit": self.trunk()})
+        task = status(self.topic, "broken")
+        self.assertEqual(task["integrated"]["commit"], self.trunk())
+        self.assertEqual(task["integrated"]["integration_checks"]["state"], "failed")
+        self.assertNotIn("retirement", body)
+        self.assertNotIn("retire", task)
+        self.assertNotIn("completion_release", task, "retire --pending must not pick the task up")
+        self.assertEqual(service.retire_pending(self.root)["pending"], [])
+        self.assertTrue(self.topic.is_dir())
+        self.github.add("example/repo", self.trunk(), TEST)
+        self.github.add("example/repo", self.trunk(), LINT)
+        with patch("workspace_lifecycle.checks.time", FakeClock()):
+            result = finish(self.topic, task="broken", plan_path=str(self.plan), result_ref="issue/broken",
+                            users_released=True, wait_checks=600)
+        self.assertEqual(result["integration_checks"]["state"], "success")
+        self.assertTrue(result["retirement"]["retired"], result["retirement"])
+
+    def test_wait_ignores_runs_not_on_the_integrated_commit(self):
+        self.ready("foreign-merge")
+        def foreign():
+            merged = self.trunk()
+            self.github.add("example/repo", self.accepted("foreign-merge"), TEST)
+            self.github.add("example/repo", merged, TEST, app="other-app")
+            self.github.add("example/repo", merged, {"app": "github-actions", "name": "native-e2e"})
+        result, clock = self.waiting("foreign-merge", [foreign], seconds=60)
+        self.assertEqual(clock.sleeps, [30, 30])
+        outcome = result["integration_checks"]
+        self.assertEqual((outcome["state"], outcome["checks"]), ("pending", [{**TEST, "state": "missing"}]))
+        self.assertIn("finish again", outcome["next"])
+        self.github.add("example/repo", self.trunk(), TEST)
+        self.github.add("example/repo", self.trunk(), TEST, "in_progress", None)
+        result, _ = self.waiting("foreign-merge", seconds=30)
+        self.assertEqual([c["state"] for c in result["integration_checks"]["checks"]], ["in_progress"])
+
+    def test_wait_resumes_on_the_saved_integration_without_pushing_again(self):
+        validations = self.counted("resumed")
+        self.github.add("example/repo", self.accepted("resumed"), TEST)
+        real_integrate = service._integrate
+        def integrate_then_outage(*args, **kwargs):
+            integration = real_integrate(*args, **kwargs)
+            self.github.unavailable = True
+            return integration
+        with patch("workspace_lifecycle.service._integrate", side_effect=integrate_then_outage):
+            result, _ = self.waiting("resumed", seconds=60)
+        merged = self.trunk()
+        self.assertEqual((result["integration_checks"]["state"], result["integration_checks"]["commit"]), ("error", merged))
+        self.assertIn("unavailable", result["integration_checks"]["error"])
+        self.github.unavailable = False
+        before = (validations(self.topic), validations(self.root))
+        with patch("workspace_lifecycle.service._push", wraps=service._push) as pushes:
+            pending, _ = self.waiting("resumed", seconds=30)
+            self.assertEqual(pending["integration_checks"]["state"], "pending")
+            self.github.add("example/repo", merged, TEST)
+            resumed, _ = self.waiting("resumed")
+        self.assertEqual(pushes.call_count, 0)
+        self.assertEqual((validations(self.topic), validations(self.root)), before)
+        self.assertEqual((resumed["integration_checks"]["state"], resumed["integration"]["commit"]), ("success", merged))
+        self.assertEqual(status(self.topic, "resumed")["integrated"]["integration_checks"]["state"], "success")
+
+    def test_wait_stays_on_the_integrated_commit_after_trunk_moves(self):
+        self.ready("overtaken")
+        def overtake():
+            merged = self.trunk()
+            run(self.root, "commit", "-q", "--allow-empty", "-m", "later")
+            run(self.root, "push", "-q", "origin", "trunk")
+            self.github.add("example/repo", self.trunk(), TEST)
+            self.overtaken = merged
+        result, _ = self.waiting("overtaken", [overtake], seconds=30)
+        self.assertEqual((result["integration_checks"]["state"], result["integration_checks"]["commit"]),
+                         ("pending", self.overtaken))
+
+    def test_wait_requires_the_declaration_the_integrated_commit_carries(self):
+        self.start("introduced", required=())
+        self.propose([LINT])
+        self.refused("introduced", "missing")
+        self.github.add("example/repo", self.accepted("introduced"), LINT)
+        result, _ = self.waiting("introduced", seconds=30)
+        self.assertEqual(result["integration_checks"]["checks"], [{**LINT, "state": "missing"}])
+
+    def test_wait_without_any_required_check_reports_undeclared(self):
+        self.start("undeclared", required=())
+        result, clock = self.waiting("undeclared")
+        self.assertEqual((result["integration_checks"]["state"], result["integration_checks"]["checks"]), ("undeclared", []))
+        self.assertEqual((self.github.queries, clock.sleeps), ([], []))
+
+    def test_wait_follows_the_parent_edge_to_the_default_branch(self):
+        import hashlib
+        parent = Path(self.temp.name) / "parent"
+        begin(self.root, task="parent", request="issue/parent", remote="origin", branch="topic/parent",
+              worktree=str(parent), validation=["git", "diff", "--check"], preflight=self.preflight, required_checks=[])
+        begin(self.root, task="child", request="issue/child", remote="origin", branch="topic/child",
+              worktree=str(self.topic), parent="parent", validation=["git", "diff", "--check"],
+              preflight=self.preflight, required_checks=[TEST])
+        (parent / "parent.txt").write_bytes(b"parent\n")
+        parent_plan = Path(self.temp.name) / "plan-parent.json"
+        parent_plan.write_text(json.dumps({"commit": [{
+            "path": "parent.txt", "classification": "source", "owner": "parent",
+            "evidence": "created by this disposable task", "safe_to_commit": True,
+            "sha256": hashlib.sha256(b"parent\n").hexdigest()}]}))
+        finish(parent, task="parent", plan_path=str(parent_plan), result_ref="issue/parent")
+        (self.topic / "child.txt").write_bytes(b"child\n")
+        self.plan = Path(self.temp.name) / "plan-child.json"
+        self.plan.write_text(json.dumps({"commit": [{
+            "path": "child.txt", "classification": "source", "owner": "child",
+            "evidence": "created by this disposable task", "safe_to_commit": True,
+            "sha256": hashlib.sha256(b"child\n").hexdigest()}]}))
+        self.refused("child", "missing")
+        self.github.add("example/repo", self.accepted("child"), TEST)
+        result, _ = self.waiting("child", [lambda: self.github.add("example/repo", self.trunk(), TEST)])
+        outcome = result["integration_checks"]
+        self.assertEqual((outcome["state"], outcome["commit"], outcome["recorded_on"]), ("success", self.trunk(), "parent"))
+        self.assertNotEqual(outcome["commit"], status(self.topic, "child")["integrated"]["commit"])
+        self.assertEqual(status(parent, "parent")["integrated"]["integration_checks"]["commit"], self.trunk())
 
     def test_update_requires_exact_previous_checks_and_no_pending_operation(self):
         self.start("update", required=())

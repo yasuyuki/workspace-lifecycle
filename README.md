@@ -272,6 +272,27 @@ repository changes. Tasks without required checks never query GitHub. Change an
 existing task's requirement with `update-required-checks`, which compares the
 exact current array and records durable evidence; it is refused while an
 operation is pending. Topic HEAD success does not prove the merge result itself.
+With `--wait-checks`, finish therefore waits again, up to SECONDS and by the same
+rules, for the required checks on the exact commit it pushed to the remote
+default branch. When the task integrates through a parent, that is the parent's
+push to the default branch, never the merge into the parent branch. That commit
+requires each task's checks on the way, the checks its accepted commit added,
+and the checks its own `.github/required-checks.json` declares, so a later
+declaration on the default branch counts and nothing is weakened. Runs on the
+accepted commit, on a later default-branch commit, of another app or of another
+name do not count. The result is `integration_checks` in the finish JSON and in
+the integration record of that edge (`recorded_on` names its task): the
+destination, full commit SHA, repository, each check's state, run ID and URL,
+and `state`. `success` and `undeclared` (nothing is declared, so nothing is
+claimed) let finish continue to `--users-released` retirement. `failed` (at the
+first failed check), `pending` (SECONDS ran out) and `error` (status
+unavailable) exit 1 with `"ok": false` and a `next` action; `--users-released`
+saves no retirement request, so `retire --pending` leaves the task. The
+integration stays recorded and is not repeated: run the same finish
+again to wait or to record a rerun check, and fix a failure in a new task or
+revert the merge. The wait holds no lifecycle lock or lease; the result is
+recorded only if that integration record is unchanged. Without the option
+finish does not look at the integrated commit.
 Repositories without a declaration behave as before, except that begin, adoption and finish fetch the remote default
 branch to look for one.
 
@@ -549,6 +570,12 @@ earlier versions lack the recorded finish inputs and are accepted once more.
 
 Version 0.8.5 adds `finish --wait-checks`, which waits for the accepted
 commit's required checks and stops at the first failed one.
+
+Version 0.8.6 makes `finish --wait-checks` also wait for the required checks
+on the commit it pushed to the remote default branch and report them as
+`integration_checks`, separately from the integration. A failed, unfinished or
+unavailable result exits 1 without retiring; repeating the finish only checks
+again.
 
 Version 0.8.4 makes `finish --users-released` started inside its task worktree
 return the retirement request with `retirement.next`, the exact `retire`

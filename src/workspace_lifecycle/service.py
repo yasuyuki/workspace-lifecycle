@@ -770,6 +770,9 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                                      or not revision_head or any(c not in '0123456789abcdef' for c in revision_head)):
         raise LifecycleError('HEAD revision requires a full commit OID and durable evidence')
     plan_digest = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+    # A saved release lets retire --pending retire the task, so with a check
+    # wait it is saved only once the integrated commit's checks allow it.
+    release_now = users_released and wait_checks is None
     with _lease(repo, task_id, allow_use=True):
         with locked_state(repo) as (directory, state):
             task = _task(state, task_id); branch = branch_for_task(repo, task_id)
@@ -849,11 +852,9 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 if reclaim_evidence is not None:
                     task['preservation_evidence'] = _bind_preservation_evidence(
                         task.get('preservation_evidence'), reclaim_evidence)
-                if users_released:
-                    task['completion_release'] = {'result_ref': result_ref}
-                    if task.get('owner_receipts'):
-                        task['owner_release'] = {'result_ref': result_ref, 'commit': commit}
-                if reclaim_evidence is not None or users_released:
+                if release_now:
+                    _release_users(task, result_ref, commit)
+                if reclaim_evidence is not None or release_now:
                     save_state(directory, state)
             else:
                 if intent and (intent['plan_digest'] != plan_digest or intent['result_ref'] != result_ref):
@@ -989,17 +990,24 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 if reclaim_evidence is not None:
                     task['preservation_evidence'] = _bind_preservation_evidence(
                         task.get('preservation_evidence'), reclaim_evidence)
-                if users_released:
+                if release_now:
                     # Save acceptance and last-user release together. A crash
                     # before the callback must not lose the pending request.
-                    task['completion_release'] = {'result_ref': result_ref}
-                    if task.get('owner_receipts'):
-                        task['owner_release'] = {'result_ref': result_ref, 'commit': commit}
+                    _release_users(task, result_ref, commit)
                 state['intents'].pop(task_id, None); save_state(directory, state)
     if wait_checks is not None:
         _await_checks(repo, task_id, wait_checks)
     integration = _integrate(repo, task_id, result_ref)
     result = {'task': task_id, 'accepted': True, 'commit': commit, 'result_ref': result_ref, 'integration': integration}
+    if wait_checks is not None:
+        # Retirement waits for the integrated commit's checks, so a failure
+        # still has its task checkout for a fix or revert.
+        result['integration_checks'] = _await_integration_checks(repo, task_id, wait_checks)
+        if result['integration_checks']['state'] not in ('success', 'undeclared'):
+            return result
+        if users_released:
+            with locked_state(repo) as (directory, state):
+                _release_users(_task(state, task_id), result_ref, commit); save_state(directory, state)
     if users_released:
         from .producers import retry as release_producers
         released = release_producers(repo, task_id)
@@ -1029,6 +1037,12 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
             if result['retirement'].get('reclaim', {}).get('error'):
                 result['retirement']['next'] = resume
     return result
+
+
+def _release_users(task, result_ref, commit):
+    task['completion_release'] = {'result_ref': result_ref}
+    if task.get('owner_receipts'):
+        task['owner_release'] = {'result_ref': result_ref, 'commit': commit}
 
 
 def _remote_tip(repo, remote, branch):
@@ -1229,6 +1243,60 @@ def _await_checks(repo: Path, task_id: str, seconds: float) -> None:
     gated_checks = required_checks + (proposed['added'] if proposed else [])
     if gated_checks:
         checks.wait(checks.repository(repo, remote), gated, gated_checks, seconds)
+
+
+_INTEGRATION_CHECKS_NEXT = {
+    'pending': 'the integration is kept; run the same finish again to keep waiting',
+    'failed': 'the integration is kept; rerun the failed check, or fix it in a new task or revert the merge, '
+              'then run the same finish again to record the result',
+    'error': 'the integration is kept; run the same finish again once check status is available',
+}
+
+
+def _await_integration_checks(repo: Path, task_id: str, seconds: float) -> dict:
+    """Wait for the required checks on the commit the integration pushed to the
+    remote default branch, holding no lease or lock.
+
+    The edge to the default branch may be a parent's. That commit requires every
+    check of each task on the way plus what it declares itself. The result is
+    saved beside that edge's integration record and never undoes it.
+    """
+    with locked_state(repo) as (_, state):
+        owner = task_id; item = _task(state, owner); required = []; source = None
+        while True:
+            record = item.get('integrated') or {}
+            if not item.get('acceptance') or record.get('source') != item['acceptance']['commit']:
+                raise LifecycleError('integration of ' + owner + ' is not recorded for its accepted commit')
+            if source and git(repo, 'merge-base', '--is-ancestor', source, record['commit'], optional=True) is None:
+                raise LifecycleError('integration of ' + owner + ' does not contain ' + source)
+            required += item.get('required_checks', []) + (record.get('source_checks_policy') or {}).get('added', [])
+            if item['integration']['kind'] != 'task':
+                break
+            source = record['commit']; owner = item['integration']['task']; item = _task(state, owner)
+        merged = record['commit']; remote = item['remote']
+    receipt = {'destination': record['destination'], 'commit': merged}
+    try:
+        required += checks.declared(repo, merged)['checks']
+        required = [dict(pair) for pair in dict.fromkeys(tuple(c.items()) for c in required)]
+        if required:
+            receipt['repository'] = checks.repository(repo, remote)
+            receipt['state'], receipt['checks'] = checks.watch(receipt['repository'], merged, required, seconds)
+        else:
+            receipt.update(state='undeclared', checks=[])
+    except LifecycleError as exc:
+        receipt.update(state='error', error=str(exc), checks=[{**check, 'state': 'error'} for check in required])
+    if receipt['state'] in _INTEGRATION_CHECKS_NEXT:
+        receipt['next'] = _INTEGRATION_CHECKS_NEXT[receipt['state']]
+    receipt['at'] = _now()
+    with locked_state(repo) as (directory, state):
+        record = (state['tasks'].get(owner) or {}).get('integrated') or {}
+        if record.get('commit') == merged and record.get('destination') == receipt['destination']:
+            record['integration_checks'] = receipt; save_state(directory, state)
+            receipt = {**receipt, 'recorded_on': owner}
+        else:
+            receipt = {**receipt, 'recorded_on': None,
+                       'unrecorded': 'the integration record of ' + owner + ' changed during the wait'}
+    return receipt
 
 
 def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
