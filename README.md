@@ -278,9 +278,11 @@ default branch. When the task integrates through a parent, that is the parent's
 push to the default branch, never the merge into the parent branch. That commit
 requires each task's checks on the way, the checks its accepted commit added,
 and the checks its own `.github/required-checks.json` declares, so a later
-declaration on the default branch counts and nothing is weakened. Runs on the
-accepted commit, on a later default-branch commit, of another app or of another
-name do not count. The result is `integration_checks` in the finish JSON and in
+declaration on the default branch counts and nothing is weakened. Only runs
+pushed to the default branch count, so when integration fast-forwarded the
+default branch to the accepted commit, that commit's runs from the task branch
+do not. Runs on a later default-branch commit, of another app or of another
+name do not count either. The result is `integration_checks` in the finish JSON and in
 the integration record of that edge (`recorded_on` names its task): the
 destination, full commit SHA, repository, each check's state, run ID and URL,
 and `state`. `success` and `undeclared` (nothing is declared, so nothing is
@@ -301,10 +303,16 @@ on that exact HEAD, runs the configured push preflight, and verifies the remote
 tip. A failed validation keeps the local commit and completed actions in the
 pending intent and pushes nothing. Retry the same plan after correcting the
 validator, or revise the plan to commit a fix on top. It then
-follows the declared parent or remote-default integration edge using the normal
-Git `merge --no-ff --no-commit` contract, commits the merge, validates that
-exact commit, pushes and records the result. A failed validation leaves the
-unpushed merge commit and its pending intent in the target; finish of the same
+follows the declared parent or remote-default integration edge. When the
+target HEAD, after synchronizing with its remote, is an ancestor of the accepted
+commit, Git `merge --ff-only` moves the target to that commit and the integrated
+commit is the accepted commit itself. Otherwise the normal Git
+`merge --no-ff --no-commit` contract makes a merge commit. Finish validates the
+resulting commit in the target checkout, pushes and records the result. A
+fast-forward still validates in the target, which is another checkout and so
+another validation input, and the default branch still runs its own push CI on
+that commit. A failed validation leaves the
+unpushed integration and its pending intent in the target; finish of the same
 task resumes it. Meanwhile, no other task integrates into that target and the task
 owning a target branch cannot finish.
 Validator output is refused by the dirty check that follows validation. A hold, dependency failure, changed accepted HEAD, dirty target, conflict,
@@ -576,6 +584,11 @@ on the commit it pushed to the remote default branch and report them as
 `integration_checks`, separately from the integration. A failed, unfinished or
 unavailable result exits 1 without retiring; repeating the finish only checks
 again.
+
+Version 0.8.7 fast-forwards an integration target that has not moved past the
+accepted commit instead of making a merge commit with the same tree, so the
+default branch carries the accepted commit's SHA. `integration_checks` counts
+only runs pushed to the default branch.
 
 Version 0.8.4 makes `finish --users-released` started inside its task worktree
 return the retirement request with `retirement.next`, the exact `retire`

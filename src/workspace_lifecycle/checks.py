@@ -4,7 +4,8 @@ The repository owns which checks exist and may declare the ones every task
 needs in a tracked file on its remote default branch. A task requires at least
 that declared set. Only the latest GitHub check run of each required app and
 name on the exact commit counts, and only ``completed`` with conclusion
-``success`` passes. Any other completed conclusion is a failure; a missing or
+``success`` passes. Checks on a branch's commit count only runs pushed to that
+branch, since the same commit may also carry runs from another branch. Any other completed conclusion is a failure; a missing or
 unfinished check is pending.
 """
 from __future__ import annotations
@@ -120,7 +121,22 @@ def _runs(repository: str, commit: str, name: str) -> list[dict]:
     argv = ['gh', 'api', '--hostname', 'github.com', '--paginate', '-X', 'GET',
             f'repos/{repository}/commits/{commit}/check-runs',
             '-f', 'check_name=' + name, '-f', 'filter=all', '-f', 'per_page=100',
-            '--jq', '.check_runs[] | {id, name, head_sha, status, conclusion, html_url, app: .app.slug}']
+            '--jq', '.check_runs[] | {id, name, head_sha, status, conclusion, html_url, app: .app.slug, suite: .check_suite.id}']
+    return _api(argv)
+
+
+def _suites(repository: str, commit: str) -> dict[int, str | None]:
+    """The branch each check suite on ``commit`` was created for."""
+    argv = ['gh', 'api', '--hostname', 'github.com', '--paginate', '-X', 'GET',
+            f'repos/{repository}/commits/{commit}/check-suites', '-f', 'per_page=100',
+            '--jq', '.check_suites[] | {id, head_branch, head_sha}']
+    suites = _api(argv)
+    if any(suite.get('head_sha') != commit or not isinstance(suite.get('id'), int) for suite in suites):
+        raise LifecycleError('required check response is not bound to the requested commit')
+    return {suite['id']: suite.get('head_branch') for suite in suites}
+
+
+def _api(argv: list[str]) -> list[dict]:
     try:
         result = subprocess.run(argv, text=True, capture_output=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -133,13 +149,15 @@ def _runs(repository: str, commit: str, name: str) -> list[dict]:
         raise LifecycleError('required check status unavailable: unreadable response')
 
 
-def _states(repository: str, commit: str, required: list[dict]) -> list[dict]:
-    results = []
+def _states(repository: str, commit: str, required: list[dict], branch: str | None = None) -> list[dict]:
+    results = []; suites = _suites(repository, commit) if branch else None
     for check in required:
         runs = [run for run in _runs(repository, commit, check['name'])
                 if run.get('app') == check['app'] and run.get('name') == check['name']]
         if any(run.get('head_sha') != commit or not isinstance(run.get('id'), int) for run in runs):
             raise LifecycleError('required check response is not bound to the requested commit')
+        if branch:
+            runs = [run for run in runs if suites.get(run.get('suite')) == branch]
         latest = max(runs, key=lambda run: run['id'], default=None)
         state = ('missing' if latest is None else
                  latest.get('status') if latest.get('status') != 'completed' else
@@ -160,12 +178,14 @@ def verify(repository: str, commit: str, required: list[dict]) -> dict:
     return {'repository': repository, 'commit': commit, 'checks': results}
 
 
-def watch(repository: str, commit: str, required: list[dict], seconds: float) -> tuple[str, list[dict]]:
-    """Poll the checks on ``commit``: ``success`` once every one succeeded,
-    ``failed`` at the first failed one, or ``pending`` when ``seconds`` run out."""
+def watch(repository: str, commit: str, required: list[dict], seconds: float,
+          branch: str | None = None) -> tuple[str, list[dict]]:
+    """Poll the checks on ``commit``, from runs on ``branch`` when given:
+    ``success`` once every one succeeded, ``failed`` at the first failed one,
+    or ``pending`` when ``seconds`` run out."""
     deadline = time.monotonic() + seconds; reported = None
     while True:
-        results = _states(repository, commit, required)
+        results = _states(repository, commit, required, branch)
         if any(entry['state'] not in PENDING | {'success'} for entry in results):
             return 'failed', results
         unmet = [entry for entry in results if entry['state'] != 'success']

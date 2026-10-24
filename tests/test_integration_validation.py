@@ -346,11 +346,14 @@ class IntegrationValidationTest(unittest.TestCase):
 
     def test_remote_advance_during_merge_validates_synchronized_result(self):
         self.begin_candidate()
+        self.remote_commit('early', 'early\n')
         raced = []
         native = service._index_protection
 
         def advance(repo):
-            if Path(repo) == self.root and not raced:
+            merge_head = self.root / '.git' / 'MERGE_HEAD'
+            merging = merge_head.read_text().strip() if merge_head.exists() else None
+            if Path(repo) == self.root and merging == self.source and not raced:
                 raced.append(self.remote_commit())
             return native(repo)
 
@@ -367,7 +370,7 @@ class IntegrationValidationTest(unittest.TestCase):
                               "['git', 'log', '-1', '--format=%s'], text=True); "
                               "sys.exit(subject.startswith('Merge workspace task'))"]
         self.begin_candidate()
-        base = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        base = self.remote_commit()
         for _ in range(2):
             with self.assertRaisesRegex(LifecycleError, 'configured validation failed'):
                 self.finish()
@@ -389,11 +392,9 @@ class IntegrationValidationTest(unittest.TestCase):
         self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), base)
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), merged)
 
-    def test_parent_finish_refuses_a_rejected_child_merge_commit(self):
+    def test_parent_finish_refuses_a_rejected_child_integration(self):
         self.validation[:] = [sys.executable, '-c',
-                              "import subprocess, sys; subject = subprocess.check_output("
-                              "['git', 'log', '-1', '--format=%s'], text=True); "
-                              "sys.exit(subject.startswith('Merge workspace task'))"]
+                              "import os, sys; sys.exit(os.path.basename(os.getcwd()) == 'parent')"]
         self.begin_parent()
         accepted = git(self.remote, 'rev-parse', 'refs/heads/topic/parent')
         trunk = git(self.remote, 'rev-parse', 'refs/heads/trunk')
@@ -401,6 +402,7 @@ class IntegrationValidationTest(unittest.TestCase):
             self.finish()
         merged = service.status(self.topic, 'candidate')['intent']['merged']
         self.assertEqual(git(self.parent, 'rev-parse', 'HEAD'), merged)
+        self.assertEqual(merged, self.source, 'the parent fast-forwarded and still validated its own checkout')
         with self.assertRaisesRegex(LifecycleError, 'pending integration of candidate'):
             service.finish(self.parent, task='parent', plan_path=str(self.plan), result_ref='result/parent2')
         self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/topic/parent'), accepted)
@@ -413,12 +415,91 @@ class IntegrationValidationTest(unittest.TestCase):
                               "import subprocess, sys; open(sys.argv[1], 'a').write(subprocess.check_output("
                               "['git', 'rev-list', '--parents', '-1', 'HEAD'], text=True))", str(observed)]
         self.begin_candidate()
-        base = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        base = self.remote_commit()
         result = self.finish()
         merged = result['integration']['commit']
         self.assertEqual(observed.read_text().splitlines()[-1].split(), [merged, base, self.source])
         self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), merged)
         self.assertNotIn('reused', service.status(self.topic, 'candidate')['integrated']['validation'])
+
+    def test_unmoved_target_fast_forwards_to_the_accepted_commit(self):
+        self.begin_candidate()
+        base = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        with patch.object(service, '_push', wraps=service._push) as pushes:
+            result, runs = self.counted_finish()
+        self.assertEqual(result['integration']['commit'], self.source)
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), self.source)
+        self.assertEqual(git(self.remote, 'rev-list', '--merges', '--count', base + '..trunk'), '0')
+        self.assertEqual(runs, [self.topic, self.root], 'the target checkout is a different validation input')
+        self.assertEqual([Path(call.args[0]) for call in pushes.call_args_list], [self.topic, self.root])
+        integrated = service.status(self.topic, 'candidate')['integrated']
+        self.assertEqual((integrated['commit'], integrated['source'], integrated['destination']),
+                         (self.source, self.source, 'trunk'))
+        with patch.object(service, '_push', side_effect=AssertionError('pushed')):
+            again, runs = self.counted_finish()
+        self.assertEqual((again['integration']['commit'], runs), (self.source, []))
+
+    def test_fast_forward_validation_reads_the_target_checkout(self):
+        self.validation[:] = [sys.executable, '-c', "import os, sys; sys.exit(os.path.basename(os.getcwd()) == 'root')"]
+        self.begin_candidate()
+        base = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        with self.assertRaisesRegex(LifecycleError, 'configured validation failed'):
+            self.finish()
+        state = service.status(self.topic, 'candidate')
+        self.assertEqual((state['intent']['merged'], git(self.root, 'rev-parse', 'HEAD')), (self.source, self.source))
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), base)
+        self.assertNotIn('integrated', state)
+
+    def test_fast_forward_refuses_hidden_target_changes(self):
+        self.begin_candidate()
+        base = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        git(self.root, 'update-index', '--skip-worktree', 'base')
+        (self.root / 'base').write_text('hidden local change\n')
+        with self.assertRaisesRegex(LifecycleError, 'skip-worktree'):
+            self.finish()
+        self.assertEqual((git(self.root, 'rev-parse', 'HEAD'), git(self.remote, 'rev-parse', 'refs/heads/trunk')),
+                         (base, base))
+        self.assertEqual((self.root / 'base').read_text(), 'hidden local change\n')
+
+    def test_interrupted_fast_forward_resumes_without_a_merge_commit(self):
+        self.begin_candidate()
+        native = service.git
+
+        def interrupted(repo, *args, **kwargs):
+            output = native(repo, *args, **kwargs)
+            if '--ff-only' in args and Path(repo) == self.root:
+                raise LifecycleError('interrupted after the fast-forward')
+            return output
+
+        with patch.object(service, 'git', side_effect=interrupted):
+            with self.assertRaisesRegex(LifecycleError, 'interrupted after the fast-forward'):
+                self.finish()
+        state = service.status(self.topic, 'candidate')
+        self.assertNotIn('merged', state['intent'])
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), self.source)
+        result, runs = self.counted_finish()
+        self.assertEqual(result['integration']['commit'], self.source)
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), self.source)
+        self.assertEqual(runs, [self.root])
+
+    def test_remote_advance_during_fast_forward_merges_without_force(self):
+        self.begin_candidate()
+        native = service.git
+        raced = []
+
+        def advance(repo, *args, **kwargs):
+            output = native(repo, *args, **kwargs)
+            if '--ff-only' in args and not raced:
+                raced.append(self.remote_commit())
+            return output
+
+        with patch.object(service, 'git', side_effect=advance):
+            result, runs = self.counted_finish()
+        merged = result['integration']['commit']
+        self.assertEqual(sorted(git(self.root, 'rev-list', '--parents', '-1', merged).split()[1:]),
+                         sorted([self.source, raced[0]]))
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), merged)
+        self.assertEqual(runs, [self.topic, self.root, self.root])
 
     def test_legacy_failed_fast_forward_resumes_original_source_plan_and_result(self):
         self.begin_candidate(dirty=True)

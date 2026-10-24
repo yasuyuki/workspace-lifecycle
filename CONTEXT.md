@@ -57,5 +57,5 @@ _Avoid_: 実行中の workflow
 _Avoid_: run 全体の失敗
 
 **Integration check state**:
-統合が remote default branch へ push した commit そのものについての、required check の状態。parent task への統合 commit は対象にしない。受入 commit の required check state とは別の事実であり、失敗しても統合済みという事実は変わらない。required check が一つも宣言されていなければ undeclared であり、成功ではない。
+統合が remote default branch へ push した commit そのものについての、required check の状態。その branch への push で作られた check run だけが示す。fast-forward で受入 commit がそのまま統合 commit になっても、task branch への push で作られた run は含まない。parent task への統合 commit は対象にしない。受入 commit の required check state とは別の事実であり、失敗しても統合済みという事実は変わらない。required check が一つも宣言されていなければ undeclared であり、成功ではない。
 _Avoid_: main の CI 結果、統合の成否、受入 commit の check

@@ -24,23 +24,39 @@ LINT = {"app": "github-actions", "name": "lint"}
 
 
 class FakeGitHub:
-    """Check runs by (repository, commit, name), as GitHub would list them."""
+    """Check runs by (repository, commit, name), as GitHub would list them.
 
-    def __init__(self):
-        self.runs = {}; self.queries = []; self.unavailable = False
+    A run belongs to the check suite of the branch whose push created it: trunk
+    when the commit is trunk's tip as the run is added, else the topic.
+    """
 
-    def add(self, repository, commit, check, status="completed", conclusion="success", app=None, url=None):
+    def __init__(self, trunk):
+        self.runs = {}; self.queries = []; self.suite_queries = []; self.unavailable = False; self.trunk = trunk
+
+    def add(self, repository, commit, check, status="completed", conclusion="success", app=None, url=None,
+            branch=None):
+        branch = branch or ("trunk" if commit == self.trunk() else "topic")
         rows = self.runs.setdefault((repository, commit, check["name"]), [])
         rows.append({"id": 1000 + sum(map(len, self.runs.values())), "name": check["name"],
                      "head_sha": commit, "status": status,
                      "conclusion": conclusion if status == "completed" else None,
-                     "app": app or check["app"], "html_url": url})
+                     "app": app or check["app"], "html_url": url, "suite": self.suite(branch)})
+
+    @staticmethod
+    def suite(branch):
+        return 1 + sum(map(ord, branch))
 
     def __call__(self, repository, commit, name):
         self.queries.append((repository, commit, name))
         if self.unavailable:
             raise LifecycleError("required check status unavailable: HTTP 502")
         return list(self.runs.get((repository, commit, name), []))
+
+    def suites(self, repository, commit):
+        self.suite_queries.append((repository, commit))
+        if self.unavailable:
+            raise LifecycleError("required check status unavailable: HTTP 502")
+        return {self.suite(branch): branch for branch in ("trunk", "topic")}
 
 
 class FakeClock:
@@ -67,7 +83,7 @@ class RequiredChecksTest(unittest.TestCase):
         (self.root / "README").write_text("base\n")
         run(self.root, "add", "README"); run(self.root, "commit", "-m", "base"); run(self.root, "push", "origin", "trunk")
         self.preflight = [sys.executable, "-m", "workspace_lifecycle.push", "{repo}", "--user-intent", "push"]
-        self.github = FakeGitHub()
+        self.github = FakeGitHub(lambda: self.trunk())
         self.names = {str(self.remote): "example/repo"}
         real_git = checks.git
         self.real_repository = checks.repository
@@ -79,6 +95,7 @@ class RequiredChecksTest(unittest.TestCase):
             return self.names[url]
 
         for target, value in (("workspace_lifecycle.checks._runs", self.github),
+                              ("workspace_lifecycle.checks._suites", self.github.suites),
                               ("workspace_lifecycle.checks.repository", repository)):
             patcher = patch(target, value); patcher.start(); self.addCleanup(patcher.stop)
 
@@ -229,7 +246,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertEqual(status(self.topic, "resume")["acceptance"], accepted)
         self.assertEqual(validations(self.root.resolve()), 1)
         self.assertEqual(result["integration"]["commit"], self.trunk())
-        self.assertEqual(run(self.root, "rev-parse", "HEAD^2"), commit)
+        self.assertEqual(self.trunk(), commit, "unmoved trunk fast-forwards to the accepted commit")
 
     def waiting(self, task, steps=(), seconds=600):
         clock = FakeClock(steps)
@@ -267,7 +284,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertEqual(result["integration_checks"]["state"], "success")
         self.assertEqual((self.root / "feature.txt").read_text(), "wait\n")
         self.assertEqual(clock.sleeps, [30, 30, 30, 30, 30])
-        self.assertEqual(run(self.root, "rev-parse", "HEAD^2"), commit())
+        self.assertEqual(self.trunk(), commit())
 
     def test_wait_stops_at_the_first_failed_check(self):
         self.start("fail", required=(TEST, LINT))
@@ -529,7 +546,7 @@ class RequiredChecksTest(unittest.TestCase):
         result = self.finish("unwaited")
         self.assertNotIn("integration_checks", result)
         self.assertNotIn("integration_checks", status(self.topic, "unwaited")["integrated"])
-        self.assertNotIn(self.trunk(), [query[1] for query in self.github.queries])
+        self.assertEqual(self.github.suite_queries, [], "only the integrated commit's checks are bound to trunk")
 
     def test_wait_holds_until_the_integrated_commit_succeeds(self):
         self.ready("merged", required=(TEST, LINT))
@@ -551,7 +568,7 @@ class RequiredChecksTest(unittest.TestCase):
         integrated = status(self.topic, "merged")["integrated"]
         self.assertEqual(integrated["integration_checks"], {k: v for k, v in outcome.items() if k != "recorded_on"})
         self.assertEqual(integrated["remote_checks"]["commit"], self.accepted("merged"))
-        self.assertNotEqual(self.accepted("merged"), merged)
+        self.assertEqual(self.accepted("merged"), merged, "the topic's success on the same commit does not count")
 
     def test_a_failed_integrated_check_keeps_the_integration_and_the_task(self):
         from workspace_lifecycle.cli import main
@@ -596,7 +613,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.ready("foreign-merge")
         def foreign():
             merged = self.trunk()
-            self.github.add("example/repo", self.accepted("foreign-merge"), TEST)
+            self.github.add("example/repo", self.accepted("foreign-merge"), TEST, branch="topic")
             self.github.add("example/repo", merged, TEST, app="other-app")
             self.github.add("example/repo", merged, {"app": "github-actions", "name": "native-e2e"})
         result, clock = self.waiting("foreign-merge", [foreign], seconds=60)
@@ -608,6 +625,19 @@ class RequiredChecksTest(unittest.TestCase):
         self.github.add("example/repo", self.trunk(), TEST, "in_progress", None)
         result, _ = self.waiting("foreign-merge", seconds=30)
         self.assertEqual([c["state"] for c in result["integration_checks"]["checks"]], ["in_progress"])
+
+    def test_wait_on_an_advanced_trunk_requires_the_merge_commit_checks(self):
+        self.ready("advanced")
+        run(self.root, "commit", "-q", "--allow-empty", "-m", "later")
+        run(self.root, "push", "-q", "origin", "trunk")
+        later = self.trunk()
+        self.github.add("example/repo", later, TEST)
+        result, clock = self.waiting("advanced", [lambda: self.github.add("example/repo", self.trunk(), TEST)])
+        merged = self.trunk()
+        self.assertEqual(run(self.root, "rev-list", "--parents", "-1", merged).split()[1:],
+                         [later, self.accepted("advanced")])
+        self.assertEqual((result["integration_checks"]["state"], result["integration_checks"]["commit"]), ("success", merged))
+        self.assertEqual(clock.sleeps, [30], "neither the accepted nor the previous trunk commit's success counts")
 
     def test_wait_resumes_on_the_saved_integration_without_pushing_again(self):
         validations = self.counted("resumed")
@@ -686,7 +716,8 @@ class RequiredChecksTest(unittest.TestCase):
         result, _ = self.waiting("child", [lambda: self.github.add("example/repo", self.trunk(), TEST)])
         outcome = result["integration_checks"]
         self.assertEqual((outcome["state"], outcome["commit"], outcome["recorded_on"]), ("success", self.trunk(), "parent"))
-        self.assertNotEqual(outcome["commit"], status(self.topic, "child")["integrated"]["commit"])
+        self.assertEqual(outcome["commit"], status(self.topic, "child")["integrated"]["commit"],
+                         "trunk fast-forwards to the parent's merge of the child")
         self.assertEqual(status(parent, "parent")["integrated"]["integration_checks"]["commit"], self.trunk())
 
     def test_update_requires_exact_previous_checks_and_no_pending_operation(self):
@@ -978,6 +1009,26 @@ class RepositoryIdentityTest(unittest.TestCase):
         with patch("workspace_lifecycle.checks.subprocess.run", side_effect=FileNotFoundError("gh")), \
                 self.assertRaisesRegex(LifecycleError, "unavailable"):
             checks._runs("example/repo", "a" * 40, "test")
+
+    def test_branch_runs_come_only_from_that_branch_suites(self):
+        commit = "a" * 40
+        runs = [{"id": 1, "name": "test", "head_sha": commit, "status": "completed", "conclusion": "success",
+                 "app": "github-actions", "suite": 10},
+                {"id": 2, "name": "test", "head_sha": commit, "status": "in_progress", "conclusion": None,
+                 "app": "github-actions", "suite": 20}]
+        responses = {"check-runs": runs, "check-suites": [{"id": 10, "head_branch": "topic", "head_sha": commit},
+                                                          {"id": 20, "head_branch": "main", "head_sha": commit}]}
+
+        def api(argv):
+            return responses[argv[argv.index("GET") + 1].rsplit("/", 1)[1]]
+
+        check = [{"app": "github-actions", "name": "test"}]
+        with patch("workspace_lifecycle.checks._api", side_effect=api):
+            self.assertEqual(checks._states("example/repo", commit, check, "main")[0]["state"], "in_progress")
+            self.assertEqual(checks._states("example/repo", commit, check, "release")[0]["state"], "missing")
+            responses["check-suites"][1]["head_sha"] = "b" * 40
+            with self.assertRaisesRegex(LifecycleError, "not bound to the requested commit"):
+                checks._states("example/repo", commit, check, "main")
 
 
 if __name__ == "__main__":

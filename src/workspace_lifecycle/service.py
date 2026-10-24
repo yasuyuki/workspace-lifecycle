@@ -1280,7 +1280,8 @@ def _await_integration_checks(repo: Path, task_id: str, seconds: float) -> dict:
         required = [dict(pair) for pair in dict.fromkeys(tuple(c.items()) for c in required)]
         if required:
             receipt['repository'] = checks.repository(repo, remote)
-            receipt['state'], receipt['checks'] = checks.watch(receipt['repository'], merged, required, seconds)
+            receipt['state'], receipt['checks'] = checks.watch(receipt['repository'], merged, required, seconds,
+                                                               branch=record['destination'])
         else:
             receipt.update(state='undeclared', checks=[])
     except LifecycleError as exc:
@@ -1422,7 +1423,9 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                     pass
                 elif current != intent['target_head']:
                     parents = (git(target_worktree, 'rev-list', '--parents', '-n', '1', 'HEAD') or '').split()[1:]
-                    if merge_head or parents != [intent['target_head'], source_commit]:
+                    fast_forwarded = current == source_commit and git(
+                        repo, 'merge-base', '--is-ancestor', intent['target_head'], source_commit, optional=True) is not None
+                    if merge_head or not (fast_forwarded or parents == [intent['target_head'], source_commit]):
                         raise LifecycleError('target moved outside the recorded normal merge')
                     intent['merged'] = current; save_state(directory, state)
                 elif not merge_head:
@@ -1430,6 +1433,14 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                         raise LifecycleError('pending target has unrelated dirty content')
                     if git(repo, 'merge-base', '--is-ancestor', source_commit, current, optional=True) is not None:
                         intent['merged'] = current
+                    elif git(repo, 'merge-base', '--is-ancestor', current, source_commit, optional=True) is not None:
+                        # The target has not moved past the accepted commit, so
+                        # that commit is the integration and keeps its SHA.
+                        _index_protection(target_worktree)
+                        git(target_worktree, 'merge', '--ff-only', source_commit)
+                        if head(target_worktree) != source_commit:
+                            raise LifecycleError('fast-forward did not reach the accepted commit')
+                        intent['merged'] = source_commit; save_state(directory, state)
                     else:
                         git(target_worktree, 'merge', '--no-ff', '--no-commit', source_commit)
                         merge_head = git(target_worktree, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True)
