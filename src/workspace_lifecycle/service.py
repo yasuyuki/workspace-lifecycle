@@ -995,9 +995,24 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     # before the callback must not lose the pending request.
                     _release_users(task, result_ref, commit)
                 state['intents'].pop(task_id, None); save_state(directory, state)
-    if wait_checks is not None:
-        _await_checks(repo, task_id, wait_checks)
-    integration = _integrate(repo, task_id, result_ref)
+    if wait_checks is None:
+        integration = _integrate(repo, task_id, result_ref)
+    else:
+        # Integrate and validate in the target while the accepted commit's
+        # checks run; push only once they succeed, otherwise undo the target.
+        integration = _integrate(repo, task_id, result_ref, prepare=True)
+        prepared = integration.get('prepared')
+        if prepared:
+            try:
+                _await_checks(repo, task_id, wait_checks)
+                integration = _integrate(repo, task_id, result_ref, reuse=prepared)
+            except BaseException as exc:
+                try:
+                    _withdraw_prepared(repo, task_id)
+                except LifecycleError as undo:
+                    raise LifecycleError(str(exc) + '; the prepared integration stays in its target: ' + str(undo),
+                                         getattr(exc, 'recovery', None)) from exc
+                raise
     result = {'task': task_id, 'accepted': True, 'commit': commit, 'result_ref': result_ref, 'integration': integration}
     if wait_checks is not None:
         # Retirement waits for the integrated commit's checks, so a failure
@@ -1231,15 +1246,20 @@ def _await_checks(repo: Path, task_id: str, seconds: float) -> None:
     """Wait for the checks the next integration gates on, holding no lease or lock.
 
     The integration that follows takes its leases and decides again from the
-    state and remote it then reads; this wait only spares a refusal.
+    state and remote it then reads; this wait only spares a refusal. An
+    integration prepared ahead of its checks keeps the policy it recorded.
     """
     with locked_state(repo) as (_, state):
         item = _task(state, task_id)
         gated = item['acceptance']['commit']; remote = item['remote']
         required_checks = item.get('required_checks', [])
-        if state['intents'].get(task_id) or (item.get('integrated') or {}).get('source') == gated:
+        intent = state['intents'].get(task_id)
+        if (intent and intent.get('remote_checks')) or (item.get('integrated') or {}).get('source') == gated:
             return
-    _, proposed = _check_policy(repo, remote, gated, required_checks)
+    if intent:
+        proposed = intent.get('source_checks_policy')
+    else:
+        _, proposed = _check_policy(repo, remote, gated, required_checks)
     gated_checks = required_checks + (proposed['added'] if proposed else [])
     if gated_checks:
         checks.wait(checks.repository(repo, remote), gated, gated_checks, seconds)
@@ -1300,15 +1320,70 @@ def _await_integration_checks(repo: Path, task_id: str, seconds: float) -> dict:
     return receipt
 
 
-def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
-    """Resume only the declared, accepted edge, then follow its parent to default."""
+@contextmanager
+def _edge_leases(repo: Path, task_id: str):
+    """Hold the task and its integration target; yield the declared direction."""
     with locked_state(repo) as (_, state):
-        item = _task(state, task_id)
-        direction = item['integration']
-        target_guard = direction['task'] if direction['kind'] == 'task' else '@default'
+        direction = _task(state, task_id)['integration']
+    target_guard = direction['task'] if direction['kind'] == 'task' else '@default'
     with ExitStack() as stack:
         for identity in sorted({task_id, target_guard}):
             stack.enter_context(_lease(repo, identity, allow_use=identity == task_id))
+        yield direction
+
+
+def _withdraw(repo: Path, task_id: str, state: dict, directory) -> None:
+    """Return the target to its HEAD before an integration prepared ahead of
+    its required checks; the caller holds the edge leases and the state lock.
+
+    Such an integration is never pushed before its checks are recorded, so
+    only the unpushed fast-forward or merge commit it recorded is undone. A
+    merge still in progress may hold a resolution made by hand and is kept.
+    """
+    intent = state['intents'].get(task_id)
+    if not intent or not intent.get('deferred') or intent.get('remote_checks'):
+        return
+    if intent.get('synchronization'):
+        raise LifecycleError('a prepared integration that synchronized its target cannot be withdrawn; '
+                             'resolve it in the target before integrating again')
+    item = _task(state, task_id)
+    parent = _task(state, item['integration']['task']) if item['integration']['kind'] == 'task' else None
+    target = task_worktree(repo, intent['target'])
+    source, before = intent['source'], intent['target_head']
+    current = head(target)
+    if git(target, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True):
+        raise LifecycleError('the prepared integration has a merge in progress; finish or abort it in the target')
+    if current != before:
+        fast_forwarded = current == source and git(repo, 'merge-base', '--is-ancestor', before, source, optional=True) is not None
+        if not (fast_forwarded or current == intent.get('merged')):
+            raise LifecycleError('target moved outside the prepared integration')
+        git(repo, 'fetch', item['remote'], 'refs/heads/' + intent['target'])
+        reached = subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', current, 'FETCH_HEAD'],
+                                 capture_output=True).returncode
+        if reached != 1:
+            raise LifecycleError('the prepared integration may already be on the remote; run the same finish again')
+        git(target, 'reset', '--keep', before)
+    if head(target) != before or _snapshot(target, excluded=_preserved_paths(parent or {})):
+        raise LifecycleError('target did not return to its HEAD before the prepared integration')
+    state['intents'].pop(task_id); save_state(directory, state)
+
+
+def _withdraw_prepared(repo: Path, task_id: str) -> None:
+    with _edge_leases(repo, task_id), locked_state(repo) as (directory, state):
+        _withdraw(repo, task_id, state, directory)
+
+
+def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = False, reuse: dict | None = None) -> dict:
+    """Resume only the declared, accepted edge, then follow its parent to default.
+
+    With ``prepare``, an edge whose required checks have not succeeded yet is
+    integrated and validated in its target but not pushed; the result names
+    that ``prepared`` commit and its validation. A later call verifies the
+    checks, reuses that validation as ``reuse`` when the target is unchanged,
+    and pushes. Without ``prepare``, unsucceeded checks withdraw such a
+    preparation before refusing.
+    """
+    with _edge_leases(repo, task_id) as direction:
         with locked_state(repo) as (_, state):
             item = _task(state, task_id)
             required_checks = item.get('required_checks', [])
@@ -1319,14 +1394,30 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
         # A declaration added or strengthened since the task began closes the gate
         # until the task requires it too; a pending merge keeps its decision.
         # A declaration the accepted commit itself changes must pass on that commit.
-        policy = proposed = None
-        if not settled:
-            policy, proposed = _check_policy(repo, item['remote'], gated, required_checks)
-        elif pending:
-            proposed = pending.get('source_checks_policy')
-        gated_checks = required_checks + (proposed['added'] if proposed else [])
-        repository = checks.repository(repo, item['remote']) if gated_checks else None
-        gate = checks.verify(repository, gated, gated_checks) if gated_checks and gated and not settled else None
+        # An integration prepared ahead of its checks has not decided yet, so
+        # it reads the declaration again like a new one.
+        deferred = bool(pending) and pending.get('deferred') and not pending.get('remote_checks')
+        def withdraw():
+            if deferred:
+                with locked_state(repo) as (directory, state):
+                    _withdraw(repo, task_id, state, directory)
+
+        policy = proposed = gate = None
+        try:
+            if not settled or deferred:
+                policy, proposed = _check_policy(repo, item['remote'], gated, required_checks)
+            elif pending:
+                proposed = pending.get('source_checks_policy')
+            gated_checks = required_checks + (proposed['added'] if proposed else [])
+            repository = checks.repository(repo, item['remote']) if gated_checks else None
+        except LifecycleError:
+            withdraw(); raise
+        if gated_checks and gated and (not settled or deferred):
+            try:
+                gate = checks.verify(repository, gated, gated_checks)
+            except LifecycleError:
+                if not prepare:
+                    withdraw(); raise
         with locked_state(repo) as (directory, state):
             item = _task(state, task_id)
             if item.get('hold') or not item.get('acceptance'):
@@ -1366,8 +1457,8 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                 if intent and (intent['kind'] != 'merge' or intent['source'] != source_commit
                                or intent['target'] != target_branch):
                     raise LifecycleError('pending integration identity differs; preserve the existing operation')
-                if gated_checks:
-                    proof = intent.get('remote_checks') if intent else gate
+                proof = (intent or {}).get('remote_checks') or gate
+                if gated_checks and (proof or not prepare):
                     if (not proof or proof['commit'] != source_commit or proof['repository'] != repository
                             or [{'app': c['app'], 'name': c['name']} for c in proof['checks']] != gated_checks):
                         raise LifecycleError('required check evidence does not match the exact accepted commit and remote')
@@ -1407,7 +1498,8 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                             target_head = synced['commit']
                     intent = {'kind': 'merge', 'source': source_commit, 'target': target_branch,
                               'target_head': target_head, 'result_ref': result_ref, 'at': _now(),
-                              **({'remote_checks': gate} if gated_checks else {}),
+                              **({'remote_checks': gate} if gated_checks and gate else {}),
+                              **({'deferred': True} if gated_checks and not gate else {}),
                               **({'required_checks_policy': policy} if policy else {}),
                               **({'source_checks_policy': proposed} if proposed else {})}
                     state['intents'][task_id] = intent; save_state(directory, state)
@@ -1478,11 +1570,26 @@ def _integrate(repo: Path, task_id: str, result_ref: str) -> dict:
                 # before it: a validator may read HEAD's metadata, not only its
                 # tree. Both the child and its parent contract must hold for the
                 # new parent identity before it can progress to the next edge.
-                evidence = _validate(target_worktree, item['validation'])
-                parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
+                # The same finish may reuse the run it made while the checks
+                # ran: the commit and checkout are the same, the checkout is
+                # clean and its preserved data is checked unchanged below.
+                if reuse and reuse['commit'] == merged:
+                    evidence = {**reuse['validation'], 'reused': 'prepared integration'}
+                    parent_evidence = {**reuse['parent_validation'], 'reused': 'prepared integration'} if parent else None
+                else:
+                    evidence = _validate(target_worktree, item['validation'])
+                    parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
                 _check_preserved(target_worktree, parent or {})
                 if head(target_worktree) != merged or _snapshot(target_worktree, excluded=_preserved_paths(parent or {})):
                     raise LifecycleError('integration changed during final validation')
+                if gated_checks and not intent.get('remote_checks'):
+                    if not gate:
+                        return {'destination': target_branch, 'prepared': {
+                            'commit': merged, 'validation': evidence, 'parent_validation': parent_evidence}}
+                    intent.pop('source_checks_policy', None)
+                    intent.update(remote_checks=gate, **({'required_checks_policy': policy} if policy else {}),
+                                  **({'source_checks_policy': proposed} if proposed else {}))
+                    save_state(directory, state)
                 pushed = _push(target_worktree, item['preflight'], target_branch, item['remote'], expected_head=merged)
                 record = {'destination': target_branch, 'commit': merged, 'source': source_commit,
                           'validation': evidence, 'push': pushed, 'result_ref': result_ref, 'at': _now(),

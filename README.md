@@ -258,9 +258,18 @@ acceptance, holding no lifecycle lock or lease, and then integrates as usual.
 It asks GitHub every 30 seconds and stops as soon as any required check
 completes without success, naming each failed check with its state, run ID and
 GitHub URL. Missing, queued and running checks keep it waiting until SECONDS
-have passed; the default, 21600, is GitHub Actions' default job timeout. A
-failure, timeout, unavailable status or interruption leaves the acceptance in
-place, so repeating the finish resumes from it. State changes are reported on
+have passed; the default, 21600, is GitHub Actions' default job timeout.
+While those checks run, finish already integrates the accepted commit into the
+target checkout (fast-forward or merge) and validates it there, but pushes
+nothing until the checks succeed. The push then reuses that validation when the
+target commit and checkout are unchanged; a synchronization with a moved remote
+validates again. Meanwhile the target holds this pending integration, so no
+other task integrates into it. A failure, timeout, unavailable status, refusal
+or interruption leaves the acceptance in place and returns the target to its
+HEAD before the integration, so repeating the finish resumes from the
+acceptance. A finish without the option withdraws such an interrupted
+integration when the checks have not succeeded, or pushes it after validating
+again when they have. State changes are reported on
 stderr; stdout keeps the one final JSON result. Without the option finish
 refuses at once, as before. That retry reuses the saved acceptance and neither validates nor pushes
 the task checkout again when the checkout is completely clean and its HEAD,
@@ -584,6 +593,10 @@ on the commit it pushed to the remote default branch and report them as
 `integration_checks`, separately from the integration. A failed, unfinished or
 unavailable result exits 1 without retiring; repeating the finish only checks
 again.
+
+Version 0.8.8 integrates and validates in the target while `finish
+--wait-checks` waits for the accepted commit's checks, and pushes once they
+succeed, instead of starting that work after them.
 
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the

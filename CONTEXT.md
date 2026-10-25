@@ -42,6 +42,10 @@ _Avoid_: tree hash、同じ commit
 同じ finish の中で、validation input が直前に成功した run と変わっていない段階が、その run を自分の証拠とすること。receipt は再利用元の段階を示し、新しい run とは書かない。別の finish、別の checkout、別の HEAD commit、失敗した run からは再利用しない。
 _Avoid_: cache、省略された validation、検証済み tree
 
+**Prepared integration**:
+受入 commit の required check が成功する前に、統合先 checkout で fast-forward または merge を行い validation まで済ませた、まだ push していない統合。check が成功すれば同じ finish がそれを push し、失敗・期限切れ・拒否なら統合先を準備前の HEAD に戻して取り下げる。統合済みではない。
+_Avoid_: 先行 push、仮統合、統合済み
+
 ### Required checks
 
 **Required check state**:

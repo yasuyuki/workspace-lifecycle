@@ -286,6 +286,110 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertEqual(clock.sleeps, [30, 30, 30, 30, 30])
         self.assertEqual(self.trunk(), commit())
 
+    def test_target_validates_while_the_checks_run(self):
+        validations = self.counted("overlap")
+        commit = self.accepted("overlap"); base = self.trunk(); seen = []
+        def running():
+            seen.append((validations(self.root), run(self.root, "rev-parse", "HEAD"), self.trunk()))
+            self.github.add("example/repo", commit, TEST)
+        with patch("workspace_lifecycle.service._push", wraps=service._push) as pushes:
+            result, _ = self.waiting("overlap", [running])
+        self.assertEqual(seen, [(1, commit, base)], "validated and fast-forwarded in the target, not pushed")
+        self.assertEqual(validations(self.root), 1, "the push reuses the run made while the checks ran")
+        self.assertEqual([Path(call.args[0]) for call in pushes.call_args_list], [self.root.resolve()])
+        self.assertEqual((result["integration"]["commit"], self.trunk()), (commit, commit))
+        integrated = status(self.topic, "overlap")["integrated"]
+        self.assertEqual(integrated["validation"]["reused"], "prepared integration")
+        self.assertEqual(integrated["remote_checks"]["commit"], commit)
+
+    def withdrawn(self, task, before):
+        self.assertEqual(run(self.root, "rev-parse", "HEAD"), before)
+        self.assertNotIn("intent", status(self.topic, task))
+        self.assertNotIn("integrated", status(self.topic, task))
+        self.assertFalse((self.root / "feature.txt").exists())
+        self.assertEqual(run(self.root, "status", "--porcelain", "--ignored"), "")
+
+    def test_failed_checks_withdraw_the_prepared_integration(self):
+        self.start("undo")
+        self.refused("undo", "missing")
+        commit = self.accepted("undo"); base = self.trunk()
+        self.waiting_refused("undo", "failed", [lambda: self.github.add("example/repo", commit, TEST, "completed", "failure")])
+        self.withdrawn("undo", base)
+        self.github.add("example/repo", commit, TEST)
+        result, _ = self.waiting("undo")
+        self.assertEqual((result["integration"]["commit"], self.trunk()), (commit, commit))
+
+    def test_unfinished_checks_withdraw_the_prepared_merge(self):
+        self.start("unfinished")
+        run(self.root, "commit", "-q", "--allow-empty", "-m", "later")
+        run(self.root, "push", "-q", "origin", "trunk")
+        later = self.trunk()
+        self.refused("unfinished", "missing")
+        self.waiting_refused("unfinished", "did not finish", seconds=30)
+        self.withdrawn("unfinished", later)
+        self.assertEqual(run(self.root, "rev-list", "--count", later + "..HEAD"), "0", "the unpushed merge commit is gone")
+
+    def test_an_interrupted_preparation_is_withdrawn_or_pushed_by_a_plain_finish(self):
+        validations = self.counted("interrupted")
+        commit = self.accepted("interrupted"); base = self.trunk()
+        self.assertIn("prepared", service._integrate(self.topic, "interrupted", "issue/interrupted", prepare=True))
+        self.assertEqual(run(self.root, "rev-parse", "HEAD"), commit)
+        self.refused("interrupted", "missing")
+        self.withdrawn("interrupted", base)
+        service._integrate(self.topic, "interrupted", "issue/interrupted", prepare=True)
+        self.github.add("example/repo", commit, TEST)
+        before = validations(self.root)
+        result = self.finish("interrupted")
+        self.assertEqual((result["integration"]["commit"], self.trunk()), (commit, commit))
+        self.assertEqual(validations(self.root), before + 1, "another finish validates again")
+        self.assertNotIn("reused", status(self.topic, "interrupted")["integrated"]["validation"])
+
+    def test_only_a_prepared_integration_is_withdrawn(self):
+        from workspace_lifecycle.state import locked_state, save_state
+        self.start("legacy")
+        self.refused("legacy", "missing")
+        commit = self.accepted("legacy")
+        service._integrate(self.topic, "legacy", "issue/legacy", prepare=True)
+        with locked_state(self.topic) as (directory, state):
+            del state["intents"]["legacy"]["deferred"]; save_state(directory, state)
+        with self.assertRaisesRegex(LifecycleError, "required check evidence"):
+            self.finish("legacy")
+        self.assertEqual(run(self.root, "rev-parse", "HEAD"), commit, "a merge intent of an earlier kind is kept")
+        self.assertIn("intent", status(self.topic, "legacy"))
+
+    def test_a_merge_in_progress_is_never_aborted(self):
+        self.start("conflict")
+        (self.root / "feature.txt").write_text("trunk\n")
+        run(self.root, "add", "feature.txt"); run(self.root, "commit", "-qm", "trunk feature")
+        run(self.root, "push", "-q", "origin", "trunk")
+        with self.assertRaises(LifecycleError):
+            self.finish("conflict")
+        commit = self.accepted("conflict")
+        with patch("workspace_lifecycle.checks.time", FakeClock()), self.assertRaises(LifecycleError):
+            finish(self.topic, task="conflict", plan_path=str(self.plan), result_ref="issue/conflict", wait_checks=30)
+        self.assertEqual(run(self.root, "rev-parse", "MERGE_HEAD"), commit)
+        (self.root / "feature.txt").write_text("resolved by hand\n")
+        with self.assertRaisesRegex(LifecycleError, "merge in progress"):
+            self.finish("conflict")
+        self.assertEqual((self.root / "feature.txt").read_text(), "resolved by hand\n")
+        self.assertEqual(run(self.root, "rev-parse", "MERGE_HEAD"), commit)
+
+    def test_remote_advance_during_the_wait_validates_again(self):
+        validations = self.counted("raced")
+        commit = self.accepted("raced"); other = Path(self.temp.name) / "racer"
+        def race():
+            run(self.root.parent, "clone", "-q", str(self.remote), str(other))
+            run(other, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                "commit", "-q", "--allow-empty", "-m", "raced")
+            run(other, "push", "-q", "origin", "trunk")
+            self.raced = run(other, "rev-parse", "HEAD")
+            self.github.add("example/repo", commit, TEST)
+        result, _ = self.waiting("raced", [race])
+        merged = self.trunk()
+        self.assertEqual(sorted(run(self.root, "rev-list", "--parents", "-1", merged).split()[1:]), sorted([commit, self.raced]))
+        self.assertGreaterEqual(validations(self.root), 2, "the synchronized commit is validated again")
+        self.assertNotIn("reused", status(self.topic, "raced")["integrated"]["validation"])
+
     def test_wait_stops_at_the_first_failed_check(self):
         self.start("fail", required=(TEST, LINT))
         self.refused("fail", "missing")
@@ -361,14 +465,25 @@ class RequiredChecksTest(unittest.TestCase):
         self.start("declared")
         self.refused("declared", "missing")
         commit = self.accepted("declared")
-        declared = []
+        declared = []; before = run(self.root, "rev-parse", "HEAD")
+        other = Path(self.temp.name) / "other"
         def declare():
-            declared.append(self.declare([TEST, LINT]))
+            # Published from another clone: the integration checkout holds
+            # the integration prepared while the checks run.
+            run(self.root.parent, "clone", "-q", str(self.remote), str(other))
+            (other / ".github").mkdir(exist_ok=True)
+            (other / ".github" / "required-checks.json").write_text(json.dumps([TEST, LINT]))
+            run(other, "add", ".github/required-checks.json")
+            run(other, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "declare")
+            run(other, "push", "-q", "origin", "trunk")
+            declared.append(run(other, "rev-parse", "HEAD"))
             self.github.add("example/repo", commit, TEST)
         with patch("workspace_lifecycle.checks.time", FakeClock([declare])), self.assertRaisesRegex(LifecycleError, "omit"):
             finish(self.topic, task="declared", plan_path=str(self.plan), result_ref="issue/declared", wait_checks=600)
         self.assertEqual(self.trunk(), declared[0])
         self.assertNotIn("integrated", status(self.topic, "declared"))
+        self.assertEqual(run(self.root, "rev-parse", "HEAD"), before, "the prepared integration is withdrawn")
+        self.assertFalse((self.root / "feature.txt").exists())
 
     def test_a_moved_source_during_the_wait_refuses_integration(self):
         self.start("moved-wait")
