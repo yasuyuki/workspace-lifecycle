@@ -15,7 +15,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 from urllib.request import url2pathname
 
@@ -273,30 +273,55 @@ def remote_urls(repo: Path, name: str, push: bool = False) -> list[str]:
     return (run_git(repo, *args, required=False) or "").splitlines()
 
 
+def config_values(repo: Path) -> Callable[[str], list[str]]:
+    """Read every effective setting at once; return the values of one key in file order."""
+    listed = subprocess.run(["git", "-C", str(repo), "config", "--list", "-z"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    if listed.returncode:
+        raise RuntimeError("git command failed")
+    entries: dict[str, list[bytes]] = {}
+    for entry in listed.stdout.split(b"\0"):
+        if entry:
+            key, _, value = entry.partition(b"\n")
+            entries.setdefault(_config_key(os.fsdecode(key)), []).append(value)
+    return lambda key: [value.decode("utf-8") for value in entries.get(_config_key(key), [])]
+
+
+def _config_key(key: str) -> str:
+    # Section and variable names are case-insensitive; a subsection is not.
+    section, _, rest = key.partition(".")
+    subsection, dot, variable = rest.rpartition(".")
+    return section.lower() + "." + subsection + dot + variable.lower()
+
+
 def collect_state(repo: Path, need_metadata: bool = True) -> dict[str, Any]:
     """Collect only read-only git/GitHub data; errors become fail-closed state."""
     try:
         root = Path(run_git(repo, "rev-parse", "--show-toplevel") or "")
         branch = run_git(root, "symbolic-ref", "--quiet", "--short", "HEAD", required=False)
         names = (run_git(root, "remote") or "").splitlines()
+        values = config_values(root)
+        # The same results as `--get` (last value) and `--get-all` output split into lines.
+        last = lambda key: (values(key) or [None])[-1]
+        lines = lambda key: "\n".join(values(key)).splitlines()
         remotes: dict[str, Any] = {}
         for name in names:
-            mirror_value = run_git(root, "config", "--get", f"remote.{name}.mirror", required=False)
+            mirror_value = last(f"remote.{name}.mirror")
             remotes[name] = {
-                "fetch_urls": (run_git(root, "config", "--get-all", f"remote.{name}.url", required=False) or "").splitlines(),
-                "push_urls": (run_git(root, "config", "--get-all", f"remote.{name}.pushurl", required=False) or "").splitlines(),
+                "fetch_urls": lines(f"remote.{name}.url"),
+                "push_urls": lines(f"remote.{name}.pushurl"),
                 "effective_fetch_urls": remote_urls(root, name),
                 "effective_push_urls": remote_urls(root, name, push=True),
-                "push_refspecs": (run_git(root, "config", "--get-all", f"remote.{name}.push", required=False) or "").splitlines(),
+                "push_refspecs": lines(f"remote.{name}.push"),
                 "mirror": mirror_value == "true",
                 "mirror_invalid": mirror_value not in {None, "true", "false"},
             }
-        candidates = {"branch_push_remote": None, "remote_push_default": run_git(root, "config", "--get", "remote.pushDefault", required=False), "branch_remote": None}
+        candidates = {"branch_push_remote": None, "remote_push_default": last("remote.pushDefault"), "branch_remote": None}
         upstream = {"remote": None, "merge": None}
         if branch:
-            candidates["branch_push_remote"] = run_git(root, "config", "--get", f"branch.{branch}.pushRemote", required=False)
-            candidates["branch_remote"] = run_git(root, "config", "--get", f"branch.{branch}.remote", required=False)
-            merges = (run_git(root, "config", "--get-all", f"branch.{branch}.merge", required=False) or "").splitlines()
+            candidates["branch_push_remote"] = last(f"branch.{branch}.pushRemote")
+            candidates["branch_remote"] = last(f"branch.{branch}.remote")
+            merges = lines(f"branch.{branch}.merge")
             upstream = {"remote": candidates["branch_remote"], "merge": merges[0] if len(merges) == 1 else None,
                         "merge_values": merges}
         state: dict[str, Any] = {"current_branch": branch, "candidates": candidates, "remotes": remotes, "upstream": upstream,

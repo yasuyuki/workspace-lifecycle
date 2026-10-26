@@ -9,7 +9,7 @@ from pathlib import Path
 import subprocess
 
 from .errors import LifecycleError
-from .git import bound_task, branch_for_task, common_dir, current_branch, git, head, task_worktree, top
+from .git import bound_task, branch_for_task, common_dir, current_branch, git, head, operation, task_worktree, top
 from .state import locked_state, save_state
 
 
@@ -76,6 +76,7 @@ def _validate_output(repo: Path, workspace: Path, item: dict, value: str) -> str
     return str(output)
 
 
+@operation()
 def register(repo, task: str, owner: str, generation: str, receipt: str,
              outputs: list[str], completion: list[str]) -> dict:
     """Durably bind one owner generation before it creates any output."""
@@ -190,6 +191,7 @@ def _run(record: dict, result_ref: str, workspace: Path, task: str) -> None:
         raise LifecycleError('owner completion claimed reclaim while registered output remains')
 
 
+@operation()
 def retry(repo, task: str) -> dict:
     """Complete only pre-registered owner generations after task acceptance."""
     from .service import _lease, _check_preserved

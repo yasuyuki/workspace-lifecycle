@@ -13,7 +13,8 @@ import uuid
 
 from . import checks
 from .errors import LifecycleError
-from .git import bound_task, branch_for_task, current_branch, git, head, remote_default, task_worktree, top, worktree_records
+from .git import (bound_task, branch_for_task, checkout_state, current_branch, git, head, remote_default,
+                  operation, task_bindings, task_worktree, top, worktree_records)
 from .state import locked_state, save_state
 
 
@@ -39,14 +40,11 @@ def _lease(repo, task, allow_use=False):
 def _snapshot(repo: Path, *, optional_locks=True, excluded=()) -> dict[str, str]:
     pathspec = ['--', '.', *(':(exclude,literal)' + name for name in excluded)] if excluded else []
     environment = None if optional_locks else {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
+    # With every untracked file listed, ignored ones are listed one by one as well.
     process = subprocess.run(['git', '-C', str(repo), 'status', '--porcelain=v1', '-z',
-                              '--untracked-files=all', '--ignored=no', '--no-renames', *pathspec],
+                              '--untracked-files=all', '--ignored=traditional', '--no-renames', *pathspec],
                              capture_output=True, check=True, env=environment)
-    result = {os.fsdecode(row[3:]): os.fsdecode(row[:2]) for row in process.stdout.split(b'\0') if row}
-    ignored = subprocess.run(['git', '-C', str(repo), 'ls-files', '--others', '--ignored',
-                              '--exclude-standard', '-z', *pathspec], capture_output=True, check=True)
-    result.update({os.fsdecode(row): '!!' for row in ignored.stdout.split(b'\0') if row})
-    return result
+    return {os.fsdecode(row[3:]): os.fsdecode(row[:2]) for row in process.stdout.split(b'\0') if row}
 
 
 def _task(state, task):
@@ -70,6 +68,7 @@ def _no_links(path, stop=None):
             break
 
 
+@operation()
 def begin(repo, *, task: str, request: str, remote: str, branch: str, worktree: str,
           parent: str | None = None, dependencies: list[str] | None = None,
           validation: list[str] | None = None, preflight: list[str] | None = None,
@@ -87,7 +86,8 @@ def begin(repo, *, task: str, request: str, remote: str, branch: str, worktree: 
     target = Path(worktree).absolute()
     _no_links(target)
     target = target.resolve()
-    if target == top(repo) or top(repo) in target.parents:
+    toplevel = top(repo)
+    if target == toplevel or toplevel in target.parents:
         raise LifecycleError('new worktree must be outside the integration checkout')
     desired = {'branch': branch, 'worktree': str(target), 'request': request, 'remote': remote,
                'parent': parent, 'dependencies': dependencies, 'validation': validation, 'preflight': preflight}
@@ -112,7 +112,7 @@ def begin(repo, *, task: str, request: str, remote: str, branch: str, worktree: 
                     raise LifecycleError('dependencies must refer to existing other tasks')
                 if any(state['tasks'][name].get('retire') for name in dependencies):
                     raise LifecycleError('dependency is retiring')
-                policy = checks.current(repo, remote)
+                policy = checks.current(repo, remote, default)
                 selected = checks.select(policy, required_checks)
                 if parent:
                     parent_task = _task(state, parent)
@@ -167,6 +167,7 @@ def _required_checks_fields(intent) -> dict:
                if 'required_checks_policy' in intent else {})}
 
 
+@operation()
 def status(repo, task: str | None = None) -> dict:
     repo = Path(repo).resolve()
     with locked_state(repo) as (_, state):
@@ -186,6 +187,7 @@ def status(repo, task: str | None = None) -> dict:
         return data
 
 
+@operation()
 def update_preflight(repo, *, task: str, expected_preflight: list[str],
                      preflight: list[str], evidence: str) -> dict:
     """Change one current task's push policy command under an exact argv CAS."""
@@ -210,6 +212,7 @@ def update_preflight(repo, *, task: str, expected_preflight: list[str],
     return {'task': task, 'preflight': list(preflight)}
 
 
+@operation()
 def update_validation(repo, *, task: str, expected_head: str,
                       expected_validation: list[str], validation: list[str], evidence: str) -> dict:
     """Correct an unaccepted task's validator without changing its contract history."""
@@ -243,7 +246,7 @@ def update_validation(repo, *, task: str, expected_head: str,
             receipt = {'from': list(expected_validation), 'to': list(validation),
                        'evidence': evidence, 'head': expected_head, 'identity': identity, 'at': _now()}
             _operation_check(repo, 'validation update')
-            if _finish_identity(repo, task, branch) != identity or head(repo) != expected_head:
+            if _finish_checkpoint(repo, task, branch) != (identity, expected_head):
                 raise LifecycleError('HEAD or identity changed during validation update')
             if intent and _index_paths(repo):
                 raise LifecycleError('pending task operation prevents validation update')
@@ -293,6 +296,7 @@ def _recorded_finish(repo, intent, identity, current_head):
             and git(repo, 'rev-parse', current_head + '^{tree}') == intent.get('commit_tree'))
 
 
+@operation()
 def update_required_checks(repo, *, task: str, expected: list[dict],
                            required_checks: list[dict], evidence: str) -> dict:
     """Replace the remote checks one task's integration requires by exact CAS."""
@@ -321,6 +325,7 @@ def update_required_checks(repo, *, task: str, expected: list[dict],
     return {'task': task, 'required_checks': required_checks}
 
 
+@operation()
 def hold(repo, task: str, reason: str, next_action: str) -> dict:
     if not reason or not next_action: raise LifecycleError("hold requires reason and next action")
     with _lease(repo, task, allow_use=True):
@@ -330,6 +335,7 @@ def hold(repo, task: str, reason: str, next_action: str) -> dict:
     return {"task": task, "held": True}
 
 
+@operation()
 def release_hold(repo, task, evidence):
     if not isinstance(evidence, str) or not evidence.strip():
         raise LifecycleError('explicit hold resolution evidence is required')
@@ -370,7 +376,8 @@ def _push(repo: Path, preflight: list[str], expected_branch: str, expected_remot
         raise LifecycleError("preflight push argv is not an exact normal branch push")
     if push_argv[2].startswith('-') or (expected_remote is not None and push_argv[2] != expected_remote):
         raise LifecycleError('preflight selected a different remote than the registered integration contract')
-    if expected_head is not None and (head(repo) != expected_head or current_branch(repo) != expected_branch):
+    tip = lambda: checkout_state(repo)[2:]
+    if expected_head is not None and tip() != (expected_head, 'refs/heads/' + expected_branch):
         raise LifecycleError('HEAD or branch changed before pushing the revised finish')
     if remote_url is not None and git(repo, 'remote', 'get-url', expected_remote) != remote_url:
         raise LifecycleError('remote URL changed during push preflight')
@@ -383,7 +390,7 @@ def _push(repo: Path, preflight: list[str], expected_branch: str, expected_remot
     if remote_url is not None and git(repo, 'remote', 'get-url', expected_remote) != remote_url:
         raise LifecycleError('remote URL changed while pushing finish')
     remote_tip = _remote_tip(repo, push_argv[2], expected_branch)
-    if head(repo) != expected or current_branch(repo) != expected_branch:
+    if tip() != (expected, 'refs/heads/' + expected_branch):
         raise LifecycleError('HEAD or branch changed while pushing finish')
     if remote_tip != expected:
         git(repo, 'fetch', push_argv[2], 'refs/heads/' + expected_branch)
@@ -548,14 +555,22 @@ def _operation_check(target, operation='adoption'):
 
 
 def _finish_identity(repo, task_id, branch):
-    toplevel, admin = git(repo, 'rev-parse', '--show-toplevel', '--absolute-git-dir').splitlines()
-    if (branch_for_task(repo, task_id) != branch or Path(toplevel).resolve() != task_worktree(repo, branch)
-            or current_branch(repo) != branch or bound_task(repo, branch) != task_id):
+    return _finish_checkpoint(repo, task_id, branch)[0]
+
+
+def _finish_checkpoint(repo, task_id, branch):
+    """The bound worktree's identity and its HEAD commit, both read at this one point."""
+    toplevel, admin, commit, ref = checkout_state(repo)
+    bindings = task_bindings(repo)
+    if branch_for_task(repo, task_id, bindings) != branch or toplevel != task_worktree(repo, branch):
         raise LifecycleError('finish --repo must name the bound task worktree')
-    admin = Path(admin).resolve()
-    return {'task': task_id, 'branch': branch, 'worktree': str(repo), 'git_dir': str(admin),
-            'worktree_id': [repo.stat().st_dev, repo.stat().st_ino],
-            'git_dir_id': [admin.stat().st_dev, admin.stat().st_ino]}
+    if ref == 'HEAD':
+        raise LifecycleError('detached HEAD cannot be a lifecycle workspace')
+    if ref != 'refs/heads/' + branch or bound_task(repo, branch, bindings) != task_id:
+        raise LifecycleError('finish --repo must name the bound task worktree')
+    return ({'task': task_id, 'branch': branch, 'worktree': str(repo), 'git_dir': str(admin),
+             'worktree_id': [repo.stat().st_dev, repo.stat().st_ino],
+             'git_dir_id': [admin.stat().st_dev, admin.stat().st_ino]}, commit)
 
 
 def _sync_file(path):
@@ -768,6 +783,7 @@ def _refuse_pending_merge(state, branch):
             raise LifecycleError('pending integration of ' + other + ' holds ' + branch)
 
 
+@operation()
 def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = 'workspace lifecycle completion', users_released: bool = False, revision_evidence: str | None = None, preservation_evidence: str | None = None, revision_head: str | None = None, wait_checks: float | None = None) -> dict:
     repo = Path(repo).resolve(); plan = _plan(Path(plan_path)); task_id = task
     if wait_checks is not None and not 0 < wait_checks < float('inf'):
@@ -835,7 +851,7 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     # The lifecycle lock cannot serialize native Git writers. Pin
                     # the caller-reviewed OID and compare again before replacement;
                     # a later move is refused by the ordinary pinned-HEAD check.
-                    if _finish_identity(repo, task_id, branch) != identity or head(repo) != revision_head:
+                    if _finish_checkpoint(repo, task_id, branch) != (identity, revision_head):
                         raise LifecycleError('HEAD or identity changed during finish revision')
                     _operation_check(repo, 'finish HEAD revision')
                     revised_at = _now()
@@ -955,7 +971,7 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 _check_preserved(repo, task)
                 _checked_paths(repo, plan.get('commit', []), need='source', owner=task_id,
                     completed=set(commit_paths) if synchronized_head and intent.get('committed') else None)
-                if _finish_identity(repo, task_id, branch) != identity or head(repo) != start_head:
+                if _finish_checkpoint(repo, task_id, branch) != (identity, start_head):
                     raise LifecycleError('HEAD or identity changed during finish preservation')
                 if _index_paths(repo) - set(commit_paths):
                     raise LifecycleError('validation or cleanup staged unrelated changes')
@@ -965,7 +981,7 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                         raise LifecycleError('index changed before task commit')
                     if _index_paths(repo):
                         intent['commit_tree'] = git(repo, 'write-tree'); save_state(directory, state)
-                        if _finish_identity(repo, task_id, branch) != identity or head(repo) != start_head:
+                        if _finish_checkpoint(repo, task_id, branch) != (identity, start_head):
                             raise LifecycleError('HEAD or identity changed before finish commit')
                         git(repo, 'commit', '-m', message)
                         committed_head = head(repo)
@@ -977,12 +993,13 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 # the target validates what is pushed before it is accepted, so
                 # the task checkout is not validated; it only becomes a
                 # candidate. Checks that cannot be read keep the validation.
-                candidate = ((task.get('integrated') or {}).get('source') != head(repo)
-                             and bool(_gated_checks(repo, task, head(repo))))
+                current_head = head(repo)
+                candidate = ((task.get('integrated') or {}).get('source') != current_head
+                             and bool(_gated_checks(repo, task, current_head)))
                 evidence = None if candidate else _validate(repo, task['validation'])
                 _check_preserved(repo, task)
                 expected_finish_head = synchronized_head or intent.get('committed') or intent['initial_head']
-                if _finish_identity(repo, task_id, branch) != identity or head(repo) != expected_finish_head:
+                if _finish_checkpoint(repo, task_id, branch) != (identity, expected_finish_head):
                     raise LifecycleError('HEAD or identity changed during finish validation')
                 _operation_check(repo, 'finish validation')
                 final_dirty, waived = _unexcused_dirty(repo, task, _snapshot(repo, excluded=_preserved_paths(task)))
@@ -991,8 +1008,8 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     task['exception'] = exception
                     state['intents'].pop(task_id, None); save_state(directory, state)
                     return {'task': task_id, 'completion': 'exception', 'dirty': sorted(final_dirty)}
-                commit = head(repo)
-                if _finish_identity(repo, task_id, branch) != identity or commit != expected_finish_head:
+                current, commit = _finish_checkpoint(repo, task_id, branch)
+                if current != identity or commit != expected_finish_head:
                     raise LifecycleError('HEAD or identity changed before finish push')
                 pushed = _push(repo, task['preflight'], branch, task['remote'], expected_head=commit)
                 task.pop('exception', None)
@@ -1232,6 +1249,7 @@ def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
     return receipt
 
 
+@operation()
 def synchronize(repo, *, task, expected_head, remote_head, evidence):
     """Review and resume the same task's same-name remote synchronization."""
     repo = Path(repo).resolve()
@@ -1465,25 +1483,27 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                 raise LifecycleError('required checks changed during integration')
             if _is_candidate(item) and not gated_checks:
                 raise LifecycleError('a candidate needs required checks to be accepted; run finish again')
-            source_branch = branch_for_task(repo, task_id)
+            bindings = task_bindings(repo)
+            source_branch = branch_for_task(repo, task_id, bindings)
             if head(repo, 'refs/heads/' + source_branch) != source_commit:
                 raise LifecycleError('source HEAD differs from the exact accepted identity')
             for dependency in item['dependencies']:
                 required = _task(state, dependency)
                 if required.get('hold') or not required.get('acceptance'):
                     raise LifecycleError('dependency is held or not accepted: ' + dependency)
-                if head(repo, 'refs/heads/' + branch_for_task(repo, dependency)) != required['acceptance']['commit']:
+                if head(repo, 'refs/heads/' + branch_for_task(repo, dependency, bindings)) != required['acceptance']['commit']:
                     raise LifecycleError('dependency changed after acceptance: ' + dependency)
             parent = None
             if direction['kind'] == 'task':
                 parent = _task(state, direction['task'])
                 if parent.get('hold') or not parent.get('acceptance'):
                     raise LifecycleError('integration parent is held or not accepted: ' + direction['task'])
-                target_branch = branch_for_task(repo, direction['task'])
+                target_branch = branch_for_task(repo, direction['task'], bindings)
             else:
                 target_branch = remote_default(repo, item['remote'])
-            target_worktree = task_worktree(repo, target_branch)
-            _check_preserved(task_worktree(repo, source_branch), item)
+            records = worktree_records(repo)
+            target_worktree = task_worktree(repo, target_branch, records)
+            _check_preserved(task_worktree(repo, source_branch, records), item)
             _check_preserved(target_worktree, parent or {}, source_commit)
             if current_branch(target_worktree) != target_branch:
                 raise LifecycleError('integration checkout branch changed')
@@ -1765,6 +1785,7 @@ def _retirement_transaction(repo, task):
     yield directory, working, persist
 
 
+@operation()
 def retire(repo, *, task: str, result_ref: str, users_released: bool = False, request_only: bool = False, preservation_evidence: str | None = None) -> dict:
     """End one active worktree while retaining its payload and Git admin entry."""
     repo = Path(repo).resolve()
@@ -2025,6 +2046,7 @@ def _tree_manifest(root: Path):
     return rows
 
 
+@operation()
 def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> dict:
     """Replay one exact retirement receipt under a task lease, not the state lock."""
     from copy import deepcopy
@@ -2171,6 +2193,7 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
             raise
 
 
+@operation()
 def reclaim_pending(repo, task: str | None = None) -> dict:
     """Resume reclaim that already has preservation evidence. Never authorize a new one."""
     repo = Path(repo).resolve()
@@ -2188,6 +2211,7 @@ def reclaim_pending(repo, task: str | None = None) -> dict:
     return {'pending': results}
 
 
+@operation()
 def retire_pending(repo, task: str | None = None) -> dict:
     """Retry only durable explicit retirement requests, never scan for cleanup."""
     repo = Path(repo).resolve()
@@ -2220,11 +2244,13 @@ def retire_pending(repo, task: str | None = None) -> dict:
     return {'pending': results}
 
 
+@operation()
 def check_run_identity(repo, task: str) -> None:
     if bound_task(repo) != task or task_worktree(repo, branch_for_task(repo, task)) != top(repo):
         raise LifecycleError('run must use the exact bound task checkout')
 
 
+@operation()
 def before_run(repo, task: str, cwd=None, lexical_cwd=None) -> list[dict]:
     """Refuse use that would race checkout removal; return notices for the caller."""
     with locked_state(repo) as (_, state):
@@ -2268,6 +2294,7 @@ def _check_preserved_cwd(repo, state, cwd):
                         raise LifecycleError('managed cwd belongs to foreign preserved data')
 
 
+@operation()
 def check_preserved_cwd(cwd, repo=None):
     # Inspect outer managed roots before probing a retired payload as live Git.
     cwd = Path(os.path.abspath(cwd))

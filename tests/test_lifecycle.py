@@ -64,6 +64,33 @@ class LifecycleTest(unittest.TestCase):
         with self.assertRaises(LifecycleError): finish(self.topic, task="two", plan_path=str(plan), result_ref="issue/2")
         self.assertTrue((self.topic / "private.txt").exists())
 
+    def test_checkout_identity_changed_by_validation_is_refused_before_push(self):
+        changes = {"rebound": (["config", "--local", "branch.topic/{name}.workspaceTask", "other"], "branch binding"),
+                   "detached": (["checkout", "--detach"], "live Git worktree"),
+                   "switched": (["switch", "-c", "elsewhere-{name}"], "live Git worktree")}
+        for name, (command, refusal) in changes.items():
+            with self.subTest(change=name):
+                topic = Path(self.temp.name) / ("topic-" + name)
+                argv = ["git", "-C", str(topic), *(part.format(name=name) for part in command)]
+                begin(self.root, task=name, request="issue/" + name, remote="origin", branch="topic/" + name,
+                      worktree=str(topic), validation=[sys.executable, "-c",
+                      "import subprocess, sys; subprocess.run(sys.argv[1:], check=True)", *argv], preflight=self.preflight)
+                (topic / "feature.txt").write_text(name + "\n")
+                plan = Path(self.temp.name) / ("plan-" + name + ".json"); self.task = name
+                plan.write_text(json.dumps(self.source_plan(topic, "feature.txt")))
+                with self.assertRaisesRegex(LifecycleError, refusal):
+                    finish(topic, task=name, plan_path=str(plan), result_ref="issue/" + name)
+                self.assertEqual(run(self.root, "ls-remote", "origin", "refs/heads/topic/" + name), "")
+
+    def test_a_later_operation_resolves_a_replaced_checkout_again(self):
+        begin(self.root, task="one", request="issue/1", remote="origin", branch="topic/one", worktree=str(self.topic), validation=["git", "diff", "--check"], preflight=self.preflight)
+        self.assertEqual(status(self.topic, "one")["task"], "one")
+        moved = Path(self.temp.name) / "moved"
+        run(self.root, "worktree", "move", str(self.topic), str(moved))
+        run(Path(self.temp.name), "init", "-q", str(self.topic))
+        with self.assertRaisesRegex(LifecycleError, "not initialized"):
+            status(self.topic, "one")
+
     def test_parent_child_requires_parent_acceptance(self):
         parent = Path(self.temp.name) / "parent"; child = Path(self.temp.name) / "child"
         begin(self.root, task="parent", request="i/p", remote="origin", branch="topic/parent", worktree=str(parent), validation=["git", "diff", "--check"], preflight=self.preflight)

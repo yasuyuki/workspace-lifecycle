@@ -18,6 +18,8 @@ import tempfile
 import time
 import uuid
 
+from .git import common_dir
+
 
 class UseConflict(ValueError):
     """A refusal that names how the caller can resolve it."""
@@ -28,9 +30,7 @@ class UseConflict(ValueError):
 
 
 def _paths(repo, task):
-    proc = subprocess.run(['git', '-C', str(repo), 'rev-parse', '--path-format=absolute',
-                           '--git-common-dir'], capture_output=True, text=True, encoding="utf-8", check=True)
-    common = Path(proc.stdout.strip())
+    common = common_dir(repo)
     if (common / 'agent-branches/state.json').exists():
         raise ValueError('legacy registry: explicit consumer migration is required')
     root = common / 'workspace-lifecycle' / 'leases'

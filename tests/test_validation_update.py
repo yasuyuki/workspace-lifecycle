@@ -114,17 +114,17 @@ class ValidationUpdateTests(unittest.TestCase):
         self.assertEqual(self.state.read_bytes(), before)
 
     def test_identity_change_during_update_is_refused(self):
-        original = service._finish_identity
+        original = service._finish_checkpoint
         count = 0
         def changed(*args):
             nonlocal count
-            identity = original(*args)
+            identity, commit = original(*args)
             count += 1
             if count > 1:
                 identity['worktree_id'] = [0, 0]
-            return identity
+            return identity, commit
         before = self.state.read_bytes()
-        with patch.object(service, '_finish_identity', side_effect=changed):
+        with patch.object(service, '_finish_checkpoint', side_effect=changed):
             with self.assertRaisesRegex(LifecycleError, 'identity changed'):
                 self.update()
         self.assertEqual(self.state.read_bytes(), before)

@@ -12,7 +12,7 @@ from . import __version__
 
 from .errors import LifecycleError
 from . import checks, service
-from .git import bound_task, common_dir, git, worktree_records
+from .git import bound_task, common_dir, git, operation, worktree_records
 from .state import locked_state, save_state
 
 
@@ -96,6 +96,7 @@ def parser():
     return root
 
 
+@operation()
 def main(argv=None):
     args = parser().parse_args(argv)
     try:

@@ -42,6 +42,11 @@ def test_environment():
     environment = {key: value for key, value in os.environ.items()
                    if not key.upper().startswith("WORKSPACE_LIFECYCLE_")
                    and key.upper() not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"}}
+    # Commits, merges and fetches in the disposable repositories would each start
+    # an automatic maintenance process; no test exercises it.
+    count = int(environment.get("GIT_CONFIG_COUNT") or 0)
+    environment.update({"GIT_CONFIG_COUNT": str(count + 1), f"GIT_CONFIG_KEY_{count}": "maintenance.auto",
+                        f"GIT_CONFIG_VALUE_{count}": "false"})
     return environment
 
 

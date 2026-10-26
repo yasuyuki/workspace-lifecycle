@@ -207,6 +207,47 @@ class PolicyTests(unittest.TestCase):
                 result = preflight.decide(preflight.collect_state(Path(directory)))
             self.assertEqual(result["decision"], "ask", result)
 
+    def test_collected_settings_match_git_config_lookups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def git(*args, check=True):
+                return subprocess.run(["git", "-C", directory, *args], check=check,
+                                      text=True, capture_output=True).stdout
+            git("init", "-q")
+            git("symbolic-ref", "HEAD", "refs/heads/Topic.v2")
+            included = Path(directory) / "included.config"
+            included.write_text('[remote "origin"]\n\tpushurl = https://example.invalid/included.git\n')
+            config = Path(git("rev-parse", "--git-path", "config").strip())
+            if not config.is_absolute():
+                config = Path(directory) / config
+            with config.open("a") as stream:
+                stream.write('[remote "origin"]\n\turl = https://example.invalid/a.git\n\turl = https://example.invalid/b.git\n'
+                             '\tMirror\n\tpush = +refs/heads/*:refs/heads/*\n'
+                             '[remote "Origin"]\n\turl = https://example.invalid/upper.git\n\tmirror = false\n'
+                             '[remote "empty"]\n\turl =\n'
+                             f'[include]\n\tpath = {included.as_posix()}\n'
+                             '[remote]\n\tPushDefault = Origin\n'
+                             '[branch "Topic.v2"]\n\tremote = origin\n\tmerge = refs/heads/one\n\tmerge = refs/heads/two\n'
+                             '\tPushRemote = empty\n')
+            state = preflight.collect_state(Path(directory), need_metadata=False)
+            def get(key):
+                found = subprocess.run(["git", "-C", directory, "config", "--get", key], text=True, capture_output=True)
+                return found.stdout.rstrip("\n") if found.returncode == 0 else None
+            get_all = lambda key: git("config", "--get-all", key, check=False).rstrip("\n").splitlines()
+            self.assertEqual(sorted(state["remotes"]), ["Origin", "empty", "origin"])
+            for name, remote in state["remotes"].items():
+                self.assertEqual(remote["fetch_urls"], get_all(f"remote.{name}.url"))
+                self.assertEqual(remote["push_urls"], get_all(f"remote.{name}.pushurl"))
+                self.assertEqual(remote["push_refspecs"], get_all(f"remote.{name}.push"))
+                mirror = get(f"remote.{name}.mirror")
+                self.assertEqual((remote["mirror"], remote["mirror_invalid"]),
+                                 (mirror == "true", mirror not in {None, "true", "false"}))
+            self.assertEqual(state["remotes"]["origin"]["push_urls"], ["https://example.invalid/included.git"])
+            self.assertTrue(state["remotes"]["origin"]["mirror_invalid"])
+            self.assertEqual(state["candidates"], {"branch_push_remote": "empty", "remote_push_default": "Origin",
+                                                   "branch_remote": "origin"})
+            self.assertEqual(state["upstream"], {"remote": "origin", "merge": None,
+                                                 "merge_values": ["refs/heads/one", "refs/heads/two"]})
+
     def test_github_metadata_utf8_under_cp932_locale(self):
         with tempfile.TemporaryDirectory() as directory:
             subprocess.run(["git", "init", "-q", directory], check=True)

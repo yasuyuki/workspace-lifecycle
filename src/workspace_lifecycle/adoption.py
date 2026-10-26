@@ -9,7 +9,7 @@ import stat
 
 from . import checks
 from .errors import LifecycleError
-from .git import common_dir, current_branch, git, head, remote_default, top, worktree_records
+from .git import common_dir, current_branch, git, head, operation, remote_default, top, worktree_records
 from .service import _index_protection, _lease, _no_links, _now, _operation_check, _required_checks_fields, _snapshot
 from .state import locked_state, save_state
 
@@ -183,6 +183,7 @@ def _bindings(repo, task, branch, retry):
         raise LifecycleError('existing branch or task binding is already owned')
 
 
+@operation()
 def adopt_existing(repo, *, task, request, remote, branch, worktree, expected_head,
                    evidence, validation, preflight, parent=None, dependencies=None,
                    hold_reason=None, next_action=None, preserved_data=None, required_checks=None):

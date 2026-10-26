@@ -61,9 +61,12 @@ def declared(repo, commit: str) -> dict:
         raise LifecycleError('invalid ' + DECLARATION + ' at ' + commit + ': ' + str(exc))
 
 
-def current(repo, remote: str) -> dict:
-    """The declaration on the remote default branch as fetched now, never the checkout."""
-    default = remote_default(repo, remote)
+def current(repo, remote: str, default: str | None = None) -> dict:
+    """The declaration on the remote default branch as fetched now, never the checkout.
+
+    A caller that has just resolved the default branch passes it in.
+    """
+    default = default or remote_default(repo, remote)
     git(repo, 'fetch', remote, 'refs/heads/' + default)
     return declared(repo, head(repo, 'FETCH_HEAD'))
 
@@ -75,11 +78,17 @@ def source(repo, commit: str, policy: dict, selected: list[dict]) -> dict | None
     Its checks join ``selected`` as ``added``; a removal or weakening adds nothing,
     so ``selected`` keeps every check the task already requires.
     """
-    def entry(revision):
-        return git(repo, 'rev-parse', '--verify', '-q', revision + ':' + DECLARATION, optional=True)
-
     base = git(repo, 'merge-base', commit, policy['commit'], optional=True)
-    if entry(commit) in ({policy['blob']} | ({entry(base)} if base else set())):
+    revisions = [commit, *([base] if base else [])]
+    looked_up = subprocess.run(['git', '-C', str(repo), 'cat-file', '--batch-check=%(objectname)'],
+                               input=''.join(revision + ':' + DECLARATION + '\n' for revision in revisions),
+                               text=True, encoding='utf-8', capture_output=True)
+    rows = looked_up.stdout.splitlines()
+    if looked_up.returncode or len(rows) != len(revisions):
+        raise LifecycleError('could not read ' + DECLARATION + ' at ' + commit)
+    # A path absent at a revision prints "<revision>:<path> missing".
+    entry, *inherited = [None if ' ' in row else row for row in rows]
+    if entry in {policy['blob'], *inherited}:
         return None
     proposed = declared(repo, commit)
     return {**proposed, 'base': {'commit': policy['commit'], 'blob': policy['blob']},

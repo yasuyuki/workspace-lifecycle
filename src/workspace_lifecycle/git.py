@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 import os
 from pathlib import Path
 import subprocess
@@ -17,8 +19,35 @@ def git(repo: Path | str, *args: str, optional: bool = False, env=None) -> str |
     return process.stdout.strip()
 
 
+_common_dirs: ContextVar[dict[str, Path] | None] = ContextVar("common_dirs", default=None)
+
+
+@contextmanager
+def operation():
+    """Scope of one lifecycle operation, which resolves each checkout's common directory once.
+
+    The state and lease locks live in the common directory, so the operation
+    stays bound to the repository it started in.
+    """
+    if _common_dirs.get() is not None:
+        yield
+        return
+    token = _common_dirs.set({})
+    try:
+        yield
+    finally:
+        _common_dirs.reset(token)
+
+
 def common_dir(repo: Path | str) -> Path:
-    return Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    known = _common_dirs.get()
+    key = os.path.abspath(repo)
+    if known is not None and key in known:
+        return known[key]
+    value = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    if known is not None:
+        known[key] = value
+    return value
 
 
 def top(repo: Path | str) -> Path:
@@ -66,33 +95,52 @@ def worktree_records(repo: Path | str) -> list[dict[str, str]]:
     return result
 
 
+def checkout_state(repo: Path | str) -> tuple[Path, Path, str, str]:
+    """Toplevel, Git dir, HEAD commit and HEAD's full ref name ("HEAD" when detached), read in one call."""
+    rows = git(repo, "rev-parse", "--show-toplevel", "--absolute-git-dir", "HEAD^{commit}",
+               "--symbolic-full-name", "HEAD").splitlines()
+    if len(rows) != 4:
+        raise LifecycleError("checkout state could not be read")
+    return Path(rows[0]).resolve(), Path(rows[1]).resolve(), rows[2], rows[3]
+
+
 def task_config_key(branch: str) -> str:
     return "branch." + branch + ".workspaceTask"
 
 
-def bound_task(repo: Path | str, branch: str | None = None) -> str:
+def task_bindings(repo: Path | str) -> list[tuple[str, str]]:
+    """Every (branch, task) binding in the local configuration, in file order."""
+    records = (git(repo, "config", "--local", "--get-regexp", r"^branch\..*\.workspaceTask$", optional=True) or "").splitlines()
+    bindings = []
+    for record in records:
+        key, _, value = record.partition(" ")
+        if key.startswith("branch.") and key.endswith(".workspacetask"):
+            bindings.append((key[len("branch."):-len(".workspacetask")], value))
+    return bindings
+
+
+def bound_task(repo: Path | str, branch: str | None = None, bindings: list[tuple[str, str]] | None = None) -> str:
     branch = branch or current_branch(repo)
-    task = git(repo, "config", "--local", "--get", task_config_key(branch), optional=True)
+    if bindings is None:
+        task = git(repo, "config", "--local", "--get", task_config_key(branch), optional=True)
+    else:
+        task = ([value for name, value in bindings if name == branch] or [None])[-1]
     if not task:
         raise LifecycleError("current branch has no workspace lifecycle task binding")
     return task
 
 
-def branch_for_task(repo: Path | str, task: str) -> str:
-    records = (git(repo, "config", "--local", "--get-regexp", r"^branch\..*\.workspaceTask$", optional=True) or "").splitlines()
-    matches = []
-    for record in records:
-        key, _, value = record.partition(" ")
-        if value == task and key.startswith("branch.") and key.endswith(".workspacetask"):
-            matches.append(key[len("branch."):-len(".workspacetask")])
+def branch_for_task(repo: Path | str, task: str, bindings: list[tuple[str, str]] | None = None) -> str:
+    matches = [branch for branch, value in (task_bindings(repo) if bindings is None else bindings) if value == task]
     if len(matches) != 1:
         raise LifecycleError("task does not have exactly one Git branch binding: " + task)
     return matches[0]
 
 
-def task_worktree(repo: Path | str, branch: str) -> Path:
+def task_worktree(repo: Path | str, branch: str, records: list[dict[str, str]] | None = None) -> Path:
     needle = "refs/heads/" + branch
-    matches = [Path(row["worktree"]).resolve() for row in worktree_records(repo) if row.get("branch") == needle]
+    matches = [Path(row["worktree"]).resolve() for row in (worktree_records(repo) if records is None else records)
+               if row.get("branch") == needle]
     if len(matches) != 1:
         raise LifecycleError("branch does not have exactly one live Git worktree: " + branch)
     return matches[0]
