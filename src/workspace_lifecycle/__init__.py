@@ -1,3 +1,3 @@
 """Git-native workspace lifecycle state, deliberately independent of agent-rules."""
 
-__version__ = "0.8.8"
+__version__ = "0.8.9"

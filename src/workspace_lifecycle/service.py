@@ -173,7 +173,7 @@ def status(repo, task: str | None = None) -> dict:
         if task is None:
             try: task = bound_task(repo)
             except LifecycleError:
-                return {"tasks": [{"task": name, "completion": "exception" if item.get("exception") else ("accepted" if item.get("acceptance") else "active"), "retire_pending": bool(item.get("retire"))} for name, item in state["tasks"].items()]}
+                return {"tasks": [{"task": name, "completion": "exception" if item.get("exception") else ("accepted" if item.get("acceptance") else "candidate" if item.get("candidate") else "active"), "retire_pending": bool(item.get("retire"))} for name, item in state["tasks"].items()]}
         data = _task(state, task).copy()
         branch = branch_for_task(repo, task)
         try:
@@ -181,7 +181,7 @@ def status(repo, task: str | None = None) -> dict:
             data["live"] = {"branch": branch, "head": head(live), "worktree": str(live), "dirty": _snapshot(live, excluded=_preserved_paths(data))}
         except LifecycleError as exc: data["live_error"] = str(exc)
         data["task"] = task
-        data["completion"] = "exception" if data.get("exception") else ("accepted" if data.get("acceptance") else "active")
+        data["completion"] = "exception" if data.get("exception") else ("accepted" if data.get("acceptance") else "candidate" if data.get("candidate") else "active")
         if task in state["intents"]: data["intent"] = state["intents"][task]
         return data
 
@@ -309,6 +309,8 @@ def update_required_checks(repo, *, task: str, expected: list[dict],
             policy = checks.current(repo, item['remote'])
             checks.require(policy, required_checks)
             item['required_checks_policy'] = policy
+            # A candidate was pushed for the previous requirement; finish decides again.
+            item.pop('candidate', None)
             if required_checks:
                 item['required_checks'] = required_checks
             else:
@@ -727,15 +729,26 @@ def _finish_input(repo, task, identity, plan_digest):
             'remote_urls_sha256': hashlib.sha256('\0'.join(urls).encode()).hexdigest()}
 
 
-def _acceptance_holds(repo, task, branch, identity, plan_digest, result_ref):
-    """Whether a saved acceptance still is the outcome of this exact finish.
+def _pushed(task):
+    """The task's own pushed source: its acceptance, or a candidate awaiting one."""
+    return task.get('acceptance') or task.get('candidate')
 
-    Waiting for remote checks ends the call that accepted. Repeating it with
-    unchanged inputs resumes integration; anything else accepts again. Only a
+
+def _is_candidate(task):
+    # Finish keeps only one of them; an acceptance beside a candidate was
+    # written later by an earlier version, which does not know candidates.
+    return 'candidate' in task and 'acceptance' not in task
+
+
+def _acceptance_holds(repo, task, branch, identity, plan_digest, result_ref):
+    """Whether a saved acceptance or candidate still is the outcome of this exact finish.
+
+    Waiting for remote checks ends the call that pushed. Repeating it with
+    unchanged inputs resumes integration; anything else finishes again. Only a
     fully clean checkout qualifies: waived or producer-owned data may change
     content under the same names.
     """
-    accepted = task.get('acceptance')
+    accepted = _pushed(task)
     if (not accepted or task.get('exception') or accepted.get('waived_workspace_data')
             or accepted['commit'] != head(repo) or accepted['result_ref'] != result_ref
             or accepted.get('finish_input') != _finish_input(repo, task, identity, plan_digest)):
@@ -799,7 +812,7 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                             or previous.get('revised_plan_digest') != plan_digest
                             or previous.get('result_ref') != result_ref
                             or previous.get('revision_identity') != identity
-                            or task.get('acceptance', {}).get('commit') != head(repo)):
+                            or (_pushed(task) or {}).get('commit') != head(repo)):
                         raise LifecycleError('HEAD revision requires a pending finish intent or its exact accepted retry')
                     accepted_revision_retry = True
                 elif intent.get('head_revision'):
@@ -845,16 +858,16 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
             if accepted_revision_retry or accepted_resume or (intent and intent['kind'] != 'finish'):
                 # A preserved integration operation belongs to _integrate; do
                 # not replace it or recommit the accepted source on resume.
-                accepted = task.get('acceptance')
+                accepted = _pushed(task)
                 if not accepted or accepted['commit'] != head(repo):
                     raise LifecycleError('pending operation does not match accepted source')
-                commit = accepted['commit']
+                commit = accepted['commit']; candidate = _is_candidate(task)
                 if reclaim_evidence is not None:
                     task['preservation_evidence'] = _bind_preservation_evidence(
                         task.get('preservation_evidence'), reclaim_evidence)
-                if release_now:
+                if release_now and not candidate:
                     _release_users(task, result_ref, commit)
-                if reclaim_evidence is not None or release_now:
+                if reclaim_evidence is not None or (release_now and not candidate):
                     save_state(directory, state)
             else:
                 if intent and (intent['plan_digest'] != plan_digest or intent['result_ref'] != result_ref):
@@ -960,7 +973,13 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                         if parents[1:] != [start_head] or git(repo, 'rev-parse', committed_head + '^{tree}') != intent['commit_tree']:
                             raise LifecycleError('finish commit identity changed')
                         intent['committed'] = committed_head; save_state(directory, state)
-                evidence = _validate(repo, task['validation'])
+                # With required checks, the topic CI checks this exact commit and
+                # the target validates what is pushed before it is accepted, so
+                # the task checkout is not validated; it only becomes a
+                # candidate. Checks that cannot be read keep the validation.
+                candidate = ((task.get('integrated') or {}).get('source') != head(repo)
+                             and bool(_gated_checks(repo, task, head(repo))))
+                evidence = None if candidate else _validate(repo, task['validation'])
                 _check_preserved(repo, task)
                 expected_finish_head = synchronized_head or intent.get('committed') or intent['initial_head']
                 if _finish_identity(repo, task_id, branch) != identity or head(repo) != expected_finish_head:
@@ -977,20 +996,26 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     raise LifecycleError('HEAD or identity changed before finish push')
                 pushed = _push(repo, task['preflight'], branch, task['remote'], expected_head=commit)
                 task.pop('exception', None)
-                task['acceptance'] = {'commit': commit, 'result_ref': result_ref,
-                                      'validation': {'postcommit': evidence},
-                                      'push': pushed, 'accepted_at': _now(),
-                                      'finish_input': _finish_input(repo, task, identity, plan_digest)}
+                record = {'commit': commit, 'result_ref': result_ref, 'push': pushed,
+                          'finish_input': _finish_input(repo, task, identity, plan_digest)}
+                # Only one of them describes the current source; an older
+                # acceptance must not let dependents or retirement use it.
+                task.pop('acceptance', None); task.pop('candidate', None)
+                if candidate:
+                    task['candidate'] = record = {**record, 'pushed_at': _now()}
+                else:
+                    task['acceptance'] = record = {**record, 'validation': {'postcommit': evidence},
+                                                   'accepted_at': _now()}
                 if synchronized_head:
                     task.setdefault('finish_receipts', []).append(intent.copy())
                 if waived:
-                    task['acceptance']['waived_workspace_data'] = {
+                    record['waived_workspace_data'] = {
                         'count': len(waived),
                         'sha256': hashlib.sha256('\0'.join(sorted(waived)).encode()).hexdigest()}
                 if reclaim_evidence is not None:
                     task['preservation_evidence'] = _bind_preservation_evidence(
                         task.get('preservation_evidence'), reclaim_evidence)
-                if release_now:
+                if release_now and not candidate:
                     # Save acceptance and last-user release together. A crash
                     # before the callback must not lose the pending request.
                     _release_users(task, result_ref, commit)
@@ -1020,9 +1045,9 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
         result['integration_checks'] = _await_integration_checks(repo, task_id, wait_checks)
         if result['integration_checks']['state'] not in ('success', 'undeclared'):
             return result
-        if users_released:
-            with locked_state(repo) as (directory, state):
-                _release_users(_task(state, task_id), result_ref, commit); save_state(directory, state)
+    if users_released and (wait_checks is not None or candidate):
+        with locked_state(repo) as (directory, state):
+            _release_users(_task(state, task_id), result_ref, commit); save_state(directory, state)
     if users_released:
         from .producers import retry as release_producers
         released = release_producers(repo, task_id)
@@ -1242,6 +1267,19 @@ def _check_policy(repo, remote, gated, required_checks):
     return policy, checks.source(repo, gated, policy, required_checks) if gated else None
 
 
+def _gated_checks(repo, item, commit) -> list[dict]:
+    """The checks integration will require on ``commit``; none when unreadable,
+    since integration then refuses on its own reading."""
+    try:
+        _, proposed = _check_policy(repo, item['remote'], commit, item.get('required_checks', []))
+        gated = item.get('required_checks', []) + (proposed['added'] if proposed else [])
+        if gated:
+            checks.repository(repo, item['remote'])
+        return gated
+    except LifecycleError:
+        return []
+
+
 def _await_checks(repo: Path, task_id: str, seconds: float) -> None:
     """Wait for the checks the next integration gates on, holding no lease or lock.
 
@@ -1251,7 +1289,7 @@ def _await_checks(repo: Path, task_id: str, seconds: float) -> None:
     """
     with locked_state(repo) as (_, state):
         item = _task(state, task_id)
-        gated = item['acceptance']['commit']; remote = item['remote']
+        gated = _pushed(item)['commit']; remote = item['remote']
         required_checks = item.get('required_checks', [])
         intent = state['intents'].get(task_id)
         if (intent and intent.get('remote_checks')) or (item.get('integrated') or {}).get('source') == gated:
@@ -1387,7 +1425,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
         with locked_state(repo) as (_, state):
             item = _task(state, task_id)
             required_checks = item.get('required_checks', [])
-            gated = item.get('acceptance', {}).get('commit')
+            gated = (_pushed(item) or {}).get('commit')
             pending = state['intents'].get(task_id)
             settled = (item.get('integrated') or {}).get('source') == gated or pending
         # Query outside the state lock; the leases pin this task and its target.
@@ -1420,11 +1458,13 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                     withdraw(); raise
         with locked_state(repo) as (directory, state):
             item = _task(state, task_id)
-            if item.get('hold') or not item.get('acceptance'):
+            if item.get('hold') or not _pushed(item):
                 raise LifecycleError('source is held or not accepted: ' + task_id)
-            acceptance = item['acceptance']; source_commit = acceptance['commit']
+            source_commit = _pushed(item)['commit']
             if item.get('required_checks', []) != required_checks:
                 raise LifecycleError('required checks changed during integration')
+            if _is_candidate(item) and not gated_checks:
+                raise LifecycleError('a candidate needs required checks to be accepted; run finish again')
             source_branch = branch_for_task(repo, task_id)
             if head(repo, 'refs/heads/' + source_branch) != source_commit:
                 raise LifecycleError('source HEAD differs from the exact accepted identity')
@@ -1589,6 +1629,13 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                     intent.pop('source_checks_policy', None)
                     intent.update(remote_checks=gate, **({'required_checks_policy': policy} if policy else {}),
                                   **({'source_checks_policy': proposed} if proposed else {}))
+                    save_state(directory, state)
+                if _is_candidate(item):
+                    # The source's checks succeeded and the target validated
+                    # the exact commit pushed next: the candidate is accepted.
+                    candidate = item.pop('candidate')
+                    item['acceptance'] = {**candidate, 'validation': {'integration': evidence},
+                                          'remote_checks': intent['remote_checks'], 'accepted_at': _now()}
                     save_state(directory, state)
                 pushed = _push(target_worktree, item['preflight'], target_branch, item['remote'], expected_head=merged)
                 record = {'destination': target_branch, 'commit': merged, 'source': source_commit,
@@ -2157,6 +2204,9 @@ def retire_pending(repo, task: str | None = None) -> dict:
             else:
                 # Integration rechecks exact accepted identities and resumes its
                 # existing intent. It cannot create acceptance for new work.
+                with locked_state(repo) as (_, state):
+                    if _is_candidate(_task(state, name)):
+                        raise LifecycleError('a candidate is accepted only by finish')
                 _integrate(repo, name, reference)
                 from .producers import retry as release_producers
                 released = release_producers(repo, name)

@@ -49,7 +49,7 @@ def _validate_bound(repo: Path, task: str, item: dict) -> Path:
     workspace = task_worktree(repo, branch)
     if top(repo) != workspace or current_branch(repo) != branch or bound_task(repo) != task:
         raise LifecycleError('owner receipt registration requires the bound task worktree')
-    if item.get('acceptance') or item.get('hold') or item.get('retire') or item.get('completion_release'):
+    if item.get('acceptance') or item.get('candidate') or item.get('hold') or item.get('retire') or item.get('completion_release'):
         raise LifecycleError('owner receipt registration requires an active unheld task')
     return workspace
 

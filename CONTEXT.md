@@ -46,6 +46,10 @@ _Avoid_: cache、省略された validation、検証済み tree
 受入 commit の required check が成功する前に、統合先 checkout で fast-forward または merge を行い validation まで済ませた、まだ push していない統合。check が成功すれば同じ finish がそれを push し、失敗・期限切れ・拒否なら統合先を準備前の HEAD に戻して取り下げる。統合済みではない。
 _Avoid_: 先行 push、仮統合、統合済み
 
+**Candidate**:
+required check を要する task の finish が、task checkout で validation をせずに push した commit。受入ではない。その commit の required check が成功し、統合先 checkout がこれから push する commit の validation に成功したとき、同じ記録が受入になる。それまで dependency・child の統合・退役・owner receipt は、これを受入として扱わない。統合先が進んでいて merge commit を作る場合、統合先で validation されるのは merge commit であり、candidate そのものは validation input にならない。candidate は topic の required check で確かめ、統合先へ届く内容は merge commit の validation で確かめるので、この差を許容する。
+_Avoid_: 受入済み、検証済み commit、仮受入
+
 ### Required checks
 
 **Required check state**:

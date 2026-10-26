@@ -140,8 +140,9 @@ class RequiredChecksTest(unittest.TestCase):
         run(self.root, "push", "-q", "origin", "trunk")
         return run(self.root, "rev-parse", "HEAD")
 
-    def accepted(self, task):
-        return status(self.topic, task)["acceptance"]["commit"]
+    def pushed(self, task):
+        data = status(self.topic, task)
+        return (data.get("acceptance") or data["candidate"])["commit"]
 
     def test_repository_without_required_checks_integrates_without_querying(self):
         self.start("plain", required=())
@@ -153,7 +154,7 @@ class RequiredChecksTest(unittest.TestCase):
     def test_unsucceeded_checks_refuse_integration_until_success(self):
         self.start("gate", required=(TEST, LINT))
         self.refused("gate", "missing")
-        commit = self.accepted("gate")
+        commit = self.pushed("gate")
         self.assertEqual(self.github.queries[0], ("example/repo", commit, TEST["name"]))
         self.github.add("example/repo", commit, LINT)
         for status_, conclusion in (("queued", None), ("in_progress", None), ("completed", "failure"),
@@ -178,13 +179,13 @@ class RequiredChecksTest(unittest.TestCase):
         self.refused("exact", "missing")
         base = run(self.root, "rev-parse", "trunk")
         self.github.add("example/repo", base, TEST)
-        self.github.add("example/repo", self.accepted("exact"), TEST, app="other-app")
+        self.github.add("example/repo", self.pushed("exact"), TEST, app="other-app")
         self.refused("exact", "missing")
 
     def test_only_the_latest_run_counts(self):
         self.start("latest")
         self.refused("latest", "missing")
-        commit = self.accepted("latest")
+        commit = self.pushed("latest")
         self.github.add("example/repo", commit, TEST)
         self.github.add("example/repo", commit, TEST, "completed", "failure")
         self.refused("latest", '"state": "failure"')
@@ -196,7 +197,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.github.unavailable = True
         self.refused("unavailable", "unavailable")
         self.github.unavailable = False
-        commit = self.accepted("unavailable")
+        commit = self.pushed("unavailable")
         self.github.add("example/repo", commit, TEST)
         self.github.runs[("example/repo", commit, TEST["name"])][0]["head_sha"] = "0" * 40
         self.refused("unavailable", "not bound to the requested commit")
@@ -216,37 +217,157 @@ class RequiredChecksTest(unittest.TestCase):
     def test_new_head_requires_its_own_checks(self):
         self.start("moved")
         self.refused("moved", "missing")
-        first = self.accepted("moved")
+        first = self.pushed("moved")
         self.github.add("example/repo", first, TEST)
         (self.topic / "feature.txt").write_text("changed\n")
         run(self.topic, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
             "commit", "-qam", "change after checks")
         self.plan.write_text("{}")
         self.refused("moved", "missing")
-        self.assertNotEqual(self.accepted("moved"), first)
+        self.assertNotEqual(self.pushed("moved"), first)
 
     def counted(self, task):
         log = Path(self.temp.name) / ("validations-" + task)
         self.start(task, validation=[sys.executable, "-c",
             "import os,sys; open(sys.argv[1], 'a').write(os.getcwd() + '\\n')", str(log)])
         self.refused(task, "missing")
-        return lambda where: [Path(line).resolve() for line in log.read_text().splitlines()].count(Path(where).resolve())
+        return lambda where: [Path(line).resolve() for line in (log.read_text() if log.exists() else "").splitlines()
+                              ].count(Path(where).resolve())
 
-    def test_resume_after_checks_reuses_the_saved_acceptance(self):
+    def test_resume_after_checks_reuses_the_saved_candidate(self):
         validations = self.counted("resume")
-        accepted = status(self.topic, "resume")["acceptance"]
-        commit = accepted["commit"]
+        candidate = status(self.topic, "resume")["candidate"]
+        commit = candidate["commit"]
         self.github.add("example/repo", commit, TEST, "queued", None)
         self.refused("resume", '"state": "queued"')
         self.github.add("example/repo", commit, TEST)
         with patch("workspace_lifecycle.service._push", wraps=service._push) as pushes:
             result = self.finish("resume")
-        self.assertEqual(validations(self.topic), 1, "no topic validation after acceptance")
+        self.assertEqual(validations(self.topic), 0, "the task checkout is never validated")
         self.assertEqual([Path(call.args[0]) for call in pushes.call_args_list], [self.root.resolve()])
-        self.assertEqual(status(self.topic, "resume")["acceptance"], accepted)
+        after = status(self.topic, "resume"); accepted = after["acceptance"]
+        self.assertNotIn("candidate", after)
+        self.assertEqual({key: accepted[key] for key in candidate}, candidate)
+        self.assertEqual(accepted["remote_checks"]["commit"], commit)
+        self.assertEqual(list(accepted["validation"]), ["integration"])
         self.assertEqual(validations(self.root.resolve()), 1)
         self.assertEqual(result["integration"]["commit"], self.trunk())
         self.assertEqual(self.trunk(), commit, "unmoved trunk fast-forwards to the accepted commit")
+
+    def test_a_pushed_candidate_is_not_accepted(self):
+        validations = self.counted("candidate")
+        data = status(self.topic, "candidate")
+        self.assertNotIn("acceptance", data)
+        self.assertEqual(data["completion"], "candidate")
+        self.assertEqual(run(self.root, "ls-remote", str(self.remote), "refs/heads/topic/candidate").split()[0],
+                         data["candidate"]["commit"], "pushed so the topic checks can start")
+        self.assertEqual(validations(self.topic), 0)
+        with self.assertRaisesRegex(LifecycleError, "accepted result"):
+            service.retire(self.root, task="candidate", result_ref="issue/candidate", users_released=True)
+
+    def test_validation_counts_on_the_merge_commit(self):
+        validations = self.counted("merged")
+        run(self.root, "commit", "-q", "--allow-empty", "-m", "later")
+        run(self.root, "push", "-q", "origin", "trunk")
+        commit = self.pushed("merged")
+        self.github.add("example/repo", commit, TEST)
+        result, _ = self.waiting("merged")
+        merged = result["integration"]["commit"]
+        self.assertNotEqual(merged, commit)
+        self.assertEqual(run(self.root, "rev-parse", merged + "^2"), commit)
+        self.assertEqual((validations(self.topic), validations(self.root)), (0, 1))
+        self.assertEqual(status(self.topic, "merged")["acceptance"]["validation"]["integration"]["returncode"], 0)
+
+    def test_without_required_checks_the_task_checkout_still_validates(self):
+        log = Path(self.temp.name) / "validations-plain"
+        self.start("plain", required=(), validation=[sys.executable, "-c",
+            "import os,sys; open(sys.argv[1], 'a').write(os.getcwd() + '\\n')", str(log)])
+        self.finish("plain")
+        lines = [Path(line).resolve() for line in log.read_text().splitlines()]
+        self.assertEqual((lines.count(self.topic.resolve()), lines.count(self.root.resolve())), (1, 1))
+        self.assertNotIn("candidate", status(self.topic, "plain"))
+
+    def test_unreadable_checks_keep_the_task_checkout_validation(self):
+        del self.names[str(self.remote)]
+        log = Path(self.temp.name) / "validations-foreign"
+        self.start("foreign", validation=[sys.executable, "-c",
+            "import os,sys; open(sys.argv[1], 'a').write(os.getcwd() + '\\n')", str(log)])
+        self.refused("foreign", "GitHub remote")
+        self.assertEqual(len(log.read_text().splitlines()), 1, "validated in the task checkout as before")
+        self.assertIn("acceptance", status(self.topic, "foreign"))
+
+    def test_target_validation_guards_what_the_topic_checks_cannot(self):
+        for task, script in (("dirt", "open('made-by-validation', 'w').close()"),
+                             ("local-only", "import sys; sys.exit(1)")):
+            with self.subTest(task=task):
+                validation = [sys.executable, "-c",
+                              "import os,sys\nif os.getcwd() == sys.argv[1]:\n    " + script, str(self.root.resolve())]
+                self.start(task, validation=validation)
+                self.refused(task, "missing")
+                commit = self.pushed(task)
+                self.github.add("example/repo", commit, TEST); before = self.trunk()
+                with self.assertRaisesRegex(LifecycleError, "changed during final validation|validation failed"):
+                    self.finish(task)
+                self.assertEqual(self.trunk(), before, "nothing reaches the default branch")
+                self.assertNotIn("acceptance", status(self.topic, task))
+                self.assertEqual(status(self.topic, task)["candidate"]["commit"], commit)
+                self.tearDown(); self.setUp()
+
+    def test_an_unaccepted_parent_takes_no_child(self):
+        import hashlib
+        parent = Path(self.temp.name) / "parent"
+        begin(self.root, task="parent", request="issue/parent", remote="origin", branch="topic/parent",
+              worktree=str(parent), validation=["git", "diff", "--check"], preflight=self.preflight,
+              required_checks=[TEST])
+        (parent / "parent.txt").write_bytes(b"parent\n")
+        parent_plan = Path(self.temp.name) / "plan-parent.json"
+        parent_plan.write_text(json.dumps({"commit": [{
+            "path": "parent.txt", "classification": "source", "owner": "parent",
+            "evidence": "created by this disposable task", "safe_to_commit": True,
+            "sha256": hashlib.sha256(b"parent\n").hexdigest()}]}))
+        with self.assertRaisesRegex(LifecycleError, "missing"):
+            finish(parent, task="parent", plan_path=str(parent_plan), result_ref="issue/parent")
+        parent_head = run(parent, "rev-parse", "HEAD")
+        for child, edge in (("child", {"parent": "parent"}), ("dependent", {"dependencies": ["parent"]})):
+            with self.subTest(child=child):
+                worktree = Path(self.temp.name) / child
+                begin(self.root, task=child, request="issue/" + child, remote="origin", branch="topic/" + child,
+                      worktree=str(worktree), validation=["git", "diff", "--check"], preflight=self.preflight,
+                      required_checks=[], **edge)
+                (worktree / (child + ".txt")).write_bytes(b"child\n")
+                plan = Path(self.temp.name) / ("plan-" + child + ".json")
+                plan.write_text(json.dumps({"commit": [{
+                    "path": child + ".txt", "classification": "source", "owner": child,
+                    "evidence": "created by this disposable task", "safe_to_commit": True,
+                    "sha256": hashlib.sha256(b"child\n").hexdigest()}]}))
+                with self.assertRaisesRegex(LifecycleError, "not accepted: parent"):
+                    finish(worktree, task=child, plan_path=str(plan), result_ref="issue/" + child)
+                self.assertEqual(run(parent, "rev-parse", "HEAD"), parent_head)
+                self.assertNotIn("integrated", status(worktree, child))
+        self.assertNotIn("acceptance", status(parent, "parent"))
+
+    def test_an_acceptance_saved_by_an_earlier_version_resumes(self):
+        validations = self.counted("earlier")
+        from workspace_lifecycle.state import locked_state, save_state
+        with locked_state(self.topic) as (directory, state):
+            item = state["tasks"]["earlier"]; candidate = item["candidate"]  # 0.8.8 accepts beside it
+            item["acceptance"] = {**candidate, "validation": {"postcommit": {"argv": [], "returncode": 0}},
+                                  "accepted_at": candidate["pushed_at"]}
+            save_state(directory, state)
+        self.github.add("example/repo", candidate["commit"], TEST)
+        with patch("workspace_lifecycle.service._push", wraps=service._push) as pushes:
+            self.finish("earlier")
+        self.assertEqual([Path(call.args[0]) for call in pushes.call_args_list], [self.root.resolve()])
+        self.assertEqual((validations(self.topic), validations(self.root)), (0, 1))
+        self.assertEqual(list(status(self.topic, "earlier")["acceptance"]["validation"]), ["postcommit"])
+
+    def test_clearing_the_requirement_drops_the_candidate(self):
+        validations = self.counted("cleared")
+        update_required_checks(self.topic, task="cleared", expected=[TEST], required_checks=[], evidence="issue/cleared")
+        self.assertNotIn("candidate", status(self.topic, "cleared"))
+        result = self.finish("cleared")
+        self.assertEqual((validations(self.topic), validations(self.root)), (1, 1))
+        self.assertEqual(result["integration"]["commit"], self.trunk())
 
     def waiting(self, task, steps=(), seconds=600):
         clock = FakeClock(steps)
@@ -268,7 +389,7 @@ class RequiredChecksTest(unittest.TestCase):
 
     def test_wait_integrates_once_pending_checks_succeed(self):
         self.start("wait", required=(TEST, LINT))
-        commit = lambda: self.accepted("wait")
+        commit = lambda: self.pushed("wait")
         def unlocked():
             # Waiting holds neither the state lock nor the integration target's lease.
             status(self.topic, "wait")
@@ -288,7 +409,7 @@ class RequiredChecksTest(unittest.TestCase):
 
     def test_target_validates_while_the_checks_run(self):
         validations = self.counted("overlap")
-        commit = self.accepted("overlap"); base = self.trunk(); seen = []
+        commit = self.pushed("overlap"); base = self.trunk(); seen = []
         def running():
             seen.append((validations(self.root), run(self.root, "rev-parse", "HEAD"), self.trunk()))
             self.github.add("example/repo", commit, TEST)
@@ -308,11 +429,12 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertNotIn("integrated", status(self.topic, task))
         self.assertFalse((self.root / "feature.txt").exists())
         self.assertEqual(run(self.root, "status", "--porcelain", "--ignored"), "")
+        self.assertNotIn("acceptance", status(self.topic, task))
 
     def test_failed_checks_withdraw_the_prepared_integration(self):
         self.start("undo")
         self.refused("undo", "missing")
-        commit = self.accepted("undo"); base = self.trunk()
+        commit = self.pushed("undo"); base = self.trunk()
         self.waiting_refused("undo", "failed", [lambda: self.github.add("example/repo", commit, TEST, "completed", "failure")])
         self.withdrawn("undo", base)
         self.github.add("example/repo", commit, TEST)
@@ -331,7 +453,7 @@ class RequiredChecksTest(unittest.TestCase):
 
     def test_an_interrupted_preparation_is_withdrawn_or_pushed_by_a_plain_finish(self):
         validations = self.counted("interrupted")
-        commit = self.accepted("interrupted"); base = self.trunk()
+        commit = self.pushed("interrupted"); base = self.trunk()
         self.assertIn("prepared", service._integrate(self.topic, "interrupted", "issue/interrupted", prepare=True))
         self.assertEqual(run(self.root, "rev-parse", "HEAD"), commit)
         self.refused("interrupted", "missing")
@@ -348,7 +470,7 @@ class RequiredChecksTest(unittest.TestCase):
         from workspace_lifecycle.state import locked_state, save_state
         self.start("legacy")
         self.refused("legacy", "missing")
-        commit = self.accepted("legacy")
+        commit = self.pushed("legacy")
         service._integrate(self.topic, "legacy", "issue/legacy", prepare=True)
         with locked_state(self.topic) as (directory, state):
             del state["intents"]["legacy"]["deferred"]; save_state(directory, state)
@@ -364,7 +486,7 @@ class RequiredChecksTest(unittest.TestCase):
         run(self.root, "push", "-q", "origin", "trunk")
         with self.assertRaises(LifecycleError):
             self.finish("conflict")
-        commit = self.accepted("conflict")
+        commit = self.pushed("conflict")
         with patch("workspace_lifecycle.checks.time", FakeClock()), self.assertRaises(LifecycleError):
             finish(self.topic, task="conflict", plan_path=str(self.plan), result_ref="issue/conflict", wait_checks=30)
         self.assertEqual(run(self.root, "rev-parse", "MERGE_HEAD"), commit)
@@ -376,7 +498,7 @@ class RequiredChecksTest(unittest.TestCase):
 
     def test_remote_advance_during_the_wait_validates_again(self):
         validations = self.counted("raced")
-        commit = self.accepted("raced"); other = Path(self.temp.name) / "racer"
+        commit = self.pushed("raced"); other = Path(self.temp.name) / "racer"
         def race():
             run(self.root.parent, "clone", "-q", str(self.remote), str(other))
             run(other, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
@@ -393,7 +515,7 @@ class RequiredChecksTest(unittest.TestCase):
     def test_wait_stops_at_the_first_failed_check(self):
         self.start("fail", required=(TEST, LINT))
         self.refused("fail", "missing")
-        commit = self.accepted("fail")
+        commit = self.pushed("fail")
         self.github.add("example/repo", commit, LINT, "in_progress", None)
         for conclusion in ("failure", "cancelled", "timed_out", "action_required", "skipped", "neutral"):
             with self.subTest(conclusion=conclusion):
@@ -405,12 +527,12 @@ class RequiredChecksTest(unittest.TestCase):
                 failed = self.reported(error)
                 self.assertEqual(failed, [{**TEST, "state": conclusion, "run": failed[0]["run"], "url": url}])
                 self.assertIn("finish again", error.recovery)
-        self.assertEqual(self.accepted("fail"), commit)
+        self.assertEqual(self.pushed("fail"), commit)
 
     def test_wait_ignores_other_commits_apps_names_and_older_runs(self):
         self.start("foreign-wait")
         self.refused("foreign-wait", "missing")
-        commit = self.accepted("foreign-wait")
+        commit = self.pushed("foreign-wait")
         self.github.add("example/repo", run(self.root, "rev-parse", "trunk"), TEST)
         self.github.add("example/repo", commit, TEST, app="other-app")
         self.github.add("example/repo", commit, {"app": "github-actions", "name": "native-e2e"})
@@ -437,25 +559,25 @@ class RequiredChecksTest(unittest.TestCase):
                 finish(self.topic, task="limit", plan_path=str(self.plan), result_ref="issue/limit", wait_checks=seconds)
         self.assertNotIn("acceptance", status(self.topic, "limit"))
 
-    def test_unavailable_status_during_wait_resumes_the_saved_acceptance(self):
+    def test_unavailable_status_during_wait_resumes_the_saved_candidate(self):
         validations = self.counted("flaky")
-        accepted = status(self.topic, "flaky")["acceptance"]
+        candidate = status(self.topic, "flaky")["candidate"]
         def outage(): self.github.unavailable = True
         self.waiting_refused("flaky", "unavailable", [outage])
         self.github.unavailable = False
-        self.github.add("example/repo", accepted["commit"], TEST)
+        self.github.add("example/repo", candidate["commit"], TEST)
         with patch("workspace_lifecycle.service._push", wraps=service._push) as pushes:
             result, _ = self.waiting("flaky")
-        self.assertEqual(validations(self.topic), 1, "no topic validation after acceptance")
+        self.assertEqual(validations(self.topic), 0, "the task checkout is never validated")
         self.assertEqual([Path(call.args[0]) for call in pushes.call_args_list], [self.root.resolve()])
-        self.assertEqual(status(self.topic, "flaky")["acceptance"], accepted)
+        self.assertEqual(status(self.topic, "flaky")["acceptance"]["push"], candidate["push"])
         self.assertEqual(result["integration"]["commit"], self.trunk())
 
     def test_a_hold_during_the_wait_refuses_integration(self):
         from workspace_lifecycle.service import hold
         self.start("held")
         self.refused("held", "missing")
-        commit = self.accepted("held")
+        commit = self.pushed("held")
         def held():
             hold(self.topic, "held", "review", "release after review")
             self.github.add("example/repo", commit, TEST)
@@ -464,7 +586,7 @@ class RequiredChecksTest(unittest.TestCase):
     def test_a_new_declaration_during_the_wait_refuses_integration(self):
         self.start("declared")
         self.refused("declared", "missing")
-        commit = self.accepted("declared")
+        commit = self.pushed("declared")
         declared = []; before = run(self.root, "rev-parse", "HEAD")
         other = Path(self.temp.name) / "other"
         def declare():
@@ -488,7 +610,7 @@ class RequiredChecksTest(unittest.TestCase):
     def test_a_moved_source_during_the_wait_refuses_integration(self):
         self.start("moved-wait")
         self.refused("moved-wait", "missing")
-        commit = self.accepted("moved-wait")
+        commit = self.pushed("moved-wait")
         def moved():
             (self.topic / "feature.txt").write_text("moved\n")
             run(self.topic, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
@@ -496,27 +618,29 @@ class RequiredChecksTest(unittest.TestCase):
             self.github.add("example/repo", commit, TEST)
         self.waiting_refused("moved-wait", "accepted identity", [moved])
 
-    def accepts_again(self, task, change, refusal="missing"):
+    def accepts_again(self, task, change, refusal="missing", validated=0):
         validations = self.counted(task)
-        accepted = status(self.topic, task)["acceptance"]
+        candidate = status(self.topic, task)["candidate"]
         change()
-        self.refused(task, refusal)
-        self.assertGreater(validations(self.topic), 1, "the changed finish validated again")
-        return accepted
+        with patch("workspace_lifecycle.service._push", wraps=service._push) as pushes:
+            self.refused(task, refusal)
+        self.assertEqual(len(pushes.call_args_list), 1, "the changed finish pushed again")
+        self.assertEqual(validations(self.topic), validated)
+        return candidate
 
     def test_resume_without_saved_finish_input_accepts_again(self):
         def legacy():
             from workspace_lifecycle.state import locked_state, save_state
             with locked_state(self.topic) as (directory, state):
-                del state["tasks"]["legacy"]["acceptance"]["finish_input"]; save_state(directory, state)
-        accepted = self.accepts_again("legacy", legacy)
-        self.assertNotEqual(status(self.topic, "legacy")["acceptance"]["accepted_at"], accepted["accepted_at"])
+                del state["tasks"]["legacy"]["candidate"]["finish_input"]; save_state(directory, state)
+        candidate = self.accepts_again("legacy", legacy)
+        self.assertNotEqual(status(self.topic, "legacy")["candidate"]["pushed_at"], candidate["pushed_at"])
 
     def test_resume_with_another_result_or_plan_accepts_again(self):
         def other_result():
             self.finish = lambda name: finish(self.topic, task=name, plan_path=str(self.plan), result_ref="issue/other")
         self.accepts_again("result", other_result)
-        self.assertEqual(status(self.topic, "result")["acceptance"]["result_ref"], "issue/other")
+        self.assertEqual(status(self.topic, "result")["candidate"]["result_ref"], "issue/other")
         del self.finish
         self.tearDown(); self.setUp()
 
@@ -533,25 +657,27 @@ class RequiredChecksTest(unittest.TestCase):
     def test_resume_with_another_push_url_accepts_again(self):
         mirror = Path(self.temp.name) / "mirror.git"
         run(self.root, "clone", "-q", "--bare", str(self.remote), str(mirror))
+        # The checks of an unknown push repository cannot be read, so the
+        # task checkout is validated as without required checks.
         self.accepts_again("push-url", lambda: run(self.topic, "remote", "set-url", "--push", "origin", str(mirror)),
-                           "PUSH_REPOSITORY_MISMATCH")
+                           "PUSH_REPOSITORY_MISMATCH", validated=1)
 
     def test_resume_with_unowned_dirt_refuses_before_validation(self):
         validations = self.counted("dirty")
-        accepted = status(self.topic, "dirty")["acceptance"]
+        candidate = status(self.topic, "dirty")["candidate"]
         (self.topic / "stray.txt").write_text("unowned\n")
         self.refused("dirty", "unresolved dirty is not a completion exception: stray.txt")
-        self.assertEqual(validations(self.topic), 1)
-        self.assertEqual(status(self.topic, "dirty")["acceptance"], accepted)
+        self.assertEqual(validations(self.topic), 0)
+        self.assertEqual(status(self.topic, "dirty")["candidate"], candidate)
 
     def test_resume_with_a_moved_topic_remote_does_not_reuse_acceptance(self):
         validations = self.counted("moved-remote")
-        commit = self.accepted("moved-remote")
+        commit = self.pushed("moved-remote")
         self.github.add("example/repo", commit, TEST)
         foreign = run(self.root, "commit-tree", "-p", commit, "-m", "foreign", commit + "^{tree}")
         run(self.root, "push", "-q", "origin", foreign + ":refs/heads/topic/moved-remote")
         self.finish("moved-remote")
-        self.assertEqual(validations(self.topic), 2)
+        self.assertEqual((validations(self.topic), validations(self.root)), (0, 1))
         self.assertEqual(status(self.topic, "moved-remote")["acceptance"]["push"]["remote_observed"], foreign)
 
     def test_interrupted_merge_keeps_its_proof_and_rejects_a_changed_remote(self):
@@ -561,7 +687,7 @@ class RequiredChecksTest(unittest.TestCase):
                       str(marker), str(self.root.resolve())]
         self.start("resume", validation=validation)
         self.refused("resume", "missing")
-        commit = self.accepted("resume")
+        commit = self.pushed("resume")
         self.github.add("example/repo", commit, TEST)
         marker.write_text("")
         with self.assertRaisesRegex(LifecycleError, "configured validation failed"):
@@ -606,7 +732,7 @@ class RequiredChecksTest(unittest.TestCase):
         with self.assertRaisesRegex(LifecycleError, "missing"):
             self.finish("child")
         self.assertEqual(run(parent, "rev-parse", "HEAD"), parent_head)
-        self.github.add("example/repo", self.accepted("child"), TEST)
+        self.github.add("example/repo", self.pushed("child"), TEST)
         result = self.finish("child")
         self.assertEqual(result["integration"]["parent"]["destination"], "trunk")
         self.assertEqual((self.root / "child.txt").read_text(), "child\n")
@@ -626,6 +752,8 @@ class RequiredChecksTest(unittest.TestCase):
         finish_parent = lambda: finish(parent, task="parent", plan_path=str(parent_plan), result_ref="issue/parent")
         with self.assertRaisesRegex(LifecycleError, "missing"):
             finish_parent()
+        self.github.add("example/repo", status(parent, "parent")["candidate"]["commit"], TEST)
+        finish_parent()
         begin(self.root, task="child", request="issue/child", remote="origin", branch="topic/child",
               worktree=str(self.topic), parent="parent", validation=["git", "diff", "--check"],
               preflight=self.preflight, required_checks=[])
@@ -654,7 +782,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.start(task, required=required, **kwargs)
         self.refused(task, "missing")
         for check in required:
-            self.github.add("example/repo", self.accepted(task), check)
+            self.github.add("example/repo", self.pushed(task), check)
 
     def test_without_wait_the_integrated_commit_is_not_queried(self):
         self.ready("unwaited")
@@ -682,8 +810,8 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertNotIn("next", outcome)
         integrated = status(self.topic, "merged")["integrated"]
         self.assertEqual(integrated["integration_checks"], {k: v for k, v in outcome.items() if k != "recorded_on"})
-        self.assertEqual(integrated["remote_checks"]["commit"], self.accepted("merged"))
-        self.assertEqual(self.accepted("merged"), merged, "the topic's success on the same commit does not count")
+        self.assertEqual(integrated["remote_checks"]["commit"], self.pushed("merged"))
+        self.assertEqual(self.pushed("merged"), merged, "the topic's success on the same commit does not count")
 
     def test_a_failed_integrated_check_keeps_the_integration_and_the_task(self):
         from workspace_lifecycle.cli import main
@@ -728,7 +856,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.ready("foreign-merge")
         def foreign():
             merged = self.trunk()
-            self.github.add("example/repo", self.accepted("foreign-merge"), TEST, branch="topic")
+            self.github.add("example/repo", self.pushed("foreign-merge"), TEST, branch="topic")
             self.github.add("example/repo", merged, TEST, app="other-app")
             self.github.add("example/repo", merged, {"app": "github-actions", "name": "native-e2e"})
         result, clock = self.waiting("foreign-merge", [foreign], seconds=60)
@@ -750,13 +878,13 @@ class RequiredChecksTest(unittest.TestCase):
         result, clock = self.waiting("advanced", [lambda: self.github.add("example/repo", self.trunk(), TEST)])
         merged = self.trunk()
         self.assertEqual(run(self.root, "rev-list", "--parents", "-1", merged).split()[1:],
-                         [later, self.accepted("advanced")])
+                         [later, self.pushed("advanced")])
         self.assertEqual((result["integration_checks"]["state"], result["integration_checks"]["commit"]), ("success", merged))
         self.assertEqual(clock.sleeps, [30], "neither the accepted nor the previous trunk commit's success counts")
 
     def test_wait_resumes_on_the_saved_integration_without_pushing_again(self):
         validations = self.counted("resumed")
-        self.github.add("example/repo", self.accepted("resumed"), TEST)
+        self.github.add("example/repo", self.pushed("resumed"), TEST)
         real_integrate = service._integrate
         def integrate_then_outage(*args, **kwargs):
             integration = real_integrate(*args, **kwargs)
@@ -795,7 +923,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.start("introduced", required=())
         self.propose([LINT])
         self.refused("introduced", "missing")
-        self.github.add("example/repo", self.accepted("introduced"), LINT)
+        self.github.add("example/repo", self.pushed("introduced"), LINT)
         result, _ = self.waiting("introduced", seconds=30)
         self.assertEqual(result["integration_checks"]["checks"], [{**LINT, "state": "missing"}])
 
@@ -827,7 +955,7 @@ class RequiredChecksTest(unittest.TestCase):
             "evidence": "created by this disposable task", "safe_to_commit": True,
             "sha256": hashlib.sha256(b"child\n").hexdigest()}]}))
         self.refused("child", "missing")
-        self.github.add("example/repo", self.accepted("child"), TEST)
+        self.github.add("example/repo", self.pushed("child"), TEST)
         result, _ = self.waiting("child", [lambda: self.github.add("example/repo", self.trunk(), TEST)])
         outcome = result["integration_checks"]
         self.assertEqual((outcome["state"], outcome["commit"], outcome["recorded_on"]), ("success", self.trunk(), "parent"))
@@ -879,7 +1007,7 @@ class RequiredChecksTest(unittest.TestCase):
                          (".github/required-checks.json", declared_at, [TEST, LINT]))
         self.assertEqual(policy["blob"], run(self.root, "rev-parse", declared_at + ":.github/required-checks.json"))
         self.refused("inherit", "missing")
-        commit = self.accepted("inherit")
+        commit = self.pushed("inherit")
         self.github.add("example/repo", commit, TEST)
         self.github.add("example/repo", commit, LINT, "completed", "failure")
         self.refused("inherit", '"state": "failure"')
@@ -906,7 +1034,7 @@ class RequiredChecksTest(unittest.TestCase):
 
     def accepted_after_refusal(self, task):
         self.refused(task, "missing")
-        return self.accepted(task)
+        return self.pushed(task)
 
     def test_invalid_or_unreadable_declaration_refuses_begin(self):
         for content, message in (("not json", "invalid"), ('{"app": "x", "name": "y"}', "invalid"),
@@ -955,7 +1083,7 @@ class RequiredChecksTest(unittest.TestCase):
         record = status(self.topic, "legacy")
         self.assertEqual(record["required_checks_policy"]["commit"], declared_at)
         self.assertEqual(record["required_checks_updates"][-1]["policy"]["checks"], [TEST])
-        self.github.add("example/repo", self.accepted("legacy"), TEST)
+        self.github.add("example/repo", self.pushed("legacy"), TEST)
         self.assertEqual(self.finish("legacy")["integration"]["destination"], "trunk")
 
     def test_removed_declaration_keeps_the_task_requirement_until_updated(self):
@@ -1010,7 +1138,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.propose([TEST])
         self.refused("introduce", "missing")
         self.assertNotIn("required_checks", status(self.topic, "introduce"))
-        commit = self.accepted("introduce")
+        commit = self.pushed("introduce")
         self.github.add("example/repo", run(self.root, "rev-parse", "trunk"), TEST)
         self.github.add("example/repo", commit, TEST, app="other-app")
         self.refused("introduce", "missing")
@@ -1036,7 +1164,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.start("resume-added", required=None, validation=validation)
         self.propose([TEST])
         self.refused("resume-added", "missing")
-        self.github.add("example/repo", self.accepted("resume-added"), TEST)
+        self.github.add("example/repo", self.pushed("resume-added"), TEST)
         marker.write_text("")
         with self.assertRaisesRegex(LifecycleError, "configured validation failed"):
             self.finish("resume-added")
@@ -1052,7 +1180,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.start("stale", required=None)
         self.propose([TEST])
         self.refused("stale", "missing")
-        self.github.add("example/repo", self.accepted("stale"), TEST)
+        self.github.add("example/repo", self.pushed("stale"), TEST)
         self.propose([TEST, LINT])
         self.plan.write_text("{}")
         self.refused("stale", "missing")
@@ -1062,7 +1190,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.start("rename", required=None)
         self.propose([LINT])
         self.refused("rename", "missing")
-        commit = self.accepted("rename")
+        commit = self.pushed("rename")
         self.github.add("example/repo", commit, TEST)
         self.refused("rename", re.escape(LINT["name"]))
         self.github.runs.clear()
@@ -1079,7 +1207,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.start("drop", required=None)
         self.propose(None)
         self.refused("drop", "missing")
-        self.github.add("example/repo", self.accepted("drop"), TEST)
+        self.github.add("example/repo", self.pushed("drop"), TEST)
         self.assertEqual(self.finish("drop")["integration"]["destination"], "trunk")
         proposed = status(self.topic, "drop")["integrated"]["source_checks_policy"]
         self.assertEqual((proposed["blob"], proposed["added"]), (None, []))

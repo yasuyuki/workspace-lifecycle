@@ -250,11 +250,28 @@ each app and name counts, and only `completed` with conclusion `success` passes.
 Runs of one workflow for both `push` and `pull_request` on the same commit share
 that identity, so the newer one decides, as in GitHub branch protection. A remote
 with several push URLs is refused.
+A task whose integration requires checks is not validated in its own checkout.
+Finish commits, pushes the topic at once so its checks start, and records the
+pushed commit as `candidate`, not as an acceptance. The candidate becomes the
+task's `acceptance` only when the checks succeeded on that exact commit and the
+target checkout validated the exact commit about to be pushed there; the
+acceptance then records that run as `validation.integration` beside the check
+evidence. So one local validation runs per finish, on the target's final HEAD,
+and a check the validator runs but CI lacks still precedes every push to the
+target. A dependency, a child integrating into this task, retirement and owner
+receipts all see no acceptance until then. When the target has moved, that
+validated commit is the merge commit, not the topic commit: the merge's own
+content is what reaches the target, and the topic commit is covered by its
+checks. Tasks without required checks, and tasks whose checks cannot be read
+when finish starts (an unreadable declaration or a non-GitHub push URL), still
+validate their checkout before the push and accept there. Integration then
+refuses on its own reading as before. `update-required-checks` drops a
+candidate, so the next finish decides again for the new requirement.
 Queued, running, failed, cancelled, skipped, neutral, missing or unavailable
-results refuse integration, leave the acceptance in place and change no target.
+results refuse integration, leave the candidate or acceptance in place and change no target.
 Retry the same finish after CI completes; a new HEAD needs its own successful
 checks. `finish --wait-checks [SECONDS]` instead waits for them after
-acceptance, holding no lifecycle lock or lease, and then integrates as usual.
+the push, holding no lifecycle lock or lease, and then integrates as usual.
 It asks GitHub every 30 seconds and stops as soon as any required check
 completes without success, naming each failed check with its state, run ID and
 GitHub URL. Missing, queued and running checks keep it waiting until SECONDS
@@ -265,18 +282,19 @@ nothing until the checks succeed. The push then reuses that validation when the
 target commit and checkout are unchanged; a synchronization with a moved remote
 validates again. Meanwhile the target holds this pending integration, so no
 other task integrates into it. A failure, timeout, unavailable status, refusal
-or interruption leaves the acceptance in place and returns the target to its
+or interruption leaves the candidate in place and returns the target to its
 HEAD before the integration, so repeating the finish resumes from the
-acceptance. A finish without the option withdraws such an interrupted
+candidate. A finish without the option withdraws such an interrupted
 integration when the checks have not succeeded, or pushes it after validating
 again when they have. State changes are reported on
 stderr; stdout keeps the one final JSON result. Without the option finish
-refuses at once, as before. That retry reuses the saved acceptance and neither validates nor pushes
+refuses at once, as before. That retry reuses the saved candidate or acceptance and neither validates nor pushes
 the task checkout again when the checkout is completely clean and its HEAD,
 plan, result reference, checkout identity, validation and preflight argv,
-remote fetch and push URLs and remote topic tip are those the acceptance
-recorded. Any difference, data waived at acceptance, or an acceptance saved by
-an earlier version validates and accepts again. The interrupted merge keeps that proof and is refused if the remote's
+remote fetch and push URLs and remote topic tip are those it
+recorded. Any difference, data waived at the push, or an acceptance saved by
+an earlier version without these inputs finishes again. With `--users-released`,
+a candidate's release is saved only after integration. The interrupted merge keeps that proof and is refused if the remote's
 repository changes. Tasks without required checks never query GitHub. Change an
 existing task's requirement with `update-required-checks`, which compares the
 exact current array and records durable evidence; it is refused while an
@@ -597,6 +615,14 @@ again.
 Version 0.8.8 integrates and validates in the target while `finish
 --wait-checks` waits for the accepted commit's checks, and pushes once they
 succeed, instead of starting that work after them.
+
+Version 0.8.9 no longer validates the task checkout of a task whose
+integration requires checks. It pushes the commit as a `candidate`, and the
+candidate is accepted only after its checks succeed and the target validates
+the commit it pushes. Acceptances saved by earlier versions resume unchanged.
+0.8.8 ignores a candidate and validates and accepts that task again, but refuses to resume
+an integration that 0.8.9 prepared for a candidate; finish or withdraw it with
+0.8.9 before a rollback.
 
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
