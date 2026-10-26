@@ -14,7 +14,7 @@ It also launches from the clone's unbound primary checkout. The sessions are a
 synthetic recorder; no agent CLI is used. Read [the feature map](features/README.md)
 for what this proves and what it leaves not-run.
 
-Requirements: Python 3.12+ with `venv` and `pip`, Git, and network access for
+Requirements: Python 3.14 with `venv` and `pip`, Git, and network access for
 pip to fetch the setuptools build backend. No authentication, remote service or
 private configuration is used.
 

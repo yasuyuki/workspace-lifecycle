@@ -20,7 +20,7 @@ covered by preservation evidence and unchanged retirement manifests; refusals
 remain pending for review. This safety tradeoff matters if checkouts contain
 large build outputs. Existing primary checkouts cannot be retired.
 
-`workspace-lifecycle` is an independently installable Python 3.12+ package for
+`workspace-lifecycle` is an independently installable Python 3.14 package for
 the workspace contract that Git does not provide. Build or install it from this
 directory; it is not published to PyPI. It imports no agent-rules
 checkout, private runtime, rule placement or inventory code.
@@ -40,7 +40,7 @@ workspace-lifecycle --help
 ```
 
 To test the source of a checkout, run `python -B tests/run.py` from it with
-Python 3.12+ and Git on `PATH`; it needs no other package. It copies the
+Python 3.14 and Git on `PATH`; it needs no other package. It copies the
 checkout's tracked and untracked, non-ignored files to a temporary directory, so
 uncommitted changes are tested and no bytecode or build output is left behind.
 A disposable virtual environment imports that copy, never an installed
@@ -221,7 +221,7 @@ still refused afterwards.
 A repository that relies on remote CI declares the checks every task's
 integration needs in a tracked `.github/required-checks.json` on its remote
 default branch: a JSON array of `{"app", "name"}` GitHub check runs such as
-`{"app": "github-actions", "name": "test (ubuntu-latest, 3.12)"}`. The
+`{"app": "github-actions", "name": "test (ubuntu-latest, 3.14)"}`. The
 repository's workflow defines the checks; the declaration names them exactly.
 `begin` and `adopt-existing` read it from the freshly fetched remote default
 commit, also for a child task, so an unaccepted change in a task or parent
@@ -489,7 +489,7 @@ and durable result reference. Use command help for the exact arguments.
 
 Use the installed command's `--help` for exact arguments and JSON output. The
 package's tests and workflow build an isolated wheel and run its tests from
-outside the source checkout on Linux and Windows with Python 3.12 and 3.14.
+outside the source checkout on Linux and Windows with Python 3.14.
 
 The checkout shim is a one-way entry to this package, not a legacy schema
 adapter. Existing `agent-branches` hooks must stay on their pinned source until
