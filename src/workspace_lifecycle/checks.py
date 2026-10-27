@@ -61,12 +61,9 @@ def declared(repo, commit: str) -> dict:
         raise LifecycleError('invalid ' + DECLARATION + ' at ' + commit + ': ' + str(exc))
 
 
-def current(repo, remote: str, default: str | None = None) -> dict:
-    """The declaration on the remote default branch as fetched now, never the checkout.
-
-    A caller that has just resolved the default branch passes it in.
-    """
-    default = default or remote_default(repo, remote)
+def current(repo, remote: str) -> dict:
+    """The declaration on the remote default branch as fetched now, never the checkout."""
+    default = remote_default(repo, remote)
     git(repo, 'fetch', remote, 'refs/heads/' + default)
     return declared(repo, head(repo, 'FETCH_HEAD'))
 

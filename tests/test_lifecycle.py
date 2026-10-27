@@ -12,6 +12,7 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from workspace_lifecycle.errors import LifecycleError
+from workspace_lifecycle.git import operation, remote_default
 from workspace_lifecycle.service import begin, finish, reclaim, reclaim_pending, retire, retire_pending, status
 
 
@@ -90,6 +91,35 @@ class LifecycleTest(unittest.TestCase):
         run(Path(self.temp.name), "init", "-q", str(self.topic))
         with self.assertRaisesRegex(LifecycleError, "not initialized"):
             status(self.topic, "one")
+
+    def test_a_later_operation_follows_a_changed_remote_default(self):
+        for name, default in (("one", "trunk"), ("two", "next")):
+            if default == "next":
+                run(self.root, "push", "origin", "trunk:next")
+                run(self.remote, "symbolic-ref", "HEAD", "refs/heads/next")
+                run(self.root, "switch", "-q", "-c", "next", "--track", "origin/next")
+            topic = Path(self.temp.name) / ("topic-" + name)
+            begin(self.root, task=name, request="issue/" + name, remote="origin", branch="topic/" + name, worktree=str(topic), validation=["git", "diff", "--check"], preflight=self.preflight)
+            (topic / (name + ".txt")).write_text(name + "\n")
+            plan = Path(self.temp.name) / ("plan-" + name + ".json"); self.task = name
+            plan.write_text(json.dumps(self.source_plan(topic, name + ".txt")))
+            result = finish(topic, task=name, plan_path=str(plan), result_ref="issue/" + name)
+            self.assertEqual(result["integration"]["destination"], default)
+        self.assertEqual(run(self.root, "ls-tree", "--name-only", "origin/trunk").split(), ["README", "one.txt"])
+        self.assertEqual(run(self.root, "ls-tree", "--name-only", "origin/next").split(), ["README", "one.txt", "two.txt"])
+
+    def test_one_operation_keeps_each_remote_and_repository_apart(self):
+        other = Path(self.temp.name) / "other.git"; clone = Path(self.temp.name) / "clone"
+        run(Path(self.temp.name), "init", "--bare", "--initial-branch=elsewhere", str(other))
+        run(self.root, "push", str(other), "trunk:elsewhere")
+        run(self.root, "remote", "add", "second", str(other))
+        run(Path(self.temp.name), "clone", "-q", "-o", "origin", str(other), str(clone))
+        with operation():
+            self.assertEqual(remote_default(self.root, "origin"), "trunk")
+            self.assertEqual(remote_default(self.root, "second"), "elsewhere")
+            self.assertEqual(remote_default(clone, "origin"), "elsewhere")
+            with self.assertRaisesRegex(LifecycleError, "existing remote"):
+                remote_default(clone, "second")
 
     def test_parent_child_requires_parent_acceptance(self):
         parent = Path(self.temp.name) / "parent"; child = Path(self.temp.name) / "child"

@@ -624,6 +624,13 @@ the commit it pushes. Acceptances saved by earlier versions resume unchanged.
 an integration that 0.8.9 prepared for a candidate; finish or withdraw it with
 0.8.9 before a rollback.
 
+Version 0.8.10 starts fewer Git processes for the same checks. Queries made at
+the same moment are read in one call, and one operation resolves each
+checkout's common directory and each remote's default branch once; the next
+operation resolves them again. Checks at different moments, such as HEAD,
+dirt, the remote URL around a push and the remote branch tip, still query Git
+each time. Task state is unchanged, so 0.8.9 resumes any task directly.
+
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
 default branch carries the accepted commit's SHA. `integration_checks` counts

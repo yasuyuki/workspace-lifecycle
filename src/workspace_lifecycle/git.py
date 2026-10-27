@@ -19,29 +19,32 @@ def git(repo: Path | str, *args: str, optional: bool = False, env=None) -> str |
     return process.stdout.strip()
 
 
-_common_dirs: ContextVar[dict[str, Path] | None] = ContextVar("common_dirs", default=None)
+_known: ContextVar[dict[tuple, object] | None] = ContextVar("known", default=None)
 
 
 @contextmanager
 def operation():
-    """Scope of one lifecycle operation, which resolves each checkout's common directory once.
+    """Scope of one lifecycle operation, which resolves each checkout's common directory
+    and each remote's default branch once.
 
     The state and lease locks live in the common directory, so the operation
-    stays bound to the repository it started in.
+    stays bound to the repository it started in. The owner accepted treating a
+    remote and its default branch as fixed for one operation (#37); the next
+    operation resolves them again.
     """
-    if _common_dirs.get() is not None:
+    if _known.get() is not None:
         yield
         return
-    token = _common_dirs.set({})
+    token = _known.set({})
     try:
         yield
     finally:
-        _common_dirs.reset(token)
+        _known.reset(token)
 
 
 def common_dir(repo: Path | str) -> Path:
-    known = _common_dirs.get()
-    key = os.path.abspath(repo)
+    known = _known.get()
+    key = ("common_dir", os.path.abspath(repo))
     if known is not None and key in known:
         return known[key]
     value = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
@@ -69,6 +72,10 @@ def head(repo: Path | str, ref: str = "HEAD") -> str:
 
 
 def remote_default(repo: Path | str, remote: str) -> str:
+    known = _known.get()
+    key = ("remote_default", common_dir(repo), remote) if known is not None else None
+    if key in (known or {}):
+        return known[key]
     remotes = (git(repo, "remote") or "").splitlines()
     if remote.startswith("-") or remote not in remotes:
         raise LifecycleError("choose an existing remote explicitly")
@@ -76,7 +83,10 @@ def remote_default(repo: Path | str, remote: str) -> str:
     refs = [row.split()[1] for row in output.splitlines() if row.startswith("ref: refs/heads/")]
     if len(refs) != 1:
         raise LifecycleError("remote default branch could not be verified")
-    return refs[0].removeprefix("refs/heads/")
+    value = refs[0].removeprefix("refs/heads/")
+    if known is not None:
+        known[key] = value
+    return value
 
 
 def worktree_records(repo: Path | str) -> list[dict[str, str]]:

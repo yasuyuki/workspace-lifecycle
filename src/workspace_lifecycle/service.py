@@ -112,7 +112,7 @@ def begin(repo, *, task: str, request: str, remote: str, branch: str, worktree: 
                     raise LifecycleError('dependencies must refer to existing other tasks')
                 if any(state['tasks'][name].get('retire') for name in dependencies):
                     raise LifecycleError('dependency is retiring')
-                policy = checks.current(repo, remote, default)
+                policy = checks.current(repo, remote)
                 selected = checks.select(policy, required_checks)
                 if parent:
                     parent_task = _task(state, parent)
