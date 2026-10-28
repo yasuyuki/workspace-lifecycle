@@ -25,6 +25,10 @@ from urllib.request import url2pathname
 # only by an explicit ``--oss yes`` declaration.
 OSI_LICENSES = frozenset({"MIT", "Apache-2.0", "BSD-3-Clause", "ISC"})
 
+# Only push exits 0, so ``preflight && git push`` cannot run a push the
+# decision withheld.  argparse already uses 2 for invalid usage.
+DECISION_EXIT = {"push": 0, "hold": 10, "ask": 11}
+
 
 def result(decision: str, reason: str, remote: str | None = None,
            destination: str | None = None) -> dict[str, Any]:
@@ -365,9 +369,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Decide whether to make a normal, single-branch push without changing Git state.",
         epilog=("Outputs JSON decision (push/hold/ask), reason, remote and destination. "
-                "All decisions exit 0: inspect decision, not the exit status. "
+                "Exit status: push 0, hold 10, ask 11; 2 is invalid usage. "
                 "Only push includes push_argv; execute it in the target repository. "
-                "For hold report the reason; for ask resolve the missing information. "
+                "For hold report the reason. For ask resolve the missing information "
+                "or obtain the user's decision before running the preflight again. "
                 "Normal Git hooks and history protections still apply."))
     parser.add_argument("repo", nargs="?", default=".", help="target repository (default: current directory)")
     parser.add_argument("--user-intent", choices=("auto", "push", "hold"), default="auto",
@@ -390,7 +395,7 @@ def main() -> int:
         if legacy.exists():
             output = result('hold', 'LEGACY_CONSUMER: use its pinned preflight until explicit migration')
     print(json.dumps(output, sort_keys=True, separators=(",", ":")))
-    return 0
+    return DECISION_EXIT[output["decision"]]
 
 
 if __name__ == "__main__":

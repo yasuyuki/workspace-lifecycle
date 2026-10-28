@@ -5,6 +5,7 @@ import io
 import importlib.util
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -155,8 +156,10 @@ class PolicyTests(unittest.TestCase):
                 output = io.StringIO()
                 with patch.object(sys, "argv", ["push_preflight.py", directory, "--policy", str(path), *args]), \
                      patch.object(preflight, "collect_state", return_value=state), contextlib.redirect_stdout(output):
-                    self.assertEqual(preflight.main(), 0)
-                return json.loads(output.getvalue())
+                    code = preflight.main()
+                decided = json.loads(output.getvalue())
+                self.assertEqual(code, {"push": 0, "hold": 10, "ask": 11}[decided["decision"]], decided)
+                return decided
             self.assertEqual(invoke()["reason"], "INVALID_PUSH_POLICY")
             for contents in (b"{", b"null", b"\xff", b'{"default_branch_push_repositories": [false]}'):
                 path.write_bytes(contents)
@@ -304,11 +307,36 @@ class PolicyTests(unittest.TestCase):
             subprocess.run(["git", "init", "-q", directory], check=True)
             subprocess.run(["git", "-C", directory, "symbolic-ref", "HEAD", "refs/heads/feature"], check=True)
             result = subprocess.run([sys.executable, "-m", "workspace_lifecycle.push", directory],
-                                    text=True, capture_output=True, check=True)
-            self.assertEqual(json.loads(result.stdout)["decision"], "ask")
+                                    text=True, capture_output=True)
+            self.assertEqual((result.returncode, json.loads(result.stdout)["decision"]), (11, "ask"))
             held = subprocess.run([sys.executable, "-m", "workspace_lifecycle.push", directory,
-                                   "--user-intent", "hold"], text=True, capture_output=True, check=True)
-            self.assertEqual(json.loads(held.stdout)["decision"], "hold")
+                                   "--user-intent", "hold"], text=True, capture_output=True)
+            self.assertEqual((held.returncode, json.loads(held.stdout)["decision"]), (10, "hold"))
+
+    def test_shell_and_list_pushes_only_after_push_decision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work, bare = Path(directory, "work"), Path(directory, "remote.git")
+            def git(*args):
+                return subprocess.run(["git", *args], check=True, text=True, capture_output=True).stdout
+            git("init", "-q", "--bare", str(bare))
+            git("init", "-q", str(work))
+            git("-C", str(work), "symbolic-ref", "HEAD", "refs/heads/feature")
+            git("-C", str(work), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                "commit", "-q", "--allow-empty", "-m", "work")
+            git("-C", str(work), "remote", "add", "origin", bare.as_uri())
+            # shell=True is cmd.exe on Windows and /bin/sh elsewhere.
+            quote = subprocess.list2cmdline if sys.platform == "win32" else shlex.join
+            decide = [sys.executable, "-m", "workspace_lifecycle.push", str(work)]
+            push = quote(["git", "-C", str(work), "push", "-q", "origin", "HEAD:refs/heads/feature"])
+            for args, decision, code in [((), "ask", 11), (("--user-intent", "hold"), "hold", 10),
+                                         (("--temporary",), "hold", 10), (("--user-intent", "push"), "push", 0)]:
+                with self.subTest(decision=decision, args=args):
+                    shell = subprocess.run(quote([*decide, *args]) + " && " + push, shell=True,
+                                           text=True, capture_output=True, cwd=directory)
+                    self.assertEqual((shell.returncode, json.loads(shell.stdout)["decision"]), (code, decision),
+                                     shell.stderr)
+                    pushed = git("--git-dir", str(bare), "for-each-ref", "--format=%(refname)")
+                    self.assertEqual(pushed.split(), ["refs/heads/feature"] if decision == "push" else [])
 
 
 if __name__ == "__main__":

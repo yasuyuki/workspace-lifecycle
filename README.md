@@ -70,6 +70,17 @@ interpreter instead when the preflight belongs to a different runtime. `status` 
 `hold` records a reason and next action. Parent and dependency tasks must
 already exist and are checked again before integration.
 
+The bundled preflight `python -m workspace_lifecycle.push <repo>` prints one
+JSON object with `decision` (`push`, `hold` or `ask`), `reason`, `remote` and
+`destination`, plus `push_argv` only for `push`. Only `push` exits 0. `hold`
+exits 10, `ask` exits 11, and 2 is invalid usage, so `preflight && git push ...`
+pushes nothing after `hold` or `ask`. Run the reported `push_argv` rather than
+a hand-written push. After `ask`, resolve the missing information or obtain the
+user's decision before running the preflight again. Finish reports `push
+blocked: <reason>` for `hold` and `ask`, including exit 0 from an older
+preflight, and refuses without pushing when the exit status contradicts the
+decision or stdout is not one decision object.
+
 `update-preflight` changes one existing current task's preflight argv without
 adopting it again. Supply `--task`, the exact saved argv as
 `--expected-preflight-json`, a nonempty `--preflight-json` containing literal
@@ -630,6 +641,15 @@ checkout's common directory and each remote's default branch once; the next
 operation resolves them again. Checks at different moments, such as HEAD,
 dirt, the remote URL around a push and the remote branch tip, still query Git
 each time. Task state is unchanged, so 0.8.9 resumes any task directly.
+
+Version 0.8.11 makes `workspace_lifecycle.push` exit 10 for `hold` and 11 for
+`ask` instead of 0, so a shell `&&` stops before a withheld push. The JSON is
+unchanged. A caller that treated any nonzero exit as a failed preflight now
+sees 10 or 11 with the decision on stdout. Finish also accepts exit 0 for
+`hold` and `ask`, so a task whose preflight names an older install still
+reports the reason. Task state is unchanged. A 0.8.10 finish running a 0.8.11
+preflight by absolute path still refuses `hold` and `ask`, but reports them as
+`push preflight failed`.
 
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the

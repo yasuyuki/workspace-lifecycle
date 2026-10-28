@@ -228,6 +228,43 @@ class LifecyclePythonTests(unittest.TestCase):
                 finish(self.f.topic, task='moved', plan_path=plan, result_ref='issue/25')
         self.assertNotIn('topic/moved', self.remote_branches())
 
+    def test_finish_pushes_only_when_decision_and_exit_status_agree(self):
+        from workspace_lifecycle.service import _push
+        self.begin(sys.executable, self.placeholder)
+        decided = lambda decision: json.dumps(
+            {'decision': decision, 'reason': 'FIXTURE', 'remote': 'origin', 'destination': 'topic/moved',
+             **({'push_argv': ['git', 'push', 'origin', 'HEAD:refs/heads/topic/moved']} if decision == 'push' else {})})
+        def scripted(stdout, code, before=''):
+            return [sys.executable, '-c', f'import subprocess, sys; {before}sys.stdout.write({stdout!r}); sys.exit({code})', '{repo}']
+        cli = [sys.executable, '-m', 'workspace_lifecycle.push', '{repo}']
+        cases = [(cli + ['--user-intent', 'hold'], 'push blocked: USER_HOLD'),
+                 (cli + ['--temporary'], 'push blocked: TEMPORARY_COMMIT'),
+                 (scripted(decided('hold'), 10), 'push blocked: FIXTURE'),
+                 (scripted(decided('ask'), 11), 'push blocked: FIXTURE'),
+                 (scripted(decided('hold'), 0), 'push blocked: FIXTURE'),
+                 (scripted(decided('ask'), 0), 'push blocked: FIXTURE'),
+                 (scripted(decided('push'), 10), 'exit 10 contradicts decision push'),
+                 (scripted(decided('hold'), 11), 'exit 11 contradicts decision hold'),
+                 (scripted(decided('maybe'), 0), 'did not emit a decision'),
+                 (scripted('noise\n' + decided('push'), 0), 'did not emit a decision'),
+                 (scripted('[]', 0), 'did not emit a decision'),
+                 (scripted('', 1), 'push preflight failed with exit 1'),
+                 (scripted(decided('push'), 0, 'subprocess.run(["git", "remote", "set-url", "origin", "elsewhere"]); '),
+                  'remote URL changed during push preflight'),
+                 (scripted(decided('push'), 0, 'subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "moved"]); '),
+                  'HEAD or branch changed')]
+        url = test_lifecycle.run(self.f.topic, 'remote', 'get-url', 'origin')
+        tip = test_lifecycle.run(self.f.topic, 'rev-parse', 'HEAD')
+        for preflight, message in cases:
+            with self.subTest(message=message, preflight=preflight[2:]):
+                with self.assertRaisesRegex(LifecycleError, message):
+                    _push(self.f.topic, preflight, 'topic/moved', 'origin', tip)
+                test_lifecycle.run(self.f.topic, 'remote', 'set-url', 'origin', url)
+                test_lifecycle.run(self.f.topic, 'reset', '-q', '--hard', tip)
+                self.assertNotIn('topic/moved', self.remote_branches())
+        pushed = _push(self.f.topic, scripted(decided('push'), 0), 'topic/moved', 'origin', tip)
+        self.assertEqual((pushed['decision'], pushed['remote_observed']), ('push', tip))
+
 
 if __name__ == '__main__':
     unittest.main()

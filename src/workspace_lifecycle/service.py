@@ -359,6 +359,11 @@ def _validate(repo: Path, argv: list[str]) -> dict:
     return evidence
 
 
+# The documented preflight exit statuses. The configured preflight may be
+# another install, so this does not import the bundled one.
+PREFLIGHT_EXIT = {"push": 0, "hold": 10, "ask": 11}
+
+
 def _push(repo: Path, preflight: list[str], expected_branch: str, expected_remote=None, expected_head=None) -> dict:
     remote_url = git(repo, 'remote', 'get-url', expected_remote) if expected_remote else None
     if "{repo}" not in preflight: raise LifecycleError("preflight argv must contain literal {repo}")
@@ -367,10 +372,16 @@ def _push(repo: Path, preflight: list[str], expected_branch: str, expected_remot
     values = {"{repo}": str(repo), "{lifecycle_python}": os.sys.executable}
     argv = [values.get(value, value) for value in preflight]
     result = subprocess.run(argv, cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode: raise LifecycleError("push preflight failed")
     try: decision = json.loads(result.stdout)
-    except json.JSONDecodeError as exc: raise LifecycleError("push preflight did not emit JSON") from exc
-    if decision.get("decision") != "push": raise LifecycleError("push blocked: " + str(decision.get("reason", "unknown")))
+    except json.JSONDecodeError: decision = None
+    kind = decision.get("decision") if isinstance(decision, dict) else None
+    if kind not in PREFLIGHT_EXIT:
+        if result.returncode: raise LifecycleError(f"push preflight failed with exit {result.returncode}")
+        raise LifecycleError("push preflight did not emit a decision")
+    # A preflight older than these statuses exits 0 for every decision.
+    if result.returncode not in (0, PREFLIGHT_EXIT[kind]):
+        raise LifecycleError(f"push preflight exit {result.returncode} contradicts decision {kind}")
+    if kind != "push": raise LifecycleError("push blocked: " + str(decision.get("reason", "unknown")))
     push_argv = decision.get("push_argv")
     if not isinstance(push_argv, list) or len(push_argv) != 4 or push_argv[:2] != ["git", "push"] or not isinstance(push_argv[2], str) or push_argv[3] != "HEAD:refs/heads/" + expected_branch:
         raise LifecycleError("preflight push argv is not an exact normal branch push")
