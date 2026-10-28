@@ -654,6 +654,11 @@ reports the reason. Task state is unchanged. A 0.8.10 finish running a 0.8.11
 preflight by absolute path still refuses `hold` and `ask`, but reports them as
 `push preflight failed`.
 
+Version 0.8.12 runs each validation without the caller's `WORKSPACE_LIFECYCLE_*`
+variables, so a finish started from a session bound to another task no longer
+passes that binding to the validator. Task state is unchanged. A rollback to
+0.8.11 passes the binding again.
+
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
 default branch carries the accepted commit's SHA. `integration_checks` counts
