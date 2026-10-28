@@ -443,7 +443,13 @@ Retirement and reclamation retain a task lease while network, hashing and
 filesystem operations run outside the common state lock. Short compare-and-swap
 updates re-read current state and replace only the selected task's records.
 Linux disposal uses pinned directory descriptors, no-follow opens and mount
-identities, with a private quarantine namespace. Windows verifies and deletes
+identities, with a private quarantine namespace. A Linux identity records the
+object's device number, inode and filesystem ID (`f_fsid`). Mount IDs are
+compared only within the boot and mount namespace that recorded them. A
+recorded nonzero filesystem ID lets the device number differ, as it does when
+WSL attaches its disks in another order; ext4 derives that ID from its UUID.
+An identity recorded without one, or on a filesystem whose ID is zero or
+follows the device, still needs the same device number. Windows verifies and deletes
 through the same restrictive file handle; sharing conflicts leave requests
 pending. Both require every producer and external user to obey the owner lease
 and release contract. Arbitrary writers into the private quarantine namespace

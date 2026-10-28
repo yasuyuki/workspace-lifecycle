@@ -1,4 +1,5 @@
 """End-to-end recovery boundaries for resumable reclaim (issue #146)."""
+import contextlib
 import copy
 import json
 import os
@@ -6,11 +7,12 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from workspace_lifecycle.errors import LifecycleError
-from workspace_lifecycle import service
+from workspace_lifecycle import reclamation, service
 from workspace_lifecycle.service import begin, finish, reclaim, retire
 
 import test_lifecycle as lifecycle
@@ -220,6 +222,114 @@ raise SystemExit(main(['--repo', repo, 'reclaim', '--task', 'one', '--result-ref
             reclaim(self.root, task='one', result_ref='issue/146', preservation_evidence=self.evidence)
         self.assertTrue(Path(receipt['admin_archive_path']).exists())
         self.assertEqual(self._state()['retired']['one']['reclaim_phase'], 'requested')
+
+    @contextlib.contextmanager
+    def _next_boot(self, *, device=7, fsid=0):
+        """A later boot or headless entry: new mount session and mount IDs.
+
+        ``device`` moves every st_dev as WSL does when it attaches disks in
+        another order; ``fsid`` moves f_fsid, as another filesystem would.
+        """
+        retirement = service._retirement_identity
+        fstatvfs = os.fstatvfs
+        mount_id = reclamation._mount_id
+
+        def renumbered(path):
+            identity = retirement(path)
+            return [identity[0] + device, identity[1], *(value + fsid for value in identity[2:])]
+
+        def next_mount_id(fd):
+            found = mount_id(fd)
+            return None if found is None else 'next-' + found
+
+        with patch.object(service, '_retirement_identity', renumbered), \
+                patch.object(reclamation, '_identity', lambda info: [info.st_dev + device, info.st_ino]), \
+                patch.object(reclamation.os, 'fstatvfs',
+                             lambda fd: SimpleNamespace(f_fsid=fstatvfs(fd).f_fsid + fsid)), \
+                patch.object(reclamation, '_mount_session', return_value=['next-boot', 1, 2]), \
+                patch.object(reclamation, '_mount_id', next_mount_id):
+            yield
+
+    def _as_legacy_receipt(self):
+        """Rewrite the receipt as releases before #27 recorded it: [st_dev, st_ino]."""
+        with service.locked_state(self.root) as (directory, state):
+            receipt = state['retired']['one']
+            for key in ('original_identity', 'recovery_identity', 'admin_identity'):
+                receipt[key] = receipt[key][:2]
+            for key in ('payload_progress', 'admin_progress'):
+                receipt[key]['root_identity'] = receipt[key]['root_identity'][:2]
+                for member in receipt[key]['members'].values():
+                    member['identity'] = member['identity'][:2]
+            service.save_state(directory, state)
+
+    def _assert_held(self, receipt, reason):
+        with self.assertRaisesRegex(LifecycleError, reason):
+            reclaim(self.root, task='one', result_ref='issue/146', preservation_evidence=self.evidence)
+        held = self._state()['retired']['one']
+        self.assertEqual(held['reclaim_phase'], 'requested')
+        self.assertEqual(held['content_manifest'], receipt['content_manifest'])
+        self.assertTrue((Path(receipt['recovery_path']) / 'nested' / 'second.txt').exists())
+        self.assertTrue(Path(receipt['admin_archive_path']).exists())
+
+    @unittest.skipUnless(os.name == 'posix' and Path('/proc/self/fdinfo').is_dir(), 'Linux mount sessions')
+    def test_reclaim_after_reboot_renumbers_devices_and_mounts(self):
+        receipt = self._retire()
+        self.assertEqual(len(receipt['recovery_identity']), 3)
+        if not receipt['recovery_identity'][2]:
+            self.skipTest('the test filesystem reports no f_fsid; reclaim then needs the same st_dev')
+        with self._next_boot():
+            result = reclaim(self.root, task='one', result_ref='issue/146', preservation_evidence=self.evidence)
+        self.assertTrue(result['reclaimed'])
+        self.assertFalse(Path(receipt['recovery_path']).exists())
+        self.assertFalse(Path(receipt['admin_archive_path']).exists())
+        final = self._state()['retired']['one']
+        self.assertEqual(final['payload_progress']['mount_session'], receipt['payload_progress']['mount_session'])
+        self.assertEqual(final['content_manifest'], receipt['content_manifest'])
+
+    @unittest.skipUnless(os.name == 'posix' and Path('/proc/self/fdinfo').is_dir(), 'Linux mount sessions')
+    def test_legacy_receipt_reclaims_from_another_mount_session(self):
+        receipt = self._retire()
+        self._as_legacy_receipt()
+        with self._next_boot(device=0):
+            self.assertTrue(reclaim(self.root, task='one', result_ref='issue/146',
+                                    preservation_evidence=self.evidence)['reclaimed'])
+        self.assertFalse(Path(receipt['recovery_path']).exists())
+
+    @unittest.skipUnless(os.name == 'posix' and Path('/proc/self/fdinfo').is_dir(), 'Linux mount sessions')
+    def test_legacy_receipt_with_reassigned_device_is_held(self):
+        receipt = self._retire()
+        self._as_legacy_receipt()
+        with self._next_boot():
+            self._assert_held(receipt, 'reclaim root identity changed')
+
+    @unittest.skipUnless(os.name == 'posix' and Path('/proc/self/fdinfo').is_dir(), 'Linux mount sessions')
+    def test_other_filesystem_with_the_same_inodes_and_content_is_held(self):
+        receipt = self._retire()
+        with self._next_boot(fsid=1):
+            self._assert_held(receipt, 'reclaim root identity changed')
+
+    @unittest.skipUnless(os.name == 'posix' and Path('/proc/self/fdinfo').is_dir(), 'Linux mount sessions')
+    def test_replaced_member_with_the_same_content_is_held_after_reboot(self):
+        receipt = self._retire()
+        member = Path(receipt['recovery_path']) / 'first.txt'
+        # Written while the original still exists, so it cannot reuse its inode.
+        replacement = member.with_name('replacement')
+        replacement.write_text('first\n')
+        os.replace(replacement, member)
+        with self._next_boot():
+            self._assert_held(receipt, 'recovery content identity changed after retirement')
+
+    @unittest.skipUnless(os.name == 'posix' and Path('/proc/self/fdinfo').is_dir(), 'Linux mount sessions')
+    def test_interrupted_reclaim_resumes_after_reboot(self):
+        receipt = self._retire()
+        if not receipt['recovery_identity'][2]:
+            self.skipTest('the test filesystem reports no f_fsid; reclaim then needs the same st_dev')
+        self._killed_cli_reclaim('before-member-remove', require_phase='renamed')
+        with self._next_boot():
+            resumed = service.reclaim_pending(self.root)
+        self.assertTrue(resumed['pending'][0]['reclaimed'], resumed)
+        self.assertFalse(Path(receipt['recovery_path']).exists())
+        self.assertEqual(self._state()['retired']['one']['reclaim_phase'], 'reclaimed')
 
     @unittest.skipUnless(os.name == 'nt', 'requires a Windows share-mode handle')
     def test_windows_handle_without_delete_share_leaves_reclaim_pending_until_closed(self):

@@ -46,6 +46,52 @@ def _identity(info: os.stat_result) -> list[int]:
     return [info.st_dev, info.st_ino]
 
 
+def _fd_identity(fd: int) -> list[int]:
+    return [*_identity(os.fstat(fd)), os.fstatvfs(fd).f_fsid]
+
+
+def same_identity(recorded, current) -> bool:
+    """Whether ``current`` names the recorded object, though st_dev was reassigned.
+
+    Linux renumbers st_dev when WSL attaches its disks in another order.  A
+    recorded nonzero f_fsid (ext4 derives it from the filesystem UUID) still
+    names the filesystem then.  An identity without one, or with a zero fsid,
+    proves its filesystem only through st_dev.
+    """
+    recorded, current = list(recorded), list(current)
+    if recorded[1] != current[1]:
+        return False
+    if len(recorded) == 3:
+        if len(current) != 3 or recorded[2] != current[2]:
+            return False
+        if recorded[2]:
+            return True
+    return recorded[0] == current[0]
+
+
+def same_capture(recorded, current) -> bool:
+    """Whether a new capture shows the recorded objects, content and mounts.
+
+    Mount IDs name mounts only within one boot and mount namespace, so they are
+    compared only when both captures come from the same mount session.
+    """
+    if "mount_session" not in recorded:
+        return recorded == current
+    same_session = recorded["mount_session"] == current["mount_session"]
+    if (recorded["manifest_id"] != current["manifest_id"]
+            or recorded["root_identity"] != current["root_identity"]
+            or same_session and recorded["root_mount_id"] != current["root_mount_id"]
+            or set(recorded["members"]) != set(current["members"])):
+        return False
+    for name, member in recorded["members"].items():
+        live = current["members"][name]
+        if (member["kind"] != live["kind"] or member.get("digest") != live.get("digest")
+                or not same_identity(member["identity"], live["identity"])
+                or same_session and member["mount_id"] != live["mount_id"]):
+            return False
+    return True
+
+
 def _manifest_id(manifest) -> str:
     encoded = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -103,7 +149,7 @@ def _open_file(name, *, dir_fd) -> int:
 
 def _validate_root(fd: int, root_identity) -> tuple[os.stat_result, str | None]:
     info = os.fstat(fd)
-    if not stat.S_ISDIR(info.st_mode) or _identity(info) != list(root_identity):
+    if not stat.S_ISDIR(info.st_mode) or not same_identity(root_identity, _fd_identity(fd)):
         raise LifecycleError("reclaim root identity changed")
     return info, _mount_id(fd)
 
@@ -144,7 +190,7 @@ def _scan_linux(root: Path, manifest, root_identity) -> dict:
                         child_mount = _mount_id(child_fd)
                         if root_mount is not None and child_mount != root_mount:
                             raise LifecycleError("reclaim refuses a mount crossing")
-                        members[logical] = {"kind": "dir", "identity": _identity(os.fstat(child_fd)),
+                        members[logical] = {"kind": "dir", "identity": _fd_identity(child_fd),
                                             "mount_id": child_mount}
                         walk(child_fd, logical)
                     finally:
@@ -165,7 +211,7 @@ def _scan_linux(root: Path, manifest, root_identity) -> dict:
                         digest = _digest_fd(child_fd)
                         if digest != kind_digest[1]:
                             raise LifecycleError("reclaim file digest changed")
-                        members[logical] = {"kind": "file", "identity": _identity(opened),
+                        members[logical] = {"kind": "file", "identity": _fd_identity(child_fd),
                                             "digest": digest, "mount_id": child_mount}
                     finally:
                         os.close(child_fd)
@@ -590,15 +636,7 @@ def remove_tree(root, manifest, root_identity, progress: dict, persist) -> dict:
     # retry, a complete manifest is no longer expected; only journal-explained
     # source/quarantine/absence states are admitted.
     if not any(member.get("intent") for member in progress["members"].values()):
-        live = _scan_linux(staging, manifest, root_identity)
-        fields = {"kind", "identity", "digest"}
-        if progress.get("mount_session") == live["mount_session"]:
-            fields.add("mount_id")
-        captured = {key: {k: v for k, v in value.items() if k in fields}
-                    for key, value in progress["members"].items()}
-        current = {key: {k: v for k, v in value.items() if k in fields}
-                   for key, value in live["members"].items()}
-        if live["manifest_id"] != progress["manifest_id"] or current != captured:
+        if not same_capture(progress, _scan_linux(staging, manifest, root_identity)):
             raise LifecycleError("reclaim captured identities changed")
     else:
         _validate_resuming_names(staging, progress["members"])
@@ -621,9 +659,8 @@ def remove_tree(root, manifest, root_identity, progress: dict, persist) -> dict:
                     next_fd = _open_dir(component, dir_fd=parent_fd)
                     component_logical = "/".join(parts[:depth])
                     captured_parent = progress["members"].get(component_logical)
-                    opened_parent = os.fstat(next_fd)
                     if (not captured_parent or captured_parent["kind"] != "dir"
-                            or _identity(opened_parent) != captured_parent["identity"]
+                            or not same_identity(captured_parent["identity"], _fd_identity(next_fd))
                             or _mount_id(next_fd) != current_mount
                             or same_mount_session and captured_parent["mount_id"] != current_mount):
                         os.close(next_fd)
@@ -655,7 +692,10 @@ def remove_tree(root, manifest, root_identity, progress: dict, persist) -> dict:
                     os.rename(name, tomb, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
                     _fsync_dir(parent_fd)
                     tomb_info = os.stat(tomb, dir_fd=parent_fd, follow_symlinks=False)
-                if _identity(tomb_info) != member["identity"]:
+                # The quarantine name is in this directory; its own descriptor
+                # below proves it is not another mount.
+                if not same_identity(member["identity"],
+                                     [*_identity(tomb_info), os.fstatvfs(parent_fd).f_fsid]):
                     raise LifecycleError("reclaim quarantined member identity changed")
                 member["status"] = "quarantined"
                 persist()
@@ -663,8 +703,8 @@ def remove_tree(root, manifest, root_identity, progress: dict, persist) -> dict:
                 if member["kind"] == "file":
                     fd = _open_file(tomb, dir_fd=parent_fd)
                     try:
-                        info = os.fstat(fd)
-                        if (_identity(info) != member["identity"] or info.st_nlink != 1
+                        if (not same_identity(member["identity"], _fd_identity(fd))
+                                or os.fstat(fd).st_nlink != 1
                                 or _mount_id(fd) != current_mount
                                 or same_mount_session and member["mount_id"] != current_mount
                                 or _digest_fd(fd) != member["digest"]):
@@ -675,7 +715,7 @@ def remove_tree(root, manifest, root_identity, progress: dict, persist) -> dict:
                 else:
                     fd = _open_dir(tomb, dir_fd=parent_fd)
                     try:
-                        if (_identity(os.fstat(fd)) != member["identity"]
+                        if (not same_identity(member["identity"], _fd_identity(fd))
                                 or _mount_id(fd) != current_mount
                                 or same_mount_session and member["mount_id"] != current_mount
                                 or os.listdir(fd)):
@@ -697,9 +737,15 @@ def remove_tree(root, manifest, root_identity, progress: dict, persist) -> dict:
         os.close(root_fd)
     parent_fd = _open_dir(staging.parent)
     try:
-        current = os.stat(staging.name, dir_fd=parent_fd, follow_symlinks=False)
-        if not stat.S_ISDIR(current.st_mode) or _identity(current) != list(root_identity):
-            raise LifecycleError("reclaim root name no longer identifies captured directory")
+        try:
+            fd = _open_dir(staging.name, dir_fd=parent_fd)
+        except OSError as exc:
+            raise LifecycleError("reclaim root name no longer identifies captured directory") from exc
+        try:
+            if not same_identity(root_identity, _fd_identity(fd)):
+                raise LifecycleError("reclaim root name no longer identifies captured directory")
+        finally:
+            os.close(fd)
         os.rmdir(staging.name, dir_fd=parent_fd)
         _fsync_dir(parent_fd)
     finally:

@@ -67,3 +67,13 @@ _Avoid_: run 全体の失敗
 **Integration check state**:
 統合が remote default branch へ push した commit そのものについての、required check の状態。その branch への push で作られた check run だけが示す。fast-forward で受入 commit がそのまま統合 commit になっても、task branch への push で作られた run は含まない。parent task への統合 commit は対象にしない。受入 commit の required check state とは別の事実であり、失敗しても統合済みという事実は変わらない。required check が一つも宣言されていなければ undeclared であり、成功ではない。
 _Avoid_: main の CI 結果、統合の成否、受入 commit の check
+
+### 回収
+
+**Object identity**:
+退役が記録する、file や directory 一つの同一性。filesystem の中の inode と、その filesystem を指す値からなる。filesystem を指す値には filesystem ID（ext4 では UUID から決まる）と device 番号がある。device 番号は boot ごとに振り直されうるので、記録に filesystem ID があればそれで filesystem を確かめる。filesystem ID が無い記録や 0 の記録は、device 番号で確かめる。内容が同じでも、inode か filesystem が違えば別の object である。
+_Avoid_: path、inode だけ、digest の一致
+
+**Mount session**:
+mount ID が意味を持つ範囲。boot と mount namespace の組であり、再起動や headless 入口の呼出しごとに変わりうる。mount ID は、同じ mount session の記録とだけ比べる。別の mount session から回収するときも、member がすべて root と同じ mount にあることは確かめる。
+_Avoid_: boot ID だけ、接続

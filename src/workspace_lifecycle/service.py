@@ -1734,7 +1734,14 @@ def _retirement_identity(path):
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or os.path.ismount(path):
         raise LifecycleError('retirement directory identity changed')
-    return [info.st_dev, info.st_ino]
+    if os.name == 'nt':
+        return [info.st_dev, info.st_ino]
+    return [info.st_dev, info.st_ino, os.statvfs(path).f_fsid]
+
+
+def _retirement_matches(path, recorded):
+    from .reclamation import same_identity
+    return same_identity(recorded, _retirement_identity(path))
 
 
 def _retirement_admin(workspace, common):
@@ -1926,35 +1933,35 @@ def retire(repo, *, task: str, result_ref: str, users_released: bool = False, re
                 if (request['expected_head'] != expected or request['result_ref'] != result_ref
                         or not request['users_released']):
                     raise LifecycleError('retirement request identity changed')
-                if _retirement_identity(Path(request['recovery_root'])) != request['recovery_root_identity']:
+                if not _retirement_matches(Path(request['recovery_root']), request['recovery_root_identity']):
                     raise LifecycleError('recovery payload root identity changed')
-                if _retirement_identity(archive.parent) != request['admin_slot_identity']:
+                if not _retirement_matches(archive.parent, request['admin_slot_identity']):
                     raise LifecycleError('recovery admin slot identity changed')
                 if os.path.lexists(recovery):
-                    if _retirement_identity(recovery) != request['recovery_identity']:
+                    if not _retirement_matches(recovery, request['recovery_identity']):
                         raise LifecycleError('recovery payload identity changed')
                     if os.path.lexists(admin) and os.path.lexists(archive):
                         raise LifecycleError('both active and archived admin entries exist')
                 else:
                     if request['phase'] not in ('requested', 'moving') or os.path.lexists(archive):
                         raise LifecycleError('recovery payload disappeared before retirement completed')
-                    if _retirement_identity(workspace) != request['identity']:
+                    if not _retirement_matches(workspace, request['identity']):
                         raise LifecycleError('retirement filesystem identity changed')
                     records = worktree_records(repo)
                     found = _retirement_record(records, workspace)
                     if len(found) != 1 or found[0].get('branch') != 'refs/heads/' + branch or head(workspace) != expected:
                         raise LifecycleError('retirement Git identity changed')
-                    if _retirement_admin(workspace, directory.parent) != admin or _retirement_identity(admin) != request['admin_identity']:
+                    if _retirement_admin(workspace, directory.parent) != admin or not _retirement_matches(admin, request['admin_identity']):
                         raise LifecycleError('retirement admin identity changed')
                     _retirement_pointer(workspace, admin, admin)
                     if request['phase'] == 'requested':
                         _retirement_contents(workspace)
                         request['phase'] = 'moving'; persist()
                     git(repo, 'worktree', 'move', str(workspace), str(recovery))
-                if _retirement_identity(recovery) != request['recovery_identity']:
+                if not _retirement_matches(recovery, request['recovery_identity']):
                     raise LifecycleError('recovery payload identity changed')
                 if os.path.lexists(admin):
-                    if _retirement_identity(admin) != request['admin_identity']:
+                    if not _retirement_matches(admin, request['admin_identity']):
                         raise LifecycleError('retirement admin identity changed')
                     found = _retirement_record(worktree_records(repo), recovery)
                     if len(found) != 1 or found[0].get('branch') != 'refs/heads/' + branch or head(recovery) != expected:
@@ -1968,7 +1975,7 @@ def retire(repo, *, task: str, result_ref: str, users_released: bool = False, re
                     admin.rename(archive)
                 elif not os.path.lexists(archive):
                     raise LifecycleError('retirement admin entry disappeared without archive')
-                if _retirement_identity(recovery) != request['recovery_identity'] or _retirement_identity(archive) != request['admin_identity']:
+                if not _retirement_matches(recovery, request['recovery_identity']) or not _retirement_matches(archive, request['admin_identity']):
                     raise LifecycleError('retirement archive identity changed')
                 _retirement_pointer(recovery, admin, archive)
                 records = worktree_records(repo)
@@ -2135,17 +2142,19 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
                         raise LifecycleError('recovery payload disappeared before reclaim')
                     payload = reclamation.capture(recovery, receipt['content_manifest'], receipt['recovery_identity'])
                     admin = reclamation.capture(archive, receipt['admin_manifest'], receipt['admin_identity'])
-                    # New retirement receipts retain member identities. A legacy
+                    # New retirement receipts retain member identities, which
+                    # stay the evidence even from another mount session. A legacy
                     # receipt is bound to its original manifest before any intent.
                     for key, snapshot in (('payload_progress', payload), ('admin_progress', admin)):
-                        if key in receipt and receipt[key] != snapshot:
+                        if key not in receipt:
+                            receipt[key] = snapshot
+                        elif not reclamation.same_capture(receipt[key], snapshot):
                             raise LifecycleError('recovery content identity changed after retirement; holding payload')
-                        receipt[key] = snapshot
                     receipt['reclaim_staging'] = str(staging)
                     receipt['reclaim_phase'] = 'authorized'
                     persist()
                 if os.path.lexists(recovery) and not os.path.lexists(staging):
-                    if _retirement_identity(recovery) != receipt['recovery_identity']:
+                    if not _retirement_matches(recovery, receipt['recovery_identity']):
                         raise LifecycleError('recovery payload identity changed')
                     if _tree_manifest(recovery) != receipt['content_manifest']:
                         raise LifecycleError('recovery content changed after retirement; holding payload')
@@ -2156,7 +2165,7 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
                         finally: os.close(parent_fd)
                 elif os.path.lexists(recovery) or not os.path.lexists(staging):
                     raise LifecycleError('reclaim staging does not match the authorized receipt')
-                if _retirement_identity(staging) != receipt['recovery_identity']:
+                if not _retirement_matches(staging, receipt['recovery_identity']):
                     raise LifecycleError('reclaim staging identity changed')
                 if _tree_manifest(staging) != receipt['content_manifest']:
                     raise LifecycleError('recovery content changed after rename; holding payload')

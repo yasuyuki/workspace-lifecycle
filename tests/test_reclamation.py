@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import json
 import os
@@ -6,11 +7,28 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from workspace_lifecycle.errors import LifecycleError
 from workspace_lifecycle import reclamation
+
+
+class IdentityTests(unittest.TestCase):
+    def test_recorded_filesystem_id_admits_only_a_reassigned_device(self):
+        same = reclamation.same_identity
+        self.assertTrue(same([2112, 9, 77], [2096, 9, 77]))
+        self.assertFalse(same([2112, 9, 77], [2096, 9, 78]))
+        self.assertFalse(same([2112, 9, 77], [2112, 10, 77]))
+        self.assertFalse(same([2112, 9, 0], [2096, 9, 0]))
+        self.assertTrue(same([2112, 9, 0], [2112, 9, 0]))
+
+    def test_legacy_identity_needs_its_device(self):
+        same = reclamation.same_identity
+        self.assertTrue(same([2112, 9], [2112, 9, 77]))
+        self.assertFalse(same([2112, 9], [2096, 9, 77]))
+        self.assertFalse(same([2112, 9, 77], [2112, 9]))
 
 
 @unittest.skipUnless(os.name == "posix" and Path("/proc/self/fdinfo").is_dir(),
@@ -122,6 +140,39 @@ class ReclamationTests(unittest.TestCase):
         self.assertTrue(result["removed"])
         self.assertEqual(resumed['mount_session'], original['mount_session'])
         self.assertEqual(resumed['root_mount_id'], original['root_mount_id'])
+
+    def test_reassigned_device_in_another_session_keeps_the_capture(self):
+        fd = os.open(self.root, os.O_RDONLY)
+        try:
+            identity = reclamation._fd_identity(fd)
+        finally:
+            os.close(fd)
+        if not identity[2]:
+            self.skipTest("the test filesystem reports no f_fsid")
+        recorded = reclamation.capture(self.root, self.manifest, identity)
+        fstatvfs = os.fstatvfs
+
+        def next_boot(stack, fsid):
+            stack.enter_context(patch.object(reclamation, "_identity",
+                                             lambda info: [info.st_dev + 7, info.st_ino]))
+            stack.enter_context(patch.object(reclamation.os, "fstatvfs",
+                                             lambda fd: SimpleNamespace(f_fsid=fstatvfs(fd).f_fsid + fsid)))
+            stack.enter_context(patch.object(reclamation, "_mount_session",
+                                             return_value=["next-boot", 1, 2]))
+
+        with contextlib.ExitStack() as stack:
+            next_boot(stack, 1)
+            with self.assertRaisesRegex(LifecycleError, "root identity changed"):
+                reclamation.capture(self.root, self.manifest, identity)
+        with contextlib.ExitStack() as stack:
+            next_boot(stack, 0)
+            self.assertTrue(reclamation.same_capture(
+                recorded, reclamation.capture(self.root, self.manifest, identity)))
+            progress = json.loads(json.dumps(recorded)); durable = {}
+            result = reclamation.remove_tree(self.root, self.manifest, identity, progress,
+                                             lambda: self.persist(progress, durable))
+        self.assertTrue(result["removed"])
+        self.assertFalse(self.root.exists())
 
     def test_retry_does_not_compare_raw_mount_ids_across_sessions(self):
         self._retry_across_mount_session('before-member-remove')
