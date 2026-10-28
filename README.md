@@ -665,6 +665,13 @@ variables, so a finish started from a session bound to another task no longer
 passes that binding to the validator. Task state is unchanged. A rollback to
 0.8.11 passes the binding again.
 
+Version 0.8.13 reclaims a retired payload from another boot or mount
+namespace when its content is unchanged. New receipts also record each Linux
+object's filesystem ID, so a device number that WSL reassigns no longer holds
+them. Receipts from earlier versions reclaim while the device number is
+unchanged. A rollback to 0.8.12 holds receipts written by 0.8.13; it deletes
+nothing.
+
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
 default branch carries the accepted commit's SHA. `integration_checks` counts
