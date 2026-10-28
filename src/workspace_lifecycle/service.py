@@ -353,7 +353,12 @@ def release_hold(repo, task, evidence):
 def _validate(repo: Path, argv: list[str]) -> dict:
     if not argv: return {"argv": [], "returncode": 0}
     argv = [str(repo) if value == "{repo}" else value for value in argv]
-    result = subprocess.run(argv, cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # The session that runs finish may be bound to another task; like CI, a
+    # validation gets its checkout from cwd and {repo}, never a task binding.
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.upper().startswith("WORKSPACE_LIFECYCLE_")}
+    result = subprocess.run(argv, cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=environment)
     evidence = {"argv": argv, "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
     if result.returncode: raise LifecycleError("configured validation failed: " + json.dumps(evidence, ensure_ascii=True))
     return evidence

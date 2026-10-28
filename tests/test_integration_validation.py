@@ -1,6 +1,7 @@
 """Integration validates the candidate after the target contains its source."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -140,6 +141,29 @@ class IntegrationValidationTest(unittest.TestCase):
         self.assertNotIn('reused', state['integrated']['validation'])
         self.assertEqual(state['integrated']['validation']['returncode'], 0)
         self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), result['integration']['commit'])
+
+    def test_validation_does_not_inherit_the_calling_session_binding(self):
+        observed = self.base / 'observed'
+        self.validation[-1] += (
+            "; import json, os, sys; open(sys.argv[2], 'a').write(json.dumps({"
+            "'leaked': sorted(k for k in os.environ if k.upper().startswith('WORKSPACE_LIFECYCLE_')), "
+            "'sentinel': os.environ.get('VALIDATION_SENTINEL'), 'path': os.environ.get('PATH'), "
+            "'cwd': os.getcwd(), 'repo': sys.argv[1]}) + '\\n')")
+        self.validation += ['{repo}', str(observed)]
+        self.begin_candidate()
+        foreign = {'WORKSPACE_LIFECYCLE_TASK': 'other-task', 'WORKSPACE_LIFECYCLE_REPO': str(self.other),
+                   'WORKSPACE_LIFECYCLE_CONTEXT': json.dumps({'task': 'other-task', 'repo': str(self.other)}),
+                   'WORKSPACE_LIFECYCLE_USE': 'f' * 32, 'WORKSPACE_LIFECYCLE_FUTURE_BINDING': 'other-task',
+                   'Workspace_Lifecycle_Mixed_Case': 'other-task', 'VALIDATION_SENTINEL': 'kept'}
+        with patch.dict(os.environ, foreign):
+            result, runs = self.counted_finish()
+        self.assertEqual(runs, [self.topic, self.root])
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), result['integration']['commit'])
+        seen = [json.loads(line) for line in observed.read_text().splitlines()]
+        self.assertEqual([(Path(row['cwd']).resolve(), Path(row['repo'])) for row in seen],
+                         [(self.topic, self.topic), (self.root, self.root)])
+        for row in seen:
+            self.assertEqual((row['leaked'], row['sentinel'], row['path']), ([], 'kept', os.environ['PATH']))
 
     def test_advanced_base_validates_merged_content_once(self):
         self.begin_candidate()

@@ -61,7 +61,10 @@ this repository with it, register for example:
 
 Begin a task with an explicit request, remote, branch, absolute worktree,
 validation argv and preflight argv. See `begin --help` for validation checkout
-placeholders. The preflight must contain the literal
+placeholders. A validation runs in its checkout with the caller's environment
+minus every `WORKSPACE_LIFECYCLE_*` variable, whatever the letter case, so a
+session bound to another task cannot change its result; it receives no task
+binding of its own. The preflight must contain the literal
 `{repo}` placeholder. An element equal to `{lifecycle_python}` runs with the
 interpreter of the lifecycle that is finishing the task, so a preflight such as
 `["{lifecycle_python}", "-m", "workspace_lifecycle.push", "{repo}"]` keeps
