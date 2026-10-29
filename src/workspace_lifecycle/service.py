@@ -64,8 +64,9 @@ def _ignored_collisions(repo, incoming, *, merge=True):
     """Untracked data that Git would overwrite, remove or write into while
     bringing ``incoming`` (merged, or else checked out) into ``repo``.
 
-    Git checks out over ignored files: a normal merge and ``reset --keep`` do so
-    even with ``--no-overwrite-ignore``. Unignored untracked data is already
+    The fast-forward or checkout that follows refuses ignored files as it
+    writes, which guards data written after this check; this check names each
+    path and reason and also finds links. Unignored untracked data is already
     refused as dirt, so each entry found here is ignored data, a link, or a
     case alias. Only the incoming paths and their parent directories are read.
     """
@@ -118,6 +119,61 @@ def _refuse_ignored_collisions(repo, incoming, *, merge=True):
     if collisions:
         raise LifecycleError('incoming changes collide with untracked data in ' + str(repo) + ': '
                              + _preview([path + ' (' + reason + ')' for path, reason in collisions]))
+
+
+# A native merge commit runs the first four through `git commit`; a merge
+# applied by fast-forward runs only the last. Either set would change.
+MERGE_HOOKS = ('pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit', 'post-merge')
+
+
+def _merge_hooks(repo):
+    found = []
+    for name in MERGE_HOOKS:
+        listed = subprocess.run(['git', '-C', str(repo), 'hook', 'list', name], capture_output=True)
+        if listed.returncode in (0, 1):
+            found += [name] if listed.returncode == 0 else []
+            continue
+        # Git before `git hook list` runs only the hooks directory's executables.
+        path = Path(repo) / git(repo, 'rev-parse', '--git-path', 'hooks/' + name)
+        if path.is_file() and (os.name == 'nt' or os.access(path, os.X_OK)):
+            found.append(name)
+    return found
+
+
+def _merge_by_fast_forward(repo, theirs, message, record):
+    """Merge ``theirs`` into the checkout's HEAD, refusing untracked data Git
+    would write over.
+
+    A normal merge writes over ignored files that appear after any check, even
+    with --no-overwrite-ignore. Here Git builds the merge commit without the
+    checkout, and the fast-forward to it refuses such files as it writes.
+    ``record`` receives the merge tree first, so an interrupted merge is
+    recognised as the recorded one. A conflict or a merge hook needs the
+    native merge, which only its operator starts.
+    """
+    ours = head(repo)
+    outcome = subprocess.run(['git', '-C', str(repo), 'merge-tree', '--write-tree', '-z', '--name-only', ours, theirs],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if outcome.returncode not in (0, 1):
+        raise LifecycleError('Git could not merge ' + theirs + ': ' + os.fsdecode(outcome.stderr))
+    fields = outcome.stdout.split(b'\0')
+    conflicts = []
+    for field in fields[1:] if outcome.returncode else ():
+        if not field: break
+        conflicts.append(os.fsdecode(field))
+    hooks = _merge_hooks(repo)
+    if conflicts or hooks:
+        reason = ('conflicts in ' + _preview(conflicts)) if conflicts else ('merge hooks ' + ', '.join(hooks))
+        raise LifecycleError('the merge of ' + theirs + ' into ' + str(repo) + ' has ' + reason
+                             + '; start it there with git merge --no-ff --no-commit ' + theirs
+                             + ', then run the same command again')
+    tree = os.fsdecode(fields[0])
+    record(tree)
+    # Unlike git commit, commit-tree signs only when asked.
+    sign = ['-S'] if git(repo, 'config', '--type=bool', 'commit.gpgSign', optional=True) == 'true' else []
+    commit = git(repo, 'commit-tree', *sign, tree, '-p', ours, '-p', theirs, '-m', message)
+    git(repo, 'merge', '--ff-only', '--no-overwrite-ignore', commit)
+    return commit
 
 
 def _task(state, task):
@@ -1210,7 +1266,8 @@ def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
 
     The receipt extends an existing operation; it is never task acceptance.
     Native writers must be quiescent, as for adoption and finish. An
-    integration target passes ``ignored`` as _target_snapshot decides it.
+    integration target passes ``ignored`` as _target_snapshot decides it; a
+    checkout whose ignored data is not its own merges by fast-forward.
     """
     workspace_record = workspace_record or {}
     _check_preserved(repo, workspace_record)
@@ -1304,7 +1361,12 @@ def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
             git(repo, 'merge', '--ff-only', '--no-overwrite-ignore', remote_head)
         else:
             _refuse_ignored_collisions(repo, remote_head)
-            git(repo, 'merge', '--no-ff', '--no-commit', remote_head)
+            if ignored:
+                git(repo, 'merge', '--no-ff', '--no-commit', remote_head)
+            else:
+                def record(tree):
+                    receipt['tree'] = tree; persist()
+                _merge_by_fast_forward(repo, remote_head, 'Merge same-name remote branch ' + branch, record)
     current = head(repo)
     merge_head = git(repo, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True)
     if merge_head and (current != expected_head or merge_head != remote_head):
@@ -1511,7 +1573,8 @@ def _withdraw(repo: Path, task_id: str, state: dict, directory) -> None:
         if reached != 1:
             raise LifecycleError('the prepared integration may already be on the remote; run the same finish again')
         _refuse_ignored_collisions(target, before, merge=False)
-        git(target, 'reset', '--keep', before)
+        # Unlike reset --keep, a checkout refuses ignored files as it writes.
+        git(target, 'checkout', '--no-overwrite-ignore', '-B', intent['target'], before)
     if head(target) != before or _target_snapshot(target, parent):
         raise LifecycleError('target did not return to its HEAD before the prepared integration')
     state['intents'].pop(task_id); save_state(directory, state)
@@ -1690,10 +1753,18 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                         if head(target_worktree) != source_commit:
                             raise LifecycleError('fast-forward did not reach the accepted commit')
                         intent['merged'] = source_commit; save_state(directory, state)
-                    else:
+                    elif parent:
                         _refuse_ignored_collisions(target_worktree, source_commit)
                         git(target_worktree, 'merge', '--no-ff', '--no-commit', source_commit)
                         merge_head = git(target_worktree, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True)
+                    else:
+                        _index_protection(target_worktree)
+                        _refuse_ignored_collisions(target_worktree, source_commit)
+                        def record(tree):
+                            intent['merge_tree'] = tree; save_state(directory, state)
+                        intent['merged'] = _merge_by_fast_forward(
+                            target_worktree, source_commit, 'Merge workspace task ' + task_id, record)
+                        save_state(directory, state)
                 if not intent.get('merged'):
                     if merge_head != source_commit:
                         raise LifecycleError('native merge identity differs from the requested source')

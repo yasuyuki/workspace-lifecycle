@@ -240,10 +240,18 @@ finish compares the incoming paths with what is on disk. It refuses, naming each
 path and reason, when an incoming path or one of its parent directories is
 ignored data, a link or reparse point, or a case alias of it, and when an
 incoming file replaces a tracked directory that holds ignored data. Git's own
-merge and `reset --keep` would overwrite such data. A fast-forward also passes
-`--no-overwrite-ignore`, so data written after that check still stops it. The
-refusal keeps the pending integration: move the data aside and run the same
-finish again. The same finish also closes a task whose accepted commit already
+merge and `reset --keep` would overwrite such data, even data written after
+that check. So finish never runs them there: Git builds a merge commit without
+the checkout (`git merge-tree`, `git commit-tree`) and the checkout reaches it,
+or the accepted commit, only by a fast-forward with `--no-overwrite-ignore`; a
+withdrawal returns by `git checkout --no-overwrite-ignore -B`. Data written
+after the check still stops Git as it writes. The refusal keeps the pending
+integration: move the data aside and run the same finish again. A merge that
+conflicts, or a repository with a `pre-commit`, `prepare-commit-msg`,
+`commit-msg`, `post-commit` or `post-merge` hook, needs Git's own merge, so
+finish starts none: run the `git merge --no-ff --no-commit` it names in that
+checkout, resolve any conflicts, and run the same finish again. It commits the
+merge you started as before. The same finish also closes a task whose accepted commit already
 reached the remote default some other way, after its required checks and the
 target's validation, without a new commit. A parent task's checkout keeps
 treating ignored data as dirt.

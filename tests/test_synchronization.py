@@ -218,8 +218,9 @@ class SynchronizationTest(unittest.TestCase):
         local = self.commit(self.root, 'base', 'local default\n')
         git(self.other, 'checkout', 'trunk')
         remote = self.commit(self.other, 'base', 'remote default\n'); git(self.other, 'push', 'origin', 'trunk')
-        with self.assertRaises(LifecycleError): self.finish()
+        with self.assertRaisesRegex(LifecycleError, 'conflicts in base; start it there'): self.finish()
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), local)
+        subprocess.run(['git', '-C', str(self.root), 'merge', '--no-ff', '--no-commit', remote], capture_output=True)
         (self.root / 'base').write_text('resolved default\n'); git(self.root, 'add', 'base')
         result = self.finish(); self.assertTrue(result['accepted'])
         self.assertEqual(git(self.root, 'merge-base', '--is-ancestor', remote, 'HEAD'), '')
@@ -276,7 +277,8 @@ class SynchronizationTest(unittest.TestCase):
         with patch.object(service, '_push', side_effect=race):
             with self.assertRaises(subprocess.CalledProcessError): self.finish()
         original_merge = service.status(self.topic, 'same')['intent']['merged']
-        with self.assertRaises(LifecycleError): self.finish()
+        with self.assertRaisesRegex(LifecycleError, 'conflicts in base; start it there'): self.finish()
+        subprocess.run(['git', '-C', str(self.root), 'merge', '--no-ff', '--no-commit', raced[0]], capture_output=True)
         (self.root / 'base').write_text('resolved integration\n'); git(self.root, 'add', 'base')
         result = self.finish(); self.assertTrue(result['accepted'])
         self.assertEqual(git(self.root, 'merge-base', '--is-ancestor', original_merge, 'HEAD'), '')

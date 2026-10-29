@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import late_data
 from workspace_lifecycle import checks, service
 from workspace_lifecycle.errors import LifecycleError
 from workspace_lifecycle.adoption import adopt_existing
@@ -487,8 +488,10 @@ class RequiredChecksTest(unittest.TestCase):
         with self.assertRaises(LifecycleError):
             self.finish("conflict")
         commit = self.pushed("conflict")
-        with patch("workspace_lifecycle.checks.time", FakeClock()), self.assertRaises(LifecycleError):
+        with patch("workspace_lifecycle.checks.time", FakeClock()), \
+                self.assertRaisesRegex(LifecycleError, "conflicts in feature.txt; start it there"):
             finish(self.topic, task="conflict", plan_path=str(self.plan), result_ref="issue/conflict", wait_checks=30)
+        subprocess.run(["git", "-C", str(self.root), "merge", "--no-ff", "--no-commit", commit], capture_output=True)
         self.assertEqual(run(self.root, "rev-parse", "MERGE_HEAD"), commit)
         (self.root / "feature.txt").write_text("resolved by hand\n")
         with self.assertRaisesRegex(LifecycleError, "merge in progress"):
@@ -862,6 +865,52 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertNotIn("intent", status(self.topic, "undo-cached"))
         self.assertEqual(run(self.root, "status", "--porcelain"), "")
         self.assertEqual(self.cache_state(), cache)
+
+    def withdrawal_race(self, shape):
+        """Another process writes ignored data where a withdrawal brings back
+        ``shape``'s path, after every check and just before Git changes the checkout."""
+        incoming, names = late_data.SHAPES[shape]
+        (self.root / ".git" / "info" / "exclude").write_text(late_data.IGNORE)
+        (self.root / incoming).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / incoming).write_text("tracked\n")
+        run(self.root, "add", "--force", "--", incoming); run(self.root, "commit", "-qm", "track " + incoming)
+        run(self.root, "push", "-q", "origin", "trunk")
+        base = self.trunk()
+        self.start("undo-" + shape)
+        run(self.topic, "rm", "-q", "--", incoming); run(self.topic, "commit", "-qm", "drop " + incoming)
+        self.refused("undo-" + shape, "missing")
+        commit = self.pushed("undo-" + shape)
+        writing, fired = late_data.writing_before_checkout_change(self.root, incoming, names)
+        failing = [lambda: self.github.add("example/repo", commit, TEST, "completed", "failure")]
+        if shape == "case" and not late_data.folds_case():
+            with writing:
+                self.waiting_refused("undo-" + shape, "failed", failing)
+            self.assertEqual(run(self.root, "rev-parse", "HEAD"), base, "distinct names do not collide")
+            self.assertIsNotNone(late_data.state(self.root, names)[names[0]])
+            return
+        with writing, patch("workspace_lifecycle.checks.time", FakeClock(failing)):
+            with self.assertRaisesRegex(LifecycleError, late_data.REFUSAL):
+                finish(self.topic, task="undo-" + shape, plan_path=str(self.plan), result_ref="issue/undo",
+                       wait_checks=600)
+        self.assertEqual(fired[0][:4], ("checkout", "--no-overwrite-ignore", "-B", "trunk"),
+                         "the other process wrote just before the only Git command that changed the checkout")
+        late = late_data.state(self.root, names)
+        self.assertNotIn(None, late.values())
+        self.assertEqual(self.trunk(), base)
+        self.assertEqual(run(self.root, "rev-parse", "HEAD"), commit, "the prepared integration stays")
+        self.assertIn("intent", status(self.topic, "undo-" + shape))
+        aside = Path(self.temp.name) / "aside"; aside.mkdir()
+        late_data.move_aside(self.root, names, aside)
+        self.refused("undo-" + shape, "failure")
+        self.assertEqual(run(self.root, "rev-parse", "HEAD"), base, "the same finish withdraws once the data is moved aside")
+        self.assertNotIn("intent", status(self.topic, "undo-" + shape))
+        self.assertEqual((self.root / incoming).read_text(), "tracked\n")
+        self.assertEqual(late_data.state(aside, names), late)
+
+    for shape in late_data.SHAPES:
+        locals()[f"test_ignored_{shape}_written_before_a_withdrawal_survives"] = (
+            lambda self, shape=shape: self.withdrawal_race(shape))
+    del shape
 
     def test_without_wait_the_integrated_commit_is_not_queried(self):
         self.ready("unwaited")

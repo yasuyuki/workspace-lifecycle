@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import late_data
 from workspace_lifecycle import service
 from workspace_lifecycle.errors import LifecycleError
 
@@ -372,16 +373,15 @@ class IntegrationValidationTest(unittest.TestCase):
         self.begin_candidate()
         self.remote_commit('early', 'early\n')
         raced = []
-        native = service._index_protection
+        native = service._merge_by_fast_forward
 
-        def advance(repo):
-            merge_head = self.root / '.git' / 'MERGE_HEAD'
-            merging = merge_head.read_text().strip() if merge_head.exists() else None
-            if Path(repo) == self.root and merging == self.source and not raced:
+        def advance(repo, theirs, *args):
+            merged = native(repo, theirs, *args)
+            if theirs == self.source and not raced:
                 raced.append(self.remote_commit())
-            return native(repo)
+            return merged
 
-        with patch.object(service, '_index_protection', side_effect=advance):
+        with patch.object(service, '_merge_by_fast_forward', side_effect=advance):
             result, runs = self.counted_finish()
         merged = result['integration']['commit']
         self.assertEqual(runs, [self.topic, self.root, self.root])
@@ -579,9 +579,11 @@ class IntegrationValidationTest(unittest.TestCase):
         self.begin_candidate()
         local = self.commit(self.root, 'base', 'local default\n')
         remote = self.remote_commit('base', 'remote default\n')
-        with self.assertRaises(LifecycleError):
+        with self.assertRaisesRegex(LifecycleError, 'conflicts in base; start it there'):
             self.finish()
         before = service.status(self.topic, 'candidate')
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        subprocess.run(['git', '-C', str(self.root), 'merge', '--no-ff', '--no-commit', remote], capture_output=True)
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), local)
         self.assertEqual(git(self.root, 'rev-parse', 'MERGE_HEAD'), remote)
         (self.root / 'base').write_text('resolved default\n')
@@ -900,6 +902,84 @@ class IntegrationValidationTest(unittest.TestCase):
             with self.assertRaisesRegex(LifecycleError, 'would be overwritten'):
                 self.finish()
         self.assertEqual((self.root / 'late.log').read_text(), 'written later\n')
+
+    def race(self, shape, merges):
+        """Another process writes ignored data where a non-fast-forward brings
+        ``shape``'s path, after every check and just before Git changes the
+        checkout. ``merges`` names what Git brings it with: the candidate's
+        merge, or the synchronization of a diverged default checkout."""
+        incoming, names = late_data.SHAPES[shape]
+        (self.root / '.git' / 'info' / 'exclude').write_text(late_data.IGNORE)
+        self.begin_candidate()
+        if merges == 'candidate':
+            self.force_commit(self.topic, incoming, 'incoming\n')
+            self.remote_commit('side', 'side\n')
+        else:
+            self.commit(self.root, 'local', 'local\n')
+            self.force_commit(self.other, incoming, 'incoming\n')
+            git(self.other, 'push', 'origin', 'HEAD:refs/heads/trunk')
+        remote = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        writing, fired = late_data.writing_before_checkout_change(self.root, incoming, names)
+        with writing:
+            if shape == 'case' and not late_data.folds_case():
+                self.assertTrue(self.finish()['accepted'], 'distinct names do not collide')
+                self.assertEqual(late_data.state(self.root, names)[names[0]][0], hashlib.sha256(
+                    b'written by another process: case.log\n').hexdigest())
+                return
+            late = None
+            with self.assertRaisesRegex(LifecycleError, late_data.REFUSAL):
+                try:
+                    self.finish()
+                finally:
+                    late = late_data.state(self.root, names)
+        self.assertEqual(fired[0][:3], ('merge', '--ff-only', '--no-overwrite-ignore'),
+                         'the other process wrote just before the only Git command that changed the checkout')
+        self.assertNotIn(None, late.values())
+        self.assertEqual(late_data.state(self.root, names), late)
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), remote)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertNotIn('integrated', service.status(self.topic, 'candidate'))
+        aside = self.base / 'aside'; aside.mkdir()
+        late_data.move_aside(self.root, names, aside)
+        result = self.finish()
+        self.assertTrue(result['accepted'], 'the same finish resumes once the data is moved aside')
+        self.assertEqual((self.root / incoming).read_text(), 'incoming\n')
+        self.assertEqual(late_data.state(aside, names), late)
+        merge = result['integration']['commit']
+        self.assertEqual(git(self.root, 'rev-list', '--parents', '-1', merge).split()[2:],
+                         [service.status(self.topic, 'candidate')['acceptance']['commit']])
+        self.assertEqual(git(self.root, 'log', '-1', '--format=%B', merge), 'Merge workspace task candidate')
+
+    for shape in late_data.SHAPES:
+        for merges in ('candidate', 'synchronization'):
+            locals()[f'test_ignored_{shape}_written_before_the_{merges}_merge_survives'] = (
+                lambda self, shape=shape, merges=merges: self.race(shape, merges))
+    del shape, merges
+
+    def test_a_merge_is_signed_as_git_commit_would_sign_it(self):
+        self.begin_candidate()
+        self.remote_commit()
+        remote = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        git(self.root, 'config', 'commit.gpgSign', 'true')
+        git(self.root, 'config', 'gpg.program', str(self.base / 'missing-signer'))
+        with self.assertRaisesRegex(LifecycleError, 'failed to sign'):
+            self.finish()
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), remote)
+        git(self.root, 'config', 'commit.gpgSign', 'false')
+        self.assertTrue(self.finish()['accepted'])
+
+    def test_a_merge_hook_leaves_the_merge_to_its_operator(self):
+        self.begin_candidate()
+        self.remote_commit()
+        hook = Path(git(self.root, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks/commit-msg'))
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text('#!/bin/sh\necho "Hooked: yes" >> "$1"\n')
+        hook.chmod(0o755)
+        with self.assertRaisesRegex(LifecycleError, 'merge hooks commit-msg; start it there'):
+            self.finish()
+        git(self.root, 'merge', '--no-ff', '--no-commit', self.source)
+        merged = self.finish()['integration']['commit']
+        self.assertIn('Hooked: yes', git(self.root, 'log', '-1', '--format=%B', merged))
 
 
 if __name__ == '__main__':

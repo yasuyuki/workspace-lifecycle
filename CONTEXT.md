@@ -60,6 +60,14 @@ _Avoid_: 作業の残り、統合先の dirty、消してよい生成物
 統合先へ入る変更の path、またはその親 directory が、target ignored data・link・大文字小文字だけ違う別名と重なること。入る file が ignored data を含む tracked directory を置き換える場合も含む。Git はこのとき ignored data を上書きしたり消したりしうるので、統合はその path と理由を示して拒否する。拒否しても pending の統合は残り、data を退けて同じ finish を繰り返せば続く。
 _Avoid_: dirty、conflict
 
+**Fast-forward merge**:
+default branch の checkout へ入る merge commit を、その checkout の外で作り、checkout はそこへ fast-forward するだけで進む統合。checkout を書き換える Git 自身が、書く瞬間に target ignored data を見つけて拒否する。検査の後に別の process が書いた data もこれで守られる。通常の merge と同じ tree・parent の順・message を持つ。
+_Avoid_: 検査してから merge、squash、rebase
+
+**Operator-started merge**:
+衝突する merge、または commit や merge の hook を持つ repository への merge。fast-forward merge にできないので lifecycle は始めず、その checkout の operator が通常の Git merge として始める。始めた merge は同じ finish が引き継いで commit する。
+_Avoid_: 自動の衝突解決、中断した統合
+
 ### Required checks
 
 **Required check state**:
