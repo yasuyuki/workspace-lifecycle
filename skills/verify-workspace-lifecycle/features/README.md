@@ -9,6 +9,7 @@
 | Crashed use recovery | A killed supervisor's receipt, then `lease-release --task --token --evidence` | not-run. Covered by `tests/test_leases.py`. |
 | Mutation inside a sole use | `finish` or `hold` from inside the task's only session | not-run. Covered by `tests/test_leases.py` and `tests/test_dirty.py`. |
 | Lifecycle flow | `begin`, `finish`, `retire`, `reclaim`, `sync` and the other subcommands | not-run |
+| Default checkout with ignored data | `finish` integrating beside ignored data in the default checkout, and refusing incoming paths that collide with it | not-run. Covered by `tests/test_integration_validation.py` and `tests/test_required_checks.py`. |
 
 A row marked not-run has no evidence from this verifier. Add a profile
 for one when a change to it needs proof through its own user entry point.

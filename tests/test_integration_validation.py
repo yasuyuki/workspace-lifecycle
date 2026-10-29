@@ -713,5 +713,194 @@ class IntegrationValidationTest(unittest.TestCase):
         self.assertNotIn('commit', state['intent']['synchronization'])
 
 
+    def keep_cache(self, rules='cache/\n*.log\n'):
+        """Ignored data in the default checkout that belongs to no task."""
+        (self.root / '.git' / 'info' / 'exclude').write_text(rules)
+        for name, data in (('cache/shared.txt', b'shared\n'), ('cache/deep/state.bin', b'\0state'),
+                           ('build.log', b'log\n')):
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / name).write_bytes(data)
+        return self.cache_state()
+
+    def cache_state(self):
+        """Bytes and mode of each file in the root that Git does not track."""
+        names = git(self.root, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard').split('\0')
+        return {name: ((self.root / name).read_bytes(), (self.root / name).stat().st_mode)
+                for name in sorted(filter(None, names))}
+
+    def force_commit(self, repo, path, content):
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(content)
+        git(repo, 'add', '--force', '--', path)
+        git(repo, 'commit', '-m', path)
+
+    def tracked_tools(self):
+        (self.root / 'tools').mkdir()
+        self.commit(self.root, 'tools/run.py', 'run\n')
+        git(self.root, 'push', 'origin', 'trunk')
+        self.keep_cache()
+        (self.root / 'tools' / 'run.log').write_text('kept\n')
+        return self.cache_state()
+
+    def test_ignored_target_data_stays_through_fast_forward(self):
+        cache = self.keep_cache()
+        self.begin_candidate()
+        result = self.finish()
+        self.assertTrue(result['accepted'])
+        self.assertEqual(result['integration']['commit'], self.source, 'fast-forward keeps the accepted SHA')
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), self.source)
+        self.assertEqual(self.cache_state(), cache)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertEqual(len(git(self.root, 'worktree', 'list', '--porcelain').split('\n\n')), 2)
+
+    def test_ignored_target_data_stays_through_synchronization_and_merge(self):
+        cache = self.keep_cache()
+        self.begin_candidate()
+        remote = self.remote_commit()
+        result = self.finish()
+        merged = result['integration']['commit']
+        self.assertEqual(git(self.root, 'rev-list', '--parents', '-1', merged).split()[1:], [remote, self.source])
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), merged)
+        self.assertEqual(self.cache_state(), cache)
+
+    def assert_collision(self, refusal, *, merge=False):
+        """Refused before the target takes the incoming change; its ignored data unchanged."""
+        if merge:
+            self.remote_commit('side', 'side\n')
+        before = self.cache_state()
+        with self.assertRaisesRegex(LifecycleError, refusal):
+            self.finish()
+        self.assertEqual(self.cache_state(), before)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertFalse((self.root / 'candidate').exists())
+        self.assertNotIn('integrated', service.status(self.topic, 'candidate'))
+
+    def collides_at_incoming_file(self, merge):
+        self.keep_cache()
+        self.begin_candidate()
+        self.force_commit(self.topic, 'build.log', 'incoming\n')
+        self.assert_collision(r'build\.log \(ignored data at incoming path\)', merge=merge)
+        # The refusal keeps the pending integration; moving the data aside resumes it.
+        (self.root / 'build.log').rename(self.base / 'build.log')
+        self.assertTrue(self.finish()['accepted'])
+        self.assertEqual((self.root / 'build.log').read_text(), 'incoming\n')
+        self.assertEqual((self.root / 'cache' / 'deep' / 'state.bin').read_bytes(), b'\0state')
+
+    def test_fast_forward_over_an_ignored_file_is_refused(self):
+        self.collides_at_incoming_file(merge=False)
+
+    def test_merge_over_an_ignored_file_is_refused(self):
+        # Git's merge overwrites ignored files even with --no-overwrite-ignore.
+        self.collides_at_incoming_file(merge=True)
+
+    def test_incoming_file_inside_an_ignored_directory_is_refused(self):
+        self.keep_cache()
+        self.begin_candidate()
+        self.force_commit(self.topic, 'cache/new.txt', 'incoming\n')
+        self.assert_collision(r'cache \(ignored data on the path of cache/new\.txt\)', merge=True)
+
+    def test_incoming_file_over_an_ignored_directory_is_refused(self):
+        self.keep_cache()
+        self.begin_candidate()
+        self.force_commit(self.topic, 'cache', 'incoming\n')
+        self.assert_collision(r'cache \(ignored data at incoming path\)')
+
+    def test_incoming_directory_over_an_ignored_file_is_refused(self):
+        self.keep_cache()
+        self.begin_candidate()
+        self.force_commit(self.topic, 'build.log/x', 'incoming\n')
+        self.assert_collision(r'build\.log \(ignored data on the path of build\.log/x\)', merge=True)
+
+    def test_tracked_directory_replaced_by_a_file_keeps_its_ignored_content(self):
+        self.tracked_tools()
+        self.begin_candidate()
+        git(self.topic, 'rm', '-q', 'tools/run.py')
+        self.commit(self.topic, 'tools', 'incoming\n')
+        self.assert_collision(r'tools \(ignored data in a directory replaced by tools\)')
+        self.assertEqual((self.root / 'tools' / 'run.log').read_text(), 'kept\n')
+
+    def test_deleting_a_tracked_directory_keeps_its_ignored_content(self):
+        cache = self.tracked_tools()
+        self.begin_candidate()
+        git(self.topic, 'rm', '-q', 'tools/run.py')
+        git(self.topic, 'commit', '-m', 'drop tools')
+        self.assertTrue(self.finish()['accepted'])
+        self.assertEqual(self.cache_state(), cache)
+
+    def test_link_on_an_incoming_path_is_refused(self):
+        self.keep_cache('cache/\n*.log\nlinked\n')
+        outside = self.base / 'outside'
+        outside.mkdir()
+        (outside / 'kept.txt').write_text('kept\n')
+        link = self.root / 'linked'
+        if os.name == 'nt':
+            import _winapi
+            _winapi.CreateJunction(str(outside), str(link))
+        else:
+            link.symlink_to(outside, target_is_directory=True)
+        self.begin_candidate()
+        self.force_commit(self.topic, 'linked/new.txt', 'incoming\n')
+        with self.assertRaisesRegex(LifecycleError, r'linked \(link or reparse point on the path of linked/new\.txt\)'):
+            self.finish()
+        self.assertEqual([path.name for path in outside.iterdir()], ['kept.txt'])
+        self.assertNotIn('integrated', service.status(self.topic, 'candidate'))
+
+    def test_case_alias_of_ignored_data_is_refused_where_the_filesystem_folds_case(self):
+        cache = self.keep_cache()
+        self.begin_candidate()
+        self.force_commit(self.topic, 'Cache/new.txt', 'incoming\n')
+        if (self.root / 'CACHE').exists():
+            self.assert_collision(r'Cache \(ignored data on the path of Cache/new\.txt\)')
+        else:
+            self.assertTrue(self.finish()['accepted'])
+            self.assertEqual({name: value for name, value in self.cache_state().items() if name in cache}, cache)
+
+    def test_ignored_data_does_not_excuse_other_target_state(self):
+        self.keep_cache()
+        self.begin_candidate(dirty=True)
+        cases = (
+            ('base', lambda: (self.root / 'base').write_text('changed\n'),
+             lambda: git(self.root, 'checkout', '--', 'base')),
+            ('staged.txt', lambda: ((self.root / 'staged.txt').write_text('s\n'), git(self.root, 'add', 'staged.txt')),
+             lambda: (git(self.root, 'rm', '-q', '--cached', 'staged.txt'), (self.root / 'staged.txt').unlink())),
+            ('stray.txt', lambda: (self.root / 'stray.txt').write_text('unowned\n'),
+             lambda: (self.root / 'stray.txt').unlink()))
+        for name, damage, repair in cases:
+            with self.subTest(name=name):
+                damage()
+                with patch.object(service, '_validate', side_effect=AssertionError('validated')):
+                    self.assert_refused_untouched('integration target has unrelated dirty or merge state: ' + name)
+                repair()
+        self.assertTrue(self.finish()['accepted'])
+
+    def test_returning_to_an_earlier_head_over_ignored_data_is_refused(self):
+        # A withdrawal resets the target to its HEAD before the preparation.
+        self.keep_cache()
+        self.force_commit(self.root, 'old.log', 'tracked\n')
+        before = git(self.root, 'rev-parse', 'HEAD')
+        git(self.root, 'rm', '-q', 'old.log')
+        git(self.root, 'commit', '-m', 'drop old.log')
+        (self.root / 'old.log').write_text('ignored since\n')
+        self.assertEqual(service._ignored_collisions(self.root, before, merge=False),
+                         [('old.log', 'ignored data at incoming path')])
+        self.assertEqual(service._ignored_collisions(self.root, before), [], 'a merge of an ancestor brings nothing')
+
+    def test_ignored_data_written_after_the_check_survives_a_fast_forward(self):
+        self.keep_cache()
+        self.begin_candidate()
+        self.force_commit(self.topic, 'late.log', 'incoming\n')
+        native = service._ignored_collisions
+
+        def late(repo, incoming, **kwargs):
+            found = native(repo, incoming, **kwargs)
+            (Path(repo) / 'late.log').write_text('written later\n')
+            return found
+
+        with patch.object(service, '_ignored_collisions', side_effect=late):
+            with self.assertRaisesRegex(LifecycleError, 'would be overwritten'):
+                self.finish()
+        self.assertEqual((self.root / 'late.log').read_text(), 'written later\n')
+
+
 if __name__ == '__main__':
     unittest.main()

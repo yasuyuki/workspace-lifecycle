@@ -232,6 +232,22 @@ naming the first paths. Such a refusal of a finish with no pending intent record
 a corrected plan needs no revision evidence. Dirt that validation creates is
 still refused afterwards.
 
+Ignored data in a default branch checkout (caches, build output, experiment
+state) is not dirt there: that checkout outlives every task, so the data belongs
+to none of them. Finish integrates beside it and leaves it as it was. Before
+each fast-forward, merge, synchronization or withdrawal changes that checkout,
+finish compares the incoming paths with what is on disk. It refuses, naming each
+path and reason, when an incoming path or one of its parent directories is
+ignored data, a link or reparse point, or a case alias of it, and when an
+incoming file replaces a tracked directory that holds ignored data. Git's own
+merge and `reset --keep` would overwrite such data. A fast-forward also passes
+`--no-overwrite-ignore`, so data written after that check still stops it. The
+refusal keeps the pending integration: move the data aside and run the same
+finish again. The same finish also closes a task whose accepted commit already
+reached the remote default some other way, after its required checks and the
+target's validation, without a new commit. A parent task's checkout keeps
+treating ignored data as dirt.
+
 A repository that relies on remote CI declares the checks every task's
 integration needs in a tracked `.github/required-checks.json` on its remote
 default branch: a JSON array of `{"app", "name"}` GitHub check runs such as

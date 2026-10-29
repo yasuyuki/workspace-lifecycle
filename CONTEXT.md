@@ -50,6 +50,16 @@ _Avoid_: 先行 push、仮統合、統合済み
 required check を要する task の finish が、task checkout で validation をせずに push した commit。受入ではない。その commit の required check が成功し、統合先 checkout がこれから push する commit の validation に成功したとき、同じ記録が受入になる。それまで dependency・child の統合・退役・owner receipt は、これを受入として扱わない。統合先が進んでいて merge commit を作る場合、統合先で validation されるのは merge commit であり、candidate そのものは validation input にならない。candidate は topic の required check で確かめ、統合先へ届く内容は merge commit の validation で確かめるので、この差を許容する。
 _Avoid_: 受入済み、検証済み commit、仮受入
 
+### 統合先
+
+**Target ignored data**:
+default branch の checkout にある ignored の file や directory（cache、build 出力、実験状態など）。その checkout はどの task より長く残るので、どの task のものでもない。統合先の dirty ではなく、統合はこれを変えずに残す。parent task の checkout にある ignored data はこれに当たらず、dirty のままである。
+_Avoid_: 作業の残り、統合先の dirty、消してよい生成物
+
+**Ignored collision**:
+統合先へ入る変更の path、またはその親 directory が、target ignored data・link・大文字小文字だけ違う別名と重なること。入る file が ignored data を含む tracked directory を置き換える場合も含む。Git はこのとき ignored data を上書きしたり消したりしうるので、統合はその path と理由を示して拒否する。拒否しても pending の統合は残り、data を退けて同じ finish を繰り返せば続く。
+_Avoid_: dirty、conflict
+
 ### Required checks
 
 **Required check state**:

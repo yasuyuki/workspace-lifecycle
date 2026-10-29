@@ -784,6 +784,85 @@ class RequiredChecksTest(unittest.TestCase):
         for check in required:
             self.github.add("example/repo", self.pushed(task), check)
 
+    def keep_cache(self):
+        """Ignored data in the default checkout that belongs to no task."""
+        (self.root / ".git" / "info" / "exclude").write_text("cache/\n*.log\n")
+        for name, data in (("cache/shared.txt", b"shared\n"), ("cache/deep/state.bin", b"\0state"),
+                           ("build.log", b"log\n")):
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / name).write_bytes(data)
+        return self.cache_state()
+
+    def cache_state(self):
+        names = run(self.root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard").split("\0")
+        return {name: ((self.root / name).read_bytes(), (self.root / name).stat().st_mode)
+                for name in sorted(filter(None, names))}
+
+    def retiring(self, task):
+        """finish --users-released --wait-checks once trunk's checks succeed."""
+        clock = FakeClock([lambda: [self.github.add("example/repo", self.trunk(), TEST)]])
+        with patch("workspace_lifecycle.checks.time", clock):
+            return finish(self.topic, task=task, plan_path=str(self.plan), result_ref="issue/" + task,
+                          users_released=True, wait_checks=600)
+
+    def assert_retired_with(self, result, cache, worktrees):
+        self.assertEqual(result["integration_checks"]["state"], "success")
+        self.assertTrue(result["retirement"]["retired"], result["retirement"])
+        self.assertEqual(self.cache_state(), cache)
+        self.assertEqual(run(self.root, "status", "--porcelain"), "")
+        self.assertEqual(run(self.root, "branch", "--show-current"), "trunk")
+        self.assertEqual(run(self.root, "worktree", "list", "--porcelain").count("\nworktree ") + 1, worktrees)
+
+    def test_ignored_target_data_stays_through_checked_integration_and_retirement(self):
+        cache = self.keep_cache()
+        self.ready("cached")
+        commit = self.pushed("cached")
+        result = self.retiring("cached")
+        self.assertEqual((result["integration"]["commit"], self.trunk()), (commit, commit))
+        self.assert_retired_with(result, cache, worktrees=1)
+
+    def test_source_already_on_the_remote_default_closes_with_the_same_finish(self):
+        cache = self.keep_cache()
+        self.ready("landed")
+        commit = self.pushed("landed")
+        other = Path(self.temp.name) / "other"
+        run(Path(self.temp.name), "clone", "-q", str(self.remote), str(other))
+        run(other, "config", "user.name", "Test"); run(other, "config", "user.email", "test@example.invalid")
+        run(other, "merge", "-q", "--no-ff", "-m", "merged elsewhere", "origin/topic/landed")
+        run(other, "push", "-q", "origin", "trunk")
+        landed = self.trunk()
+        result = self.retiring("landed")
+        self.assertEqual((result["integration"]["commit"], self.trunk()), (landed, landed),
+                         "the same finish records the integration without a new commit")
+        self.assertEqual((result["accepted"], result["commit"]), (True, commit))
+        self.assertEqual(run(self.root, "rev-parse", "HEAD"), landed)
+        self.assert_retired_with(result, cache, worktrees=1)
+
+    def test_source_already_on_the_remote_default_still_needs_its_checks(self):
+        self.keep_cache()
+        self.start("unchecked")
+        self.refused("unchecked", "missing")
+        other = Path(self.temp.name) / "other"
+        run(Path(self.temp.name), "clone", "-q", str(self.remote), str(other))
+        run(other, "config", "user.name", "Test"); run(other, "config", "user.email", "test@example.invalid")
+        run(other, "merge", "-q", "--no-ff", "-m", "merged elsewhere", "origin/topic/unchecked")
+        run(other, "push", "-q", "origin", "trunk")
+        self.github.add("example/repo", self.pushed("unchecked"), TEST, "completed", "failure")
+        self.refused("unchecked", "failure")
+        self.assertNotIn("acceptance", status(self.topic, "unchecked"))
+
+    def test_failed_checks_withdraw_the_prepared_integration_beside_ignored_data(self):
+        cache = self.keep_cache()
+        self.start("undo-cached")
+        self.refused("undo-cached", "missing")
+        commit = self.pushed("undo-cached"); base = self.trunk()
+        self.waiting_refused("undo-cached", "failed",
+                             [lambda: self.github.add("example/repo", commit, TEST, "completed", "failure")])
+        self.assertEqual(run(self.root, "rev-parse", "HEAD"), base)
+        self.assertNotIn("intent", status(self.topic, "undo-cached"))
+        self.assertEqual(run(self.root, "status", "--porcelain"), "")
+        self.assertEqual(self.cache_state(), cache)
+
     def test_without_wait_the_integrated_commit_is_not_queried(self):
         self.ready("unwaited")
         result = self.finish("unwaited")
