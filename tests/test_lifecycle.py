@@ -150,7 +150,10 @@ class LifecycleTest(unittest.TestCase):
         (self.root / "README").write_bytes(b"default side\n"); run(self.root, "add", "README"); run(self.root, "commit", "-m", "default edit"); run(self.root, "push", "origin", "trunk")
         (self.topic / "README").write_bytes(b"topic side\n"); self.task = "conflict"
         plan = Path(self.temp.name) / "conflict-plan.json"; plan.write_text(json.dumps(self.source_plan(self.topic, "README")))
-        with self.assertRaises(LifecycleError): finish(self.topic, task="conflict", plan_path=str(plan), result_ref="i/x")
+        with self.assertRaisesRegex(LifecycleError, "conflicts in README; start it there"):
+            finish(self.topic, task="conflict", plan_path=str(plan), result_ref="i/x")
+        subprocess.run(["git", "-C", str(self.root), "merge", "--no-ff", "--no-commit", run(self.topic, "rev-parse", "HEAD")],
+                       capture_output=True)
         self.assertTrue(run(self.root, "rev-parse", "--verify", "MERGE_HEAD"))
         (self.root / "README").write_bytes(b"resolved\n"); run(self.root, "add", "README"); run(self.root, "commit", "-m", "resolve")
         result = finish(self.topic, task="conflict", plan_path=str(plan), result_ref="i/x")

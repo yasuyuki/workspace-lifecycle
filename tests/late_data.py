@@ -65,7 +65,8 @@ def writing_before_checkout_change(root, path, names):
     fired = []
 
     def call(repo, *args, **kwargs):
-        if (not fired and Path(repo) == Path(root) and args[:1] in (('merge',), ('checkout',), ('reset',))
+        # resolve() expands a Windows 8.3 temporary path to the worktree's long one.
+        if (not fired and Path(repo).resolve() == Path(root).resolve() and args[:1] in (('merge',), ('checkout',), ('reset',))
                 and brings(root, args[-1], path)):
             fired.append(args)
             subprocess.run([sys.executable, '-c', WRITE, str(root), json.dumps(list(names))], check=True)
