@@ -688,6 +688,12 @@ them. Receipts from earlier versions reclaim while the device number is
 unchanged. A rollback to 0.8.12 holds receipts written by 0.8.13; it deletes
 nothing.
 
+Version 0.8.14 lets finish integrate into a remote default checkout that holds
+ignored data, such as caches and build output. That data stays in place, and
+finish refuses only when an incoming change would overwrite, remove or write
+into it, naming each path. Task state is unchanged. A rollback to 0.8.13
+refuses ignored data in the default checkout again; it deletes nothing.
+
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
 default branch carries the accepted commit's SHA. `integration_checks` counts
