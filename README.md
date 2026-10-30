@@ -702,6 +702,15 @@ finish refuses only when an incoming change would overwrite, remove or write
 into it, naming each path. Task state is unchanged. A rollback to 0.8.13
 refuses ignored data in the default checkout again; it deletes nothing.
 
+Version 0.8.15 changes the default checkout only by a fast-forward to a merge
+commit built outside it, or by `checkout -B`, both with `--no-overwrite-ignore`,
+so Git refuses ignored data that another process writes after the collision
+check. A conflicting merge, or a merge into a repository with commit or merge
+hooks, is left for the operator to start with the printed
+`git merge --no-ff --no-commit` command; the same finish then commits it.
+Task state is unchanged. A rollback to 0.8.14 merges into the checkout again
+and can overwrite ignored data written during that window; it deletes nothing.
+
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
 default branch carries the accepted commit's SHA. `integration_checks` counts
