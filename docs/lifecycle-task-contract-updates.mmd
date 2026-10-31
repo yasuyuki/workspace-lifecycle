@@ -1,0 +1,18 @@
+stateDiagram-v2
+  state "現在の task（未受入）" as Current
+  state "受入済み" as Accepted
+  state "操作が pending" as Pending
+  state "退役中" as Retiring
+  [*] --> Current
+  Current --> Current : update-preflight（保持中の argv を CAS、証拠つき）
+  Current --> Current : update-validation（task checkout から、HEAD 照合、証拠つき）
+  Current --> Current : update-required-checks（宣言を含む配列を CAS、候補を捨てる）
+  Current --> Current : 検証失敗の前で止まった finish を update-validation が解放
+  Current --> Accepted : finish
+  Accepted --> Accepted : update-preflight はまだできる
+  Current --> Pending : finish などが途中で止まる
+  Pending --> Current : 既存の回復手順で解消
+  Accepted --> Retiring : 退役を開始
+  %% update-validation は受入済み・pending・利用中を拒否する
+  %% update-preflight は pending と利用中を拒否し、退役中の task は取り替えられない
+  %% update-required-checks は pending 中を拒否する

@@ -1,0 +1,29 @@
+stateDiagram-v2
+  state Task {
+    state Uses {
+      state "利用なし" as NoUse
+      state "利用中（1 件）" as OneUse
+      state "利用中（複数）" as ManyUses
+      state "異常終了した利用が残る" as Crashed
+      [*] --> NoUse
+      NoUse --> OneUse : run または resolve-run [変更なし]
+      %% when Idle
+      OneUse --> ManyUses : 別の run（同時に使える） [変更なし]
+      %% when Idle
+      ManyUses --> OneUse : 一つが終了
+      OneUse --> NoUse : command と子孫が終了
+      OneUse --> Crashed : supervisor が異常終了
+      Crashed --> NoUse : lease-status で確認し lease-release（証拠つき）
+    }
+    --
+    state Mutation {
+      state "変更なし" as Idle
+      state "変更中（finish・hold・sync・retire）" as Mutating
+      [*] --> Idle
+      Idle --> Mutating : 変更を開始 [利用なし または自分が唯一の利用]
+      %% when NoUse, OneUse
+      Mutating --> Idle : 完了または拒否
+    }
+  }
+  %% never ManyMutating: 利用中（複数） & 変更中（finish・hold・sync・retire） -- 他の利用がある間は変更しない
+  %% never CrashedMutating: 異常終了した利用が残る & 変更中（finish・hold・sync・retire） -- 未解放の利用があれば変更しない

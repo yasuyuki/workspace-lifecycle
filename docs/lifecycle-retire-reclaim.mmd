@@ -1,0 +1,23 @@
+stateDiagram-v2
+  state "統合済み" as Integrated
+  state "owner callback 待ち" as Callbacks
+  state "退役依頼済み" as Requested
+  state "退役前検査" as Checking
+  state "退役拒否" as Refused
+  state "退役済み（payload と admin を recovery に保持）" as Retired
+  state "回収依頼あり" as ReclaimPending
+  state "回収済み" as Reclaimed
+  state "一部保持（変更・link・mount・多重 link）" as Held
+  [*] --> Integrated
+  Integrated --> Callbacks : 受入と users-released、登録済み producer の出力あり
+  Callbacks --> Requested : owner の結果と receipt が回収を確認
+  Callbacks --> Callbacks : 失敗は pending、次の owner 起動で再試行
+  Integrated --> Requested : 受入と users-released（同じ状態変更で依頼を保存）
+  Requested --> Checking : worktree の外から retire
+  Requested --> Requested : worktree 内に cwd が残る、利用中、中断（retire --pending で再試行）
+  Checking --> Refused : 中身のある未所有 data、link、mount、submodule、foreign preserved data
+  Checking --> Retired : git worktree move と admin の archive
+  Retired --> ReclaimPending : 保全証拠つき（finish・retire・reclaim）
+  ReclaimPending --> Reclaimed : manifest と一致する exact な対象だけ削除
+  ReclaimPending --> Held : 一致しない対象は残す
+  Held --> ReclaimPending : reclaim --pending（新しい削除は許さない）

@@ -1,0 +1,29 @@
+stateDiagram-v2
+  state "作業中" as Working
+  state "finish 実行" as Finishing
+  state "拒否（意図を残さない）" as RefusedClean
+  state "検証失敗（commit と完了動作を保持）" as ValidationFailed
+  state "push 拒否（commit 済み）" as PushRejected
+  state "受入済み" as Accepted
+  state "統合拒否（pending 統合を保持）" as IntegrationRefused
+  state "operator が merge を開始" as OperatorMerge
+  state "統合先で検証失敗（未 push）" as TargetFailed
+  state "統合済み" as Integrated
+  [*] --> Working
+  Working --> Finishing : finish（plan と result-ref）
+  Finishing --> RefusedClean : plan が覆わない dirty、保留、依存未受入
+  RefusedClean --> Working : plan を直す（revision 証拠は不要）
+  Finishing --> ValidationFailed : 検証が失敗
+  ValidationFailed --> Finishing : validator を直し同じ plan で再実行
+  ValidationFailed --> Finishing : 修正を commit し --revise-plan-evidence
+  Working --> Finishing : 未着手の意図に owner が commit を追加、--revise-plan-head で再開
+  Finishing --> PushRejected : push が拒否される
+  PushRejected --> Finishing : sync で remote を取り込み同じ plan で再実行
+  Finishing --> Accepted : 検証成功、preflight が push、remote tip を確認
+  Accepted --> IntegrationRefused : 統合先の dirty、ignored 衝突、link・大小文字の別名
+  IntegrationRefused --> Accepted : data を退けて同じ finish
+  Accepted --> OperatorMerge : merge 衝突または commit・merge hook あり
+  OperatorMerge --> Accepted : merge --no-ff --no-commit と衝突解消の後に同じ finish
+  Accepted --> TargetFailed : 統合先の検証が失敗
+  TargetFailed --> Accepted : 同じ task の finish が再開
+  Accepted --> Integrated : 統合先で検証し push

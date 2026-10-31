@@ -1,0 +1,16 @@
+stateDiagram-v2
+  state "既存 checkout（未管理）" as Existing
+  state "adoption 中断（契約と snapshot を保持）" as Interrupted
+  state "adoption 拒否" as Refused
+  state "現在の task（未受入、既存 dirty は baseline）" as Adopted
+  state "foreign preserved data を保護した task" as Protected
+  [*] --> Existing
+  Existing --> Adopted : adopt-existing（expected-head と証拠）
+  Existing --> Protected : adopt-existing --preserved-data-json
+  Existing --> Refused : default branch、競合 binding、Git 操作中、agent-branches が有効
+  Existing --> Interrupted : 書込み中に中断
+  Interrupted --> Adopted : 同じ引数と同じ内容で再試行
+  Interrupted --> Interrupted : 内容や identity が変わると拒否（意図は残る）
+  Adopted --> Adopted : sync（同名 remote を ff または merge、push しない）
+  Protected --> Protected : finish・producer・sync が保護 path との重なりを拒否
+  %% Protected の checkout は退役できず、その data の回収は元の owner が行う
