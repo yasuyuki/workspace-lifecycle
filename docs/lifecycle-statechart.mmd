@@ -1,0 +1,57 @@
+stateDiagram-v2
+  state Lifecycle {
+    state Task {
+      state "未登録" as NotStarted
+      state "作業中" as Working
+      state "finish 中断（commit 済み・未 push）" as FinishPending
+      state "候補（topic push 済み・CI 待ち）" as Candidate
+      state "受入済み" as Accepted
+      state "統合待ち（統合先で停止）" as IntegrationPending
+      state "統合済み" as Integrated
+      state "退役依頼済み" as RetireRequested
+      state "退役済み（recovery に保持）" as Retired
+      state "回収済み" as Reclaimed
+      [*] --> NotStarted
+      NotStarted --> Working : begin または adopt-existing
+      Working --> Working : sync（同名 remote の取込み）
+      Working --> Accepted : finish（required check なし）で検証成功・push [保留なし]
+      %% when Free
+      Working --> FinishPending : finish の検証失敗 [保留なし]
+      %% when Free
+      FinishPending --> Accepted : 同じ plan で finish を再実行 [保留なし]
+      %% when Free
+      Working --> Candidate : finish（required check あり）で topic を push [保留なし]
+      %% when Free
+      Candidate --> Working : CI 失敗、修正を commit
+      Candidate --> Integrated : CI 成功と統合先の検証、push [保留なし]
+      %% when Free
+      Accepted --> Integrated : 統合先へ ff または merge、検証、push
+      Accepted --> IntegrationPending : 統合先の dirty・ignored 衝突・merge 衝突で拒否
+      IntegrationPending --> Integrated : operator が解消し同じ finish を再実行
+      Integrated --> Retired : 外から finish または retire（users-released） [利用なし]
+      %% when Idle
+      Integrated --> RetireRequested : worktree 内から finish --users-released
+      RetireRequested --> Retired : 外から retire [利用なし]
+      %% when Idle
+      Retired --> Reclaimed : reclaim（保全証拠つき）
+    }
+    --
+    state Hold {
+      state "保留なし" as Free
+      state "保留中" as Held
+      [*] --> Free
+      Free --> Held : hold（理由と次の行動）
+      Held --> Free : release-hold（判断の参照）
+    }
+    --
+    state Use {
+      state "利用なし" as Idle
+      state "run で利用中" as InUse
+      [*] --> Idle
+      Idle --> InUse : run が lease を取る [作業中のみ]
+      %% when Working, FinishPending, Candidate, Accepted, IntegrationPending, Integrated
+      InUse --> Idle : command 終了または lease-release
+    }
+  }
+  %% never RetiredInUse: 退役済み（recovery に保持） & run で利用中 -- 利用中の checkout は退役しない
+  %% never ReclaimedInUse: 回収済み & run で利用中 -- 回収した checkout を使う process はない
