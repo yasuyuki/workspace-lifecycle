@@ -112,7 +112,11 @@ the task's finish receipts with the correction, and the next ordinary `finish`
 starts a new one. A finish whose validation failed after its commit and completed
 actions stays pending with them. The correction then requires HEAD to be that
 recorded commit, and the next `finish` with the same plan validates and pushes
-it. Resolve any other pending operation through its existing recovery contract
+it. When the integration was prepared ahead of its required checks, a
+validation that fails or cannot start in the integration target returns
+that target to its HEAD before the integration and releases the intent, so
+the correction can follow and the same `finish` resumes from the candidate.
+Resolve any other pending operation through its existing recovery contract
 first.
 
 Use `adopt-existing` instead of `begin` to continue an existing checkout, including a nondefault primary checkout or a

@@ -486,8 +486,12 @@ def _validate(repo: Path, argv: list[str]) -> dict:
     # validation gets its checkout from cwd and {repo}, never a task binding.
     environment = {key: value for key, value in os.environ.items()
                    if not key.upper().startswith("WORKSPACE_LIFECYCLE_")}
-    result = subprocess.run(argv, cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            env=environment)
+    try:
+        result = subprocess.run(argv, cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=environment)
+    except OSError as exc:
+        raise LifecycleError("configured validation cannot start: "
+                             + json.dumps({"argv": argv, "error": str(exc)}, ensure_ascii=True)) from exc
     evidence = {"argv": argv, "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
     if result.returncode: raise LifecycleError("configured validation failed: " + json.dumps(evidence, ensure_ascii=True))
     return evidence
@@ -1807,8 +1811,19 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                     evidence = {**reuse['validation'], 'reused': 'prepared integration'}
                     parent_evidence = {**reuse['parent_validation'], 'reused': 'prepared integration'} if parent else None
                 else:
-                    evidence = _validate(target_worktree, item['validation'])
-                    parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
+                    try:
+                        evidence = _validate(target_worktree, item['validation'])
+                        parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
+                    except LifecycleError as exc:
+                        # A prepared integration is not pushed yet. Returning its
+                        # target releases the intent, so update-validation can
+                        # correct a wrong validator before the finish is repeated.
+                        try:
+                            _withdraw(repo, task_id, state, directory)
+                        except LifecycleError as undo:
+                            raise LifecycleError(str(exc) + '; the prepared integration stays in its target: '
+                                                 + str(undo), getattr(exc, 'recovery', None)) from exc
+                        raise
                 _check_preserved(target_worktree, parent or {})
                 if head(target_worktree) != merged or _target_snapshot(target_worktree, parent):
                     raise LifecycleError('integration changed during final validation')

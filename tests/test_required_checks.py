@@ -442,6 +442,33 @@ class RequiredChecksTest(unittest.TestCase):
         result, _ = self.waiting("undo")
         self.assertEqual((result["integration"]["commit"], self.trunk()), (commit, commit))
 
+    def test_a_failed_target_validation_withdraws_so_the_validator_can_be_corrected(self):
+        from workspace_lifecycle.service import update_validation
+        wrong = [sys.executable, "-c", "import sys; sys.exit(3)"]
+        self.start("misvalid", validation=wrong)
+        self.refused("misvalid", "missing")
+        commit = self.pushed("misvalid"); base = self.trunk()
+        self.waiting_refused("misvalid", "configured validation failed")
+        self.withdrawn("misvalid", base)
+        with patch("workspace_lifecycle.service._withdraw"), patch("workspace_lifecycle.checks.time", FakeClock()), \
+                self.assertRaisesRegex(LifecycleError, "configured validation failed"):
+            finish(self.topic, task="misvalid", plan_path=str(self.plan), result_ref="issue/misvalid", wait_checks=600)
+        self.assertEqual(run(self.root, "rev-parse", "HEAD"), commit, "an earlier version left this preparation")
+        self.github.add("example/repo", commit, TEST)
+        self.waiting_refused("misvalid", "configured validation failed")
+        self.withdrawn("misvalid", base)
+        update_validation(self.topic, task="misvalid", expected_head=commit, expected_validation=wrong,
+                          validation=["git", "diff", "--check"], evidence="issue/misvalid")
+        result, _ = self.waiting("misvalid")
+        self.assertEqual((result["integration"]["commit"], self.trunk()), (commit, commit))
+
+    def test_a_validator_that_cannot_start_also_withdraws(self):
+        self.start("unstartable", validation=[str(Path(self.temp.name) / "missing-python")])
+        self.refused("unstartable", "missing")
+        base = self.trunk()
+        self.waiting_refused("unstartable", "cannot start")
+        self.withdrawn("unstartable", base)
+
     def test_unfinished_checks_withdraw_the_prepared_merge(self):
         self.start("unfinished")
         run(self.root, "commit", "-q", "--allow-empty", "-m", "later")
