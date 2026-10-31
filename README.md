@@ -715,6 +715,12 @@ hooks, is left for the operator to start with the printed
 Task state is unchanged. A rollback to 0.8.14 merges into the checkout again
 and can overwrite ignored data written during that window; it deletes nothing.
 
+Version 0.8.16 withdraws an unpushed integration whose validation in the
+target fails or cannot start, so `update-validation` can correct the
+validator. Earlier versions left the integration and its intent in the
+target, and no command could correct the validator. Task state is
+unchanged. A rollback to 0.8.15 leaves such an integration in place again.
+
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
 default branch carries the accepted commit's SHA. `integration_checks` counts
