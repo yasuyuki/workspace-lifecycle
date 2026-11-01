@@ -49,8 +49,11 @@ A disposable virtual environment imports that copy, never an installed
 are removed from the tests' environment. Name unittest modules or tests to run a
 subset; `-j` sets the number of concurrent tests, by default 8 or the processor
 count if lower. Failed tests are printed with their output and the exit code is
-1; a test that fails to import or an empty selection also fails. CI runs the
-same entry with `--wheel` on the built wheel. To validate a lifecycle task of
+1; a test that fails to import or an empty selection also fails.
+`--shard K/N` runs every Nth collected test starting at the Kth, so shards 1/N
+to N/N together run the selection once. CI runs the same entry with `--wheel` on
+the built wheel, on Windows as four shards whose `package (windows-latest, 3.14)`
+check succeeds only when all four do. To validate a lifecycle task of
 this repository with it, register for example:
 
 ```console

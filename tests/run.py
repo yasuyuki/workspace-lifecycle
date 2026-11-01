@@ -96,9 +96,15 @@ def main(argv=None):
     parser.add_argument("-j", "--jobs", type=int, default=min(8, os.cpu_count() or 1),
                         help="concurrent test processes (default: %(default)s)")
     parser.add_argument("--wheel", type=Path, help="install this wheel instead of importing the copied src")
+    parser.add_argument("--shard", metavar="K/N", default="1/1",
+                        help="run every Nth collected test starting at the Kth (default: %(default)s)")
     arguments = parser.parse_args(argv)
     if arguments.wheel and not arguments.wheel.is_file():
         parser.error(f"--wheel is not a file: {arguments.wheel}")
+    index, _, count = arguments.shard.partition("/")
+    if not (index.isdigit() and count.isdigit() and 1 <= int(index) <= int(count)):
+        parser.error(f"--shard must be K/N with 1 <= K <= N: {arguments.shard}")
+    index, count = int(index), int(count)
     started = time.perf_counter()
     environment = test_environment()
     with tempfile.TemporaryDirectory(prefix="lifecycle-tests-", ignore_cleanup_errors=True) as base:
@@ -108,15 +114,16 @@ def main(argv=None):
         if collected.returncode:
             sys.stderr.write(collected.stdout + collected.stderr); return 1
         listing = json.loads(collected.stdout)
-        if listing["errors"] or not listing["ids"]:
+        selected = listing["ids"][index - 1::count]
+        if listing["errors"] or not selected:
             sys.stderr.write("".join(listing["errors"]) or "no tests collected\n"); return 1
         with ThreadPoolExecutor(max(1, arguments.jobs)) as pool:
-            outcomes = list(pool.map(lambda test_id: run_one(python, tests, environment, test_id), listing["ids"]))
+            outcomes = list(pool.map(lambda test_id: run_one(python, tests, environment, test_id), selected))
     failed = [outcome for outcome in outcomes if not outcome["ok"]]
     for outcome in failed:
         sys.stderr.write(f"FAIL {outcome['id']}\n{outcome['output']}\n")
     slowest = max(outcomes, key=lambda outcome: outcome["seconds"])
-    print(f"Ran {len(outcomes)} tests in {time.perf_counter() - started:.1f}s with {arguments.jobs} jobs: "
+    print(f"Ran {len(outcomes)} of {len(listing['ids'])} tests (shard {index}/{count}) in {time.perf_counter() - started:.1f}s with {arguments.jobs} jobs: "
           f"{len(outcomes) - len(failed)} passed, {len(failed)} failed, "
           f"skipped={sum(outcome['skipped'] for outcome in outcomes)}, "
           f"expected failures={sum(outcome['expected_failures'] for outcome in outcomes)}; "
