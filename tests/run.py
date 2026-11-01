@@ -49,12 +49,14 @@ def test_environment():
                         f"GIT_CONFIG_VALUE_{count}": "false"})
     if os.name == "nt":
         # Git for Windows' cmd\git.exe relaunches the real git.exe for every call,
-        # about 9 ms each, and the tests make tens of thousands of calls (#63).
+        # and the tests make tens of thousands of calls. The identical git.exe in
+        # libexec\git-core made the tests 1.75 times slower than the launcher (#63).
         exec_path = Path(subprocess.run(["git", "--exec-path"], check=True, text=True,
                                         stdout=subprocess.PIPE).stdout.strip())
-        if not (exec_path / "git.exe").is_file():
-            sys.exit(f"git.exe not found in git --exec-path {exec_path}")
-        environment["PATH"] = os.pathsep.join([str(exec_path), environment.get("PATH", "")])
+        bin_dir = exec_path.parents[1] / "bin"
+        if not (bin_dir / "git.exe").is_file():
+            sys.exit(f"git.exe not found in {bin_dir}, the bin of git --exec-path {exec_path}")
+        environment["PATH"] = os.pathsep.join([str(bin_dir), environment.get("PATH", "")])
     return environment
 
 
