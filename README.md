@@ -46,7 +46,10 @@ uncommitted changes are tested and no bytecode or build output is left behind.
 A disposable virtual environment imports that copy, never an installed
 `workspace-lifecycle`, and each test runs in its own process. Inherited
 `WORKSPACE_LIFECYCLE_*` bindings, `PYTHONPATH`, `PYTHONHOME` and `VIRTUAL_ENV`
-are removed from the tests' environment. Name unittest modules or tests to run a
+are removed from the tests' environment. On Windows the directory of
+`git --exec-path` is put first on the tests' `PATH`, so they start Git itself
+rather than a launcher such as `Git\cmd\git.exe`; without a `git.exe` there the
+run fails. Name unittest modules or tests to run a
 subset; `-j` sets the number of concurrent tests, by default 8 or the processor
 count if lower. Failed tests are printed with their output and the exit code is
 1; a test that fails to import or an empty selection also fails.

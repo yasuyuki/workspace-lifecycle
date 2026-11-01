@@ -47,6 +47,14 @@ def test_environment():
     count = int(environment.get("GIT_CONFIG_COUNT") or 0)
     environment.update({"GIT_CONFIG_COUNT": str(count + 1), f"GIT_CONFIG_KEY_{count}": "maintenance.auto",
                         f"GIT_CONFIG_VALUE_{count}": "false"})
+    if os.name == "nt":
+        # Git for Windows' cmd\git.exe relaunches the real git.exe for every call,
+        # about 9 ms each, and the tests make tens of thousands of calls (#63).
+        exec_path = Path(subprocess.run(["git", "--exec-path"], check=True, text=True,
+                                        stdout=subprocess.PIPE).stdout.strip())
+        if not (exec_path / "git.exe").is_file():
+            sys.exit(f"git.exe not found in git --exec-path {exec_path}")
+        environment["PATH"] = os.pathsep.join([str(exec_path), environment.get("PATH", "")])
     return environment
 
 
