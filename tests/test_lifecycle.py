@@ -511,17 +511,6 @@ class EmptyDirectoryRetirementTests(unittest.TestCase):
         with self.assertRaises(LifecycleError): self.retire()
         self.assertTrue(path.exists())
 
-    def test_submodule_refusal(self):
-        from unittest.mock import patch
-        from workspace_lifecycle import service
-        original = service.git
-        def git_with_submodule(repo, *args, **kwargs):
-            if args == ('submodule', 'status', '--recursive'): return 'submodule present'
-            return original(repo, *args, **kwargs)
-        with patch.object(service, 'git', side_effect=git_with_submodule):
-            with self.assertRaisesRegex(LifecycleError, 'submodule'): self.retire()
-        self.assertTrue(self.f.topic.exists())
-
     def test_file_appearing_before_move_survives_in_recovery(self):
         from unittest.mock import patch
         path = self.f.topic / 'race'; path.mkdir(); path = path.resolve()

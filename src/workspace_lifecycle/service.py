@@ -1876,10 +1876,13 @@ def _retirement_contents(workspace):
     """Validate preexisting content before the no-delete retirement boundary."""
     _index_protection(workspace)
     snapshot = _snapshot(workspace)
-    if any(code != '!!' for code in snapshot.values()) or git(workspace, 'submodule', 'status', '--recursive'):
+    # A submodule is a gitlink index entry. On Windows `git submodule status` is a
+    # shell script that takes about 2.5 s; the staged listing reads the same index.
+    process = subprocess.run(['git', '-C', str(workspace), 'ls-files', '-z', '--stage'], capture_output=True, check=True)
+    entries = [row.split(b'\t', 1) for row in process.stdout.split(b'\0') if row]
+    if any(code != '!!' for code in snapshot.values()) or any(meta.startswith(b'160000 ') for meta, _ in entries):
         raise LifecycleError('retire refuses dirty, untracked, ignored, or submodule data')
-    process = subprocess.run(['git', '-C', str(workspace), 'ls-files', '-z'], capture_output=True, check=True)
-    tracked = {os.fsdecode(row) for row in process.stdout.split(b'\0') if row}
+    tracked = {os.fsdecode(name) for _, name in entries}
     directories = {str(parent).replace(os.sep, '/') for name in tracked for parent in Path(name).parents if str(parent) != '.'}
     empty_directories = set()
     def walk_error(error):
