@@ -744,6 +744,14 @@ waiting for the same commit's runs on the default branch. A merge commit still
 waits for its own runs. Task state is unchanged. A rollback to 0.8.16 waits for
 the default branch's runs again.
 
+Version 0.8.18 makes `reclaim` save its per-member progress in a file of its
+own task under `reclaim-progress/` in the lifecycle state directory, and write
+the shared state only when the reclaim phase changes. Earlier versions
+rewrote the shared state, with every other task's retirement receipt, up to
+three times per removed member. A rollback to 0.8.17 that resumes a reclaim
+interrupted under 0.8.18 does not read that progress, so it holds the payload
+as a member removed without durable intent; it deletes nothing.
+
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
 default branch carries the accepted commit's SHA. `integration_checks` counts
