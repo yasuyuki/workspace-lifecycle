@@ -15,7 +15,7 @@ from . import checks
 from .errors import LifecycleError
 from .git import (bound_task, branch_for_task, checkout_state, current_branch, git, head, remote_default,
                   operation, task_bindings, task_worktree, top, worktree_records)
-from .state import locked_state, save_state
+from .state import locked_state, save_json, save_state, state_dir
 
 
 def _now(): return datetime.now(timezone.utc).isoformat()
@@ -2283,6 +2283,25 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
                 save_state(directory, latest)
             expected = deepcopy(receipt)
 
+        journals = state_dir(repo) / 'reclaim-progress'
+
+        def journal(key):
+            return journals / (hashlib.sha256(task.encode('utf-8')).hexdigest() + '.' + key + '.json')
+
+        def remove(root, manifest, identity, key):
+            # Per-member progress is saved in this task's own file. Saving it in
+            # the shared state rewrote every other receipt for each member (#66).
+            # The shared state records the phase only after the tree is gone, so
+            # a journal of this manifest is never older than the state's copy.
+            path = journal(key)
+            if path.exists():
+                saved = json.loads(path.read_text(encoding='utf-8'))
+                if saved.get('manifest_id') == receipt['manifest_id']:
+                    receipt[key] = saved['progress']
+            journals.mkdir(exist_ok=True)
+            reclamation.remove_tree(root, manifest, identity, receipt[key], lambda: save_json(
+                path, {'manifest_id': receipt['manifest_id'], 'progress': receipt[key]}))
+
         stored = receipt.get('preservation_evidence')
         if stored and stored != preservation_evidence:
             raise LifecycleError('reclaim preservation evidence changed')
@@ -2364,7 +2383,7 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
                 if 'payload_progress' not in receipt:
                     receipt['payload_progress'] = reclamation.capture(staging, receipt['content_manifest'], receipt['recovery_identity'])
                     persist()
-                reclamation.remove_tree(staging, receipt['content_manifest'], receipt['recovery_identity'], receipt['payload_progress'], persist)
+                remove(staging, receipt['content_manifest'], receipt['recovery_identity'], 'payload_progress')
                 receipt['reclaim_phase'] = 'payload-removed'
                 persist()
                 phase = 'payload-removed'
@@ -2373,7 +2392,7 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
                     receipt['admin_progress'] = reclamation.capture(archive, receipt['admin_manifest'], receipt['admin_identity'])
                 receipt['reclaim_phase'] = 'admin-removing'
                 persist()
-                reclamation.remove_tree(archive, receipt['admin_manifest'], receipt['admin_identity'], receipt['admin_progress'], persist)
+                remove(archive, receipt['admin_manifest'], receipt['admin_identity'], 'admin_progress')
                 receipt['reclaim_phase'] = 'admin-removed'
                 persist()
                 phase = 'admin-removed'
@@ -2385,6 +2404,8 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
             receipt['reclaimed_at'] = _now()
             receipt.pop('reclaim_failure', None)
             persist()
+            for key in ('payload_progress', 'admin_progress'):
+                journal(key).unlink(missing_ok=True)
             return {'task': task, 'reclaimed': True, 'receipt': receipt}
         except (LifecycleError, OSError, subprocess.CalledProcessError) as exc:
             receipt['reclaim_failure'] = {

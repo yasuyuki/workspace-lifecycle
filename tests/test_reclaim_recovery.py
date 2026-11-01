@@ -1,6 +1,7 @@
 """End-to-end recovery boundaries for resumable reclaim (issue #146)."""
 import contextlib
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -52,6 +53,15 @@ class ReclaimRecoveryTests(unittest.TestCase):
             ['git', '-C', str(self.root), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
             text=True).strip()
         return json.loads((Path(common) / 'workspace-lifecycle' / 'state.json').read_text())
+
+    def _progress(self, key, task='one'):
+        """The durable member progress: the task's own journal while its removal runs."""
+        common = subprocess.check_output(
+            ['git', '-C', str(self.root), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+            text=True).strip()
+        journal = (Path(common) / 'workspace-lifecycle' / 'reclaim-progress'
+                   / (hashlib.sha256(task.encode()).hexdigest() + '.' + key + '.json'))
+        return json.loads(journal.read_text())['progress'] if journal.exists() else self._state()['retired'][task][key]
 
     def _wait_for_marker(self, child, marker):
         deadline = time.monotonic() + 60
@@ -118,7 +128,7 @@ raise SystemExit(main(['--repo', repo, 'reclaim', '--task', 'one', '--result-ref
         paused = self._state()['retired']['one']
         self.assertEqual(paused['content_manifest'], immutable_content)
         self.assertEqual(paused['admin_manifest'], immutable_admin)
-        self.assertTrue(any(row.get('intent') for row in paused['payload_progress']['members'].values()))
+        self.assertTrue(any(row.get('intent') for row in self._progress('payload_progress')['members'].values()))
 
         # The reclaimer holds only the per-task lease; another task can make a
         # normal durable update while this task is paused inside deletion.
@@ -159,7 +169,6 @@ raise SystemExit(main(['--repo', repo, 'reclaim', '--task', 'one', '--result-ref
     def test_killed_admin_removal_rejects_replacement_and_keeps_receipt(self):
         receipt = self._retire()
         marker = self._killed_cli_reclaim('before-member-remove', require_phase='admin-removing')
-        state = self._state()['retired']['one']
         archive = Path(receipt['admin_archive_path'])
         # At this point the checkpoint has an intent and the targeted name is a
         # deterministic quarantine entry. Replacing it must not be treated as a
@@ -167,9 +176,9 @@ raise SystemExit(main(['--repo', repo, 'reclaim', '--task', 'one', '--result-ref
         if os.name == 'nt':
             replacement = archive / marker.read_text()
         else:
-            member = next(item for item in state['admin_progress']['members'].values()
-                          if item.get('status') == 'quarantined')
-            archive_root = archive if archive.exists() else archive.parent / state['admin_progress']['root']['tombstone']
+            progress = self._progress('admin_progress')
+            member = next(item for item in progress['members'].values() if item.get('status') == 'quarantined')
+            archive_root = archive if archive.exists() else archive.parent / progress['root']['tombstone']
             replacement = next(archive_root.rglob(member['tombstone']))
         replacement.unlink()
         replacement.write_text('replacement\n')
@@ -187,8 +196,7 @@ raise SystemExit(main(['--repo', repo, 'reclaim', '--task', 'one', '--result-ref
     def test_killed_after_admin_root_removal_completes_from_durable_intent(self):
         receipt = self._retire()
         self._killed_cli_reclaim('after-root-remove', require_phase='admin-removing')
-        state = self._state()['retired']['one']
-        self.assertTrue(state['admin_progress']['root']['remove_intent'])
+        self.assertTrue(self._progress('admin_progress')['root']['remove_intent'])
         self.assertFalse(Path(receipt['admin_archive_path']).exists())
         resumed = self._reclaim_pending_cli()
         self.assertTrue(resumed['pending'][0]['reclaimed'])
@@ -213,6 +221,27 @@ raise SystemExit(main(['--repo', repo, 'reclaim', '--task', 'one', '--result-ref
         retained = staging if staging.exists() else recovery
         self.assertTrue((retained / 'first.txt').exists())
         self.assertTrue((retained / 'nested' / 'second.txt').exists())
+
+    def test_member_progress_does_not_rewrite_the_shared_state(self):
+        receipt = self._retire()
+        members = len(receipt['content_manifest']) + len(receipt['admin_manifest'])
+        with patch.object(service, 'save_state', wraps=service.save_state) as saved:
+            self.assertTrue(reclaim(self.root, task='one', result_ref='issue/146',
+                                    preservation_evidence=self.evidence)['reclaimed'])
+        self.assertLess(saved.call_count, members)
+        self.assertEqual(self._state()['retired']['one']['reclaim_phase'], 'reclaimed')
+
+    def test_progress_save_failure_before_member_removal_keeps_payload(self):
+        receipt = self._retire()
+        with patch.object(service, 'save_json', side_effect=OSError('simulated progress failure')):
+            with self.assertRaisesRegex(LifecycleError, 'simulated progress failure'):
+                reclaim(self.root, task='one', result_ref='issue/146', preservation_evidence=self.evidence)
+        staging = Path(receipt['recovery_path'] + '.reclaim')
+        self.assertTrue((staging / 'first.txt').exists())
+        self.assertTrue((staging / 'nested' / 'second.txt').exists())
+        self.assertTrue(reclaim(self.root, task='one', result_ref='issue/146',
+                                preservation_evidence=self.evidence)['reclaimed'])
+        self.assertFalse(staging.exists())
 
     def test_missing_member_without_durable_intent_fails_closed(self):
         receipt = self._retire()

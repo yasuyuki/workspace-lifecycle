@@ -14,7 +14,7 @@ def state_dir(repo) -> Path:
     return common_dir(repo) / "workspace-lifecycle"
 
 
-def _atomic(path: Path, value: dict) -> None:
+def save_json(path: Path, value: dict) -> None:
     fd, temporary = tempfile.mkstemp(prefix="state-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
@@ -64,4 +64,4 @@ def locked_state(repo, create: bool = False):
 
 
 def save_state(directory: Path, state: dict) -> None:
-    _atomic(directory / "state.json", state)
+    save_json(directory / "state.json", state)
