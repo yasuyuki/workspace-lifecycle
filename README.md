@@ -53,12 +53,21 @@ count if lower. Failed tests are printed with their output and the exit code is
 `--shard K/N` runs every Nth collected test starting at the Kth, so shards 1/N
 to N/N together run the selection once. CI runs the same entry with `--wheel` on
 the built wheel, on Windows as four shards whose `package (windows-latest, 3.14)`
-check succeeds only when all four do. To validate a lifecycle task of
-this repository with it, register for example:
+check succeeds only when all four do.
+
+A lifecycle task of this repository does not register the suite as its
+validation. Both CI jobs are required checks, so finish already waits for the
+suite on the commit it accepts. On a Windows controller a local run takes
+9 to 17 minutes and finish waits for it as well (#64). Register a check that
+imports every module of the checkout's source and prints the version:
 
 ```console
---validation-json '["C:/path/to/python.exe", "-B", "tests/run.py"]'
+--validation-json '["C:/path/to/python.exe", "-B", "-c", "import importlib, pkgutil, sys; sys.path[:0] = [\"src\"]; [importlib.import_module(m.name) for m in pkgutil.walk_packages([\"src\"]) if not m.name.endswith(\"__main__\")]; from workspace_lifecycle.cli import main; main([\"--version\"])"]'
 ```
+
+A merge commit's content is then tested only by the CI run on the target
+branch. Finish waits for that run before retirement and keeps the task when it
+fails.
 
 ## Lifecycle
 
