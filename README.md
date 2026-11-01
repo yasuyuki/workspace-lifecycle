@@ -347,10 +347,12 @@ default branch. When the task integrates through a parent, that is the parent's
 push to the default branch, never the merge into the parent branch. That commit
 requires each task's checks on the way, the checks its accepted commit added,
 and the checks its own `.github/required-checks.json` declares, so a later
-declaration on the default branch counts and nothing is weakened. Only runs
-pushed to the default branch count, so when integration fast-forwarded the
-default branch to the accepted commit, that commit's runs from the task branch
-do not. Runs on a later default-branch commit, of another app or of another
+declaration on the default branch counts and nothing is weakened. When
+integration fast-forwarded the default branch to the accepted commit, each
+check the integration already verified succeeded on that exact commit counts
+without waiting and is reported with `"evidence": "acceptance"`. Every other
+check counts only runs pushed to the default branch, so a merge commit waits
+for its own runs. Runs on a later default-branch commit, of another app or of another
 name do not count either. The result is `integration_checks` in the finish JSON and in
 the integration record of that edge (`recorded_on` names its task): the
 destination, full commit SHA, repository, each check's state, run ID and URL,
@@ -720,6 +722,12 @@ target fails or cannot start, so `update-validation` can correct the
 validator. Earlier versions left the integration and its intent in the
 target, and no command could correct the validator. Task state is
 unchanged. A rollback to 0.8.15 leaves such an integration in place again.
+
+Version 0.8.17 makes `finish --wait-checks` count, after a fast-forward, the
+required checks the integration verified on the accepted commit, instead of
+waiting for the same commit's runs on the default branch. A merge commit still
+waits for its own runs. Task state is unchanged. A rollback to 0.8.16 waits for
+the default branch's runs again.
 
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the

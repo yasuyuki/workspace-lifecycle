@@ -399,13 +399,12 @@ class RequiredChecksTest(unittest.TestCase):
         steps = [lambda: self.github.add("example/repo", commit(), LINT, "queued", None),
                  lambda: (unlocked(), self.github.add("example/repo", commit(), TEST, "in_progress", None)),
                  lambda: self.github.add("example/repo", commit(), LINT),
-                 lambda: self.github.add("example/repo", commit(), TEST),
-                 lambda: [self.github.add("example/repo", self.trunk(), check) for check in (TEST, LINT)]]
+                 lambda: self.github.add("example/repo", commit(), TEST)]
         result, clock = self.waiting("wait", steps)
         self.assertEqual(result["integration"]["destination"], "trunk")
         self.assertEqual(result["integration_checks"]["state"], "success")
         self.assertEqual((self.root / "feature.txt").read_text(), "wait\n")
-        self.assertEqual(clock.sleeps, [30, 30, 30, 30, 30])
+        self.assertEqual(clock.sleeps, [30, 30, 30, 30], "the fast-forward does not wait for trunk's runs")
         self.assertEqual(self.trunk(), commit())
 
     def test_target_validates_while_the_checks_run(self):
@@ -946,8 +945,28 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertNotIn("integration_checks", status(self.topic, "unwaited")["integrated"])
         self.assertEqual(self.github.suite_queries, [], "only the integrated commit's checks are bound to trunk")
 
-    def test_wait_holds_until_the_integrated_commit_succeeds(self):
+    def advance(self):
+        """Move trunk past the task's base, so integration makes a merge commit."""
+        run(self.root, "commit", "-q", "--allow-empty", "-m", "later")
+        run(self.root, "push", "-q", "origin", "trunk")
+
+    def test_a_fast_forward_counts_the_checks_verified_for_the_accepted_commit(self):
+        self.ready("forward", required=(TEST, LINT))
+        accepted = self.pushed("forward")
+        topic_runs = [self.github.runs[("example/repo", accepted, c["name"])][-1]["id"] for c in (TEST, LINT)]
+        result, clock = self.waiting("forward")
+        outcome = result["integration_checks"]
+        self.assertEqual((outcome["state"], outcome["commit"]), ("success", accepted))
+        self.assertEqual(self.trunk(), accepted)
+        self.assertEqual([(c["name"], c["state"], c["run"], c["evidence"]) for c in outcome["checks"]],
+                         [(TEST["name"], "success", topic_runs[0], "acceptance"),
+                          (LINT["name"], "success", topic_runs[1], "acceptance")])
+        self.assertEqual((clock.sleeps, self.github.suite_queries), ([], []), "trunk's runs are not awaited")
+        self.assertEqual(status(self.topic, "forward")["integrated"]["integration_checks"]["state"], "success")
+
+    def test_wait_holds_until_the_merge_commit_succeeds(self):
         self.ready("merged", required=(TEST, LINT))
+        self.advance()
         url = "https://github.com/example/repo/runs/merged"
         steps = [lambda: self.github.add("example/repo", self.trunk(), TEST, "queued", None),
                  lambda: self.github.add("example/repo", self.trunk(), TEST, "in_progress", None),
@@ -966,11 +985,12 @@ class RequiredChecksTest(unittest.TestCase):
         integrated = status(self.topic, "merged")["integrated"]
         self.assertEqual(integrated["integration_checks"], {k: v for k, v in outcome.items() if k != "recorded_on"})
         self.assertEqual(integrated["remote_checks"]["commit"], self.pushed("merged"))
-        self.assertEqual(self.pushed("merged"), merged, "the topic's success on the same commit does not count")
+        self.assertNotEqual(self.pushed("merged"), merged, "the accepted commit's success does not count")
 
     def test_a_failed_integrated_check_keeps_the_integration_and_the_task(self):
         from workspace_lifecycle.cli import main
         self.ready("broken", required=(TEST, LINT))
+        self.advance()
         url = "https://github.com/example/repo/runs/broken"
         def fail():
             self.github.add("example/repo", self.trunk(), LINT, "in_progress", None)
@@ -1009,6 +1029,7 @@ class RequiredChecksTest(unittest.TestCase):
 
     def test_wait_ignores_runs_not_on_the_integrated_commit(self):
         self.ready("foreign-merge")
+        self.advance()
         def foreign():
             merged = self.trunk()
             self.github.add("example/repo", self.pushed("foreign-merge"), TEST, branch="topic")
@@ -1040,6 +1061,7 @@ class RequiredChecksTest(unittest.TestCase):
     def test_wait_resumes_on_the_saved_integration_without_pushing_again(self):
         validations = self.counted("resumed")
         self.github.add("example/repo", self.pushed("resumed"), TEST)
+        self.advance()
         real_integrate = service._integrate
         def integrate_then_outage(*args, **kwargs):
             integration = real_integrate(*args, **kwargs)
@@ -1064,6 +1086,7 @@ class RequiredChecksTest(unittest.TestCase):
 
     def test_wait_stays_on_the_integrated_commit_after_trunk_moves(self):
         self.ready("overtaken")
+        self.advance()
         def overtake():
             merged = self.trunk()
             run(self.root, "commit", "-q", "--allow-empty", "-m", "later")
@@ -1079,6 +1102,7 @@ class RequiredChecksTest(unittest.TestCase):
         self.propose([LINT])
         self.refused("introduced", "missing")
         self.github.add("example/repo", self.pushed("introduced"), LINT)
+        self.advance()
         result, _ = self.waiting("introduced", seconds=30)
         self.assertEqual(result["integration_checks"]["checks"], [{**LINT, "state": "missing"}])
 

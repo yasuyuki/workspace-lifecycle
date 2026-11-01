@@ -1508,14 +1508,25 @@ def _await_integration_checks(repo: Path, task_id: str, seconds: float) -> dict:
                 break
             source = record['commit']; owner = item['integration']['task']; item = _task(state, owner)
         merged = record['commit']; remote = item['remote']
+        # A fast-forward pushed the accepted commit itself, whose checks the
+        # integration already verified; a merge commit is a new tree.
+        proof = record.get('remote_checks') or {}
+        verified = {} if merged != record['source'] or proof.get('commit') != merged else {
+            (c['app'], c['name']): c for c in proof.get('checks', []) if c.get('state') == 'success'}
     receipt = {'destination': record['destination'], 'commit': merged}
     try:
         required += checks.declared(repo, merged)['checks']
         required = [dict(pair) for pair in dict.fromkeys(tuple(c.items()) for c in required)]
         if required:
             receipt['repository'] = checks.repository(repo, remote)
-            receipt['state'], receipt['checks'] = checks.watch(receipt['repository'], merged, required, seconds,
-                                                               branch=record['destination'])
+            if proof.get('repository') != receipt['repository']:
+                verified = {}
+            rest = [c for c in required if (c['app'], c['name']) not in verified]
+            receipt['state'], watched = (checks.watch(receipt['repository'], merged, rest, seconds,
+                                                      branch=record['destination']) if rest else ('success', []))
+            watched = {(c['app'], c['name']): c for c in watched}
+            receipt['checks'] = [{**verified[key], 'evidence': 'acceptance'} if key in verified else watched[key]
+                                 for key in ((c['app'], c['name']) for c in required)]
         else:
             receipt.update(state='undeclared', checks=[])
     except LifecycleError as exc:

@@ -17,8 +17,8 @@ stateDiagram-v2
   Candidate --> Integrated : 再実行、check 成功済みなら統合先で検証し push
   Candidate --> Working : 修正 commit（新しい HEAD は自分の check が要る）
   Candidate --> Working : update-required-checks が候補を捨てる
-  Integrated --> PostWait : --wait-checks で default branch の commit の check を待つ
-  Integrated --> PostOk : 宣言なし（undeclared）
+  Integrated --> PostWait : --wait-checks で、受入 commit で検証済みでない check を default branch の run で待つ（merge commit は全件）
+  Integrated --> PostOk : 宣言なし（undeclared）、または ff で受入 commit の check が検証済み
   PostWait --> PostOk : success
   PostWait --> PostNg : failed・pending（時間切れ）・error
   PostNg --> PostWait : 同じ finish を再実行
