@@ -1,4 +1,3 @@
-"""Public CLI output retains durable evidence without printing full receipts."""
 import io
 import json
 from contextlib import redirect_stderr, redirect_stdout
