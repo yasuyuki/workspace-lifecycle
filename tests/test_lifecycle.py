@@ -971,9 +971,17 @@ class FinishRetireReclaimTests(unittest.TestCase):
         self.assertTrue(retirement['retired'])
         self.assertTrue(retirement['reclaim']['reclaimed'])
         self.assertFalse(self.topic.exists())
-        self.assertFalse(Path(retirement['receipt']['recovery_path']).exists())
-        self.assertFalse(Path(retirement['receipt']['admin_archive_path']).exists())
-        self.assertEqual(run(self.root, 'rev-parse', 'refs/heads/topic/one'), retirement['receipt']['commit'])
+        receipt = self._cli_receipt(retirement)
+        self.assertFalse(Path(receipt['recovery_path']).exists())
+        self.assertFalse(Path(receipt['admin_archive_path']).exists())
+        self.assertEqual(run(self.root, 'rev-parse', 'refs/heads/topic/one'), receipt['commit'])
+
+    def _cli_receipt(self, outcome):
+        self.assertEqual(set(outcome['receipt_ref']), {'path', 'selector'})
+        receipt = json.loads(Path(outcome['receipt_ref']['path']).read_text())
+        for key in outcome['receipt_ref']['selector']:
+            receipt = receipt[key]
+        return receipt
 
     def test_finish_outside_its_worktree_retires_and_reclaims_in_one_command(self):
         done = self._cli_finish(self.temp.name)
@@ -1208,9 +1216,5 @@ class FinishRetireReclaimTests(unittest.TestCase):
         self.assertFalse(body['ok'])
         self.assertTrue(body['retired'])
         self.assertIn('error', body['reclaim'])
-        self.assertEqual(set(body['receipt_ref']), {'path', 'selector'},
-                         'retire safety refusal must return a compact receipt_ref')
-        receipt = json.loads(Path(body['receipt_ref']['path']).read_text())
-        for key in body['receipt_ref']['selector']:
-            receipt = receipt[key]
+        receipt = self._cli_receipt(body)
         self.assertTrue(Path(receipt['recovery_path']).exists())
