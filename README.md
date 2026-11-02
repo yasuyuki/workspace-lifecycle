@@ -20,6 +20,17 @@ covered by preservation evidence and unchanged retirement manifests; refusals
 remain pending for review. This safety tradeoff matters if checkouts contain
 large build outputs. Existing primary checkouts cannot be retired.
 
+`finish`, `retire` and `reclaim` print operation outcomes. A retired outcome's
+`receipt_ref` identifies its full retirement receipt: read the local JSON file
+at `path`, then select each key in the `selector` array, in order. The reference
+survives retirement and reclaim; it reads the latest receipt, not a snapshot.
+The file also contains other tasks' state and is private. Read only the selected
+receipt rather than printing or sharing the entire file. Pending operations and
+managed-session recovery on stderr use the same outcome format. Manifests and
+per-member progress remain in the stored receipt; the Python service API still
+returns full receipts. CLI consumers that read `receipt` must use `receipt_ref`.
+Errors, pending reasons, next commands and exit statuses remain in the outcome.
+
 `workspace-lifecycle` is an independently installable Python 3.14 package for
 the workspace contract that Git does not provide. Build or install it from this
 directory; it is not published to PyPI. It imports no agent-rules
@@ -751,6 +762,12 @@ rewrote the shared state, with every other task's retirement receipt, up to
 three times per removed member. A rollback to 0.8.17 that resumes a reclaim
 interrupted under 0.8.18 does not read that progress, so it holds the payload
 as a member removed without durable intent; it deletes nothing.
+
+Version 0.8.19 replaces full retirement receipts in CLI output with
+`receipt_ref`, including nested finish results, pending operations and managed
+recovery reports. A failed reclaim nested in `retire --pending` now exits 1.
+Task state and the Python service API are unchanged. A rollback to 0.8.18
+prints full receipts again and reports that nested failure as exit 0.
 
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the

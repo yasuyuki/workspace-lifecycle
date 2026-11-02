@@ -23,6 +23,61 @@ def _json_list(value: str):
     return result
 
 
+def _fields(value, names):
+    return {name: value[name] for name in names if name in value}
+
+
+def _producer_output(value):
+    return {'task': value['task'], 'results': [
+        _fields(entry, ('generation', 'reclaimed', 'error')) for entry in value['results']]}
+
+
+def _receipt_output(state_path, value, names):
+    result = _fields(value, names)
+    if 'receipt' in value:
+        result['receipt_ref'] = {'path': str(state_path), 'selector': ['retired', value['task']]}
+    return result
+
+
+def _reclaim_output(state_path, value):
+    return {**_fields(value, ('task', 'reclaimed', 'error')),
+            'receipt_ref': {'path': str(state_path), 'selector': ['retired', value['task']]}}
+
+
+def _retire_output(state_path, value):
+    result = _receipt_output(state_path, value,
+        ('task', 'retired', 'pending', 'branch', 'reason', 'error', 'next'))
+    if 'reclaim' in value:
+        result['reclaim'] = _reclaim_output(state_path, value['reclaim'])
+    if 'producers' in value:
+        result['producers'] = _producer_output(value['producers'])
+    return result
+
+
+def _pending_output(state_path, value, project):
+    return {'pending': [project(state_path, entry) for entry in value['pending']]}
+
+
+def _public_output(command, state_path, value, pending=False):
+    if command == 'finish':
+        result = _fields(value, ('task', 'accepted', 'commit', 'result_ref', 'completion',
+                                'dirty', 'integration', 'integration_checks'))
+        if 'retirement' in value:
+            result['retirement'] = _retire_output(state_path, value['retirement'])
+        if 'producers' in value:
+            result['producers'] = _producer_output(value['producers'])
+        return result
+    if command in ('retire', 'reclaim'):
+        project = _retire_output if command == 'retire' else _reclaim_output
+        return _pending_output(state_path, value, project) if pending else project(state_path, value)
+    return value
+
+
+def _recovery_output(state_path, report):
+    return {'retire': _pending_output(state_path, report['retire'], _retire_output),
+            'reclaim': _pending_output(state_path, report['reclaim'], _reclaim_output)}
+
+
 def parser():
     root = argparse.ArgumentParser(prog="workspace-lifecycle")
     root.add_argument("--version", action="version", version=__version__)
@@ -99,6 +154,7 @@ def parser():
 @operation()
 def main(argv=None):
     args = parser().parse_args(argv)
+    state_path = None
     try:
         if args.command == "begin": result = service.begin(args.repo, task=args.task, request=args.request, remote=args.remote, branch=args.branch, worktree=args.worktree, parent=args.parent, dependencies=args.dependency, validation=args.validation_json, preflight=args.preflight_json, required_checks=args.required_checks_json)
         elif args.command == 'update-required-checks':
@@ -130,20 +186,27 @@ def main(argv=None):
                                         args.receipt, args.output, args.completion_json)
         elif args.command == "hold": result = service.hold(args.repo, args.task, args.reason, args.next_action)
         elif args.command == "release-hold": result = service.release_hold(args.repo, args.task, args.evidence)
-        elif args.command == "finish": result = service.finish(args.repo, task=args.task, plan_path=args.plan, result_ref=args.result_ref, message=args.message, users_released=args.users_released, revision_evidence=args.revise_plan_evidence, revision_head=args.revise_plan_head, preservation_evidence=args.reclaim_preservation_evidence, wait_checks=args.wait_checks)
+        elif args.command == "finish":
+            state_path = common_dir(args.repo) / 'workspace-lifecycle' / 'state.json'
+            result = service.finish(args.repo, task=args.task, plan_path=args.plan, result_ref=args.result_ref, message=args.message, users_released=args.users_released, revision_evidence=args.revise_plan_evidence, revision_head=args.revise_plan_head, preservation_evidence=args.reclaim_preservation_evidence, wait_checks=args.wait_checks)
         elif args.command == "retire":
             if args.pending:
                 if args.task or args.result_ref: raise LifecycleError("retire --pending takes no task or result reference")
                 if args.reclaim_preservation_evidence: raise LifecycleError("retire --pending rejects --reclaim-preservation-evidence")
+                state_path = common_dir(args.repo) / 'workspace-lifecycle' / 'state.json'
                 result = service.retire_pending(args.repo)
-            elif args.task and args.result_ref: result = service.retire(args.repo, task=args.task, result_ref=args.result_ref, users_released=args.users_released, request_only=args.request, preservation_evidence=args.reclaim_preservation_evidence)
+            elif args.task and args.result_ref:
+                state_path = common_dir(args.repo) / 'workspace-lifecycle' / 'state.json'
+                result = service.retire(args.repo, task=args.task, result_ref=args.result_ref, users_released=args.users_released, request_only=args.request, preservation_evidence=args.reclaim_preservation_evidence)
             else: raise LifecycleError("retire requires --task and --result-ref")
         elif args.command == "reclaim":
             if args.pending:
                 if args.task or args.result_ref or args.preservation_evidence:
                     raise LifecycleError('reclaim --pending takes no task, result reference or evidence')
+                state_path = common_dir(args.repo) / 'workspace-lifecycle' / 'state.json'
                 result = service.reclaim_pending(args.repo)
             elif args.task and args.result_ref and args.preservation_evidence:
+                state_path = common_dir(args.repo) / 'workspace-lifecycle' / 'state.json'
                 result = service.reclaim(args.repo, task=args.task, result_ref=args.result_ref, preservation_evidence=args.preservation_evidence)
             else:
                 raise LifecycleError('reclaim requires --task, --result-ref and --preservation-evidence, or --pending')
@@ -160,6 +223,7 @@ def main(argv=None):
             if cwd != repo and repo not in cwd.parents:
                 raise LifecycleError('run cwd must be inside the selected task worktree')
             service.check_run_identity(repo, args.task)
+            state_path = common_dir(repo) / 'workspace-lifecycle' / 'state.json'
             recovery = _recover_selected_task(repo, args.task)
             if recovery['error']:
                 raise LifecycleError(recovery['error'])
@@ -173,7 +237,7 @@ def main(argv=None):
             # status/finish, not the program's stdout stream.
             recovery = _recover_selected_task(repo, args.task)
             if recovery['error']:
-                print(json.dumps(recovery['report']), file=sys.stderr)
+                print(json.dumps(_recovery_output(state_path, recovery['report'])), file=sys.stderr)
                 if code == 0:
                     return 1
             return code if code >= 0 else 128 - code
@@ -188,9 +252,10 @@ def main(argv=None):
         if getattr(exc, 'recovery', None):
             refusal['recovery'] = exc.recovery
         print(json.dumps(refusal), file=sys.stderr); return 2
-    if _reclaim_refused(result) or _integration_checks_unmet(result):
-        print(json.dumps({"ok": False, **result}, sort_keys=True)); return 1
-    print(json.dumps({"ok": True, **result}, sort_keys=True)); return 0
+    failed = _reclaim_refused(result) or _integration_checks_unmet(result)
+    output = _public_output(args.command, state_path, result, getattr(args, 'pending', False))
+    print(json.dumps({'ok': not failed, **output}, sort_keys=True))
+    return 1 if failed else 0
 
 
 def _integration_checks_unmet(result):
@@ -202,7 +267,8 @@ def _reclaim_refused(result):
     if not isinstance(result, dict):
         return False
     pending = result.get('pending')
-    if isinstance(pending, list) and any(isinstance(entry, dict) and entry.get('error')
+    if isinstance(pending, list) and any(isinstance(entry, dict) and
+                                         (entry.get('error') or _reclaim_refused(entry))
                                          for entry in pending):
         return True
     if any(not entry.get('reclaimed') for entry in result.get('producers', {}).get('results', [])):
@@ -386,6 +452,7 @@ def _resolve_run(effective, launch, argv):
         return _native_code(run(repo, '@default', argv, launch))
     from .leases import run
     service.check_run_identity(repo, task)
+    state_path = common / 'workspace-lifecycle' / 'state.json'
     recovery = _recover_selected_task(repo, task)
     if recovery['error']:
         raise LifecycleError(recovery['error'])
@@ -396,7 +463,7 @@ def _resolve_run(effective, launch, argv):
                child_env=_managed_context(repo, task))
     recovery = _recover_selected_task(repo, task)
     if recovery['error']:
-        print(json.dumps(recovery['report']), file=sys.stderr)
+        print(json.dumps(_recovery_output(state_path, recovery['report'])), file=sys.stderr)
         return 1 if code == 0 else _native_code(code)
     return _native_code(code)
 

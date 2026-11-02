@@ -1208,4 +1208,9 @@ class FinishRetireReclaimTests(unittest.TestCase):
         self.assertFalse(body['ok'])
         self.assertTrue(body['retired'])
         self.assertIn('error', body['reclaim'])
-        self.assertTrue(Path(body['receipt']['recovery_path']).exists())
+        self.assertEqual(set(body['receipt_ref']), {'path', 'selector'},
+                         'retire safety refusal must return a compact receipt_ref')
+        receipt = json.loads(Path(body['receipt_ref']['path']).read_text())
+        for key in body['receipt_ref']['selector']:
+            receipt = receipt[key]
+        self.assertTrue(Path(receipt['recovery_path']).exists())

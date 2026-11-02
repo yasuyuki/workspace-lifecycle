@@ -88,6 +88,18 @@ _Avoid_: main の CI 結果、統合の成否、受入 commit の check
 
 ### 回収
 
+**Operation outcome**:
+一回の操作が完了したか、保留か、失敗したかを示す結果。判断に必要な理由・次の操作・詳細な retirement receipt への参照を含む。
+_Avoid_: retirement receipt、詳細記録
+
+**Retirement receipt**:
+退役時に保存した対象の同一性・内容と、その後の回収の進行を記録する証拠。Operation outcome とは別に保持され、回収後も残る。
+_Avoid_: 操作結果、出力全文
+
+**Receipt reference**:
+特定 task の retirement receipt を読み返すための所在。回収後も同じ記録を指し、参照時点の内容を示す。
+_Avoid_: receipt のコピー、snapshot
+
 **Object identity**:
 退役が記録する、file や directory 一つの同一性。filesystem の中の inode と、その filesystem を指す値からなる。filesystem を指す値には filesystem ID（ext4 では UUID から決まる）と device 番号がある。device 番号は boot ごとに振り直されうるので、記録に filesystem ID があればそれで filesystem を確かめる。filesystem ID が無い記録や 0 の記録は、device 番号で確かめる。内容が同じでも、inode か filesystem が違えば別の object である。
 _Avoid_: path、inode だけ、digest の一致
