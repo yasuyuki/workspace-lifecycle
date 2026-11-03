@@ -769,6 +769,12 @@ recovery reports. A failed reclaim nested in `retire --pending` now exits 1.
 Task state and the Python service API are unchanged. A rollback to 0.8.18
 prints full receipts again and reports that nested failure as exit 0.
 
+Version 0.8.20 encodes the lifecycle state and reclaim progress files in one
+call to the C JSON encoder instead of streaming them through the pure-Python
+one. The bytes written are unchanged. A retire that reclaims 640 files took
+16 s instead of 32 s on Windows. A rollback to 0.8.19 reads and writes the same
+files and only restores the slower encoding.
+
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
 default branch carries the accepted commit's SHA. `integration_checks` counts
