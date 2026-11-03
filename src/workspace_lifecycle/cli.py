@@ -133,6 +133,13 @@ def parser():
     sync = commands.add_parser('sync', help='resume the same task by an exact same-name remote merge; does not accept or integrate work')
     for name in ('task', 'expected-head', 'remote-head', 'evidence'):
         sync.add_argument('--' + name, required=True)
+    released = commands.add_parser('release-synchronization',
+        help='drop an integration target synchronization that finish recorded but never committed, '
+        'once its merge is aborted and the target is clean; the next finish synchronizes from the current target HEAD')
+    released.add_argument('--task', required=True)
+    released.add_argument('--expected-local', required=True, help='recorded target OID the synchronization started from')
+    released.add_argument('--expected-source', required=True, help='recorded remote OID it was merging')
+    released.add_argument('--evidence', required=True, help='durable reference for the decision not to resume it')
     hold = commands.add_parser("hold"); hold.add_argument("--task", required=True); hold.add_argument("--reason", required=True); hold.add_argument("--next-action", required=True)
     resume = commands.add_parser('release-hold', help='resolve an explicit hold using a decision reference')
     resume.add_argument('--task', required=True); resume.add_argument('--evidence', required=True)
@@ -184,6 +191,9 @@ def main(argv=None):
             from . import producers
             result = producers.register(args.repo, args.task, args.owner, args.generation,
                                         args.receipt, args.output, args.completion_json)
+        elif args.command == 'release-synchronization':
+            result = service.release_synchronization(args.repo, task=args.task, expected_local=args.expected_local,
+                                                     expected_source=args.expected_source, evidence=args.evidence)
         elif args.command == "hold": result = service.hold(args.repo, args.task, args.reason, args.next_action)
         elif args.command == "release-hold": result = service.release_hold(args.repo, args.task, args.evidence)
         elif args.command == "finish":

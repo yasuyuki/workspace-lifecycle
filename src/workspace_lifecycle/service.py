@@ -455,6 +455,48 @@ def update_required_checks(repo, *, task: str, expected: list[dict],
 
 
 @operation()
+def release_synchronization(repo, *, task: str, expected_local: str, expected_source: str, evidence: str) -> dict:
+    """Drop an integration-target synchronization that finish recorded but never committed.
+
+    finish otherwise resumes it from its recorded local and remote OIDs, so a
+    target whose owner chose to move it, for example to keep local-only
+    commits out of a published merge, could never integrate (#72)."""
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise LifecycleError('synchronization release requires durable evidence')
+    with _lease(repo, task):
+        with locked_state(repo) as (directory, state):
+            item = _task(state, task)
+            if task in state['intents'] or item.get('retire'):
+                raise LifecycleError('pending task operation prevents synchronization release')
+            holder = item.get('integration_synchronization') or {}
+            pending = holder.get('synchronization')
+            if not pending or pending.get('commit'):
+                raise LifecycleError('task has no uncommitted integration synchronization to release')
+            if (pending['local'], pending['source']) != (expected_local, expected_source):
+                raise LifecycleError('synchronization release CAS mismatch; supply its recorded local and source OIDs')
+            direction = item['integration']
+            parent = _task(state, direction['task']) if direction['kind'] == 'task' else None
+            target_branch = (branch_for_task(repo, direction['task']) if parent is not None
+                             else remote_default(repo, item['remote']))
+            if target_branch != pending['branch']:
+                raise LifecycleError('integration target changed since the recorded synchronization')
+            target = task_worktree(repo, target_branch)
+            dirt = _target_dirt(target, parent)
+            if dirt:
+                raise LifecycleError('integration target has unrelated dirty or merge state: ' + _preview(dirt))
+            target_head = head(target)
+            parents = (git(target, 'rev-list', '--parents', '-1', 'HEAD') or '').split()[1:]
+            if parents == [pending['local'], pending['source']]:
+                raise LifecycleError('integration target holds the recorded synchronization merge; resume it with finish')
+            holder['synchronization_history'] = holder.get('synchronization_history', []) + [
+                {**pending, 'released': {'evidence': evidence, 'target_head': target_head, 'at': _now()}}]
+            holder.pop('synchronization')
+            save_state(directory, state)
+    return {'task': task, 'released': {'local': expected_local, 'source': expected_source},
+            'target_head': target_head}
+
+
+@operation()
 def hold(repo, task: str, reason: str, next_action: str) -> dict:
     if not reason or not next_action: raise LifecycleError("hold requires reason and next action")
     with _lease(repo, task, allow_use=True):

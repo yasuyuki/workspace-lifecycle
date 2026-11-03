@@ -622,6 +622,57 @@ class IntegrationValidationTest(unittest.TestCase):
         self.assertEqual(after['integration_synchronization'], before['integration_synchronization'])
         self.assertNotIn('integrated', after)
 
+    def test_released_synchronization_integrates_without_local_only_commits(self):
+        self.begin_candidate()
+        local_only = self.commit(self.root, 'base', 'local only\n')
+        remote = self.remote_commit('base', 'remote accepted\n')
+        with self.assertRaisesRegex(LifecycleError, 'conflicts in base'):
+            self.finish()
+        pending = service.status(self.topic, 'candidate')['integration_synchronization']['synchronization']
+        self.assertEqual((pending['local'], pending['source']), (local_only, remote))
+
+        def release(local=local_only, source=remote):
+            return service.release_synchronization(self.root, task='candidate', expected_local=local,
+                                                   expected_source=source, evidence='decision/keep-local')
+
+        subprocess.run(['git', '-C', str(self.root), 'merge', '--no-ff', '--no-commit', remote],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.assertEqual(git(self.root, 'rev-parse', 'MERGE_HEAD'), remote)
+        with self.assertRaisesRegex(LifecycleError, 'MERGE_HEAD'):
+            release()
+        git(self.root, 'merge', '--abort')
+        git(self.root, 'branch', 'keep/local-only', local_only)
+        git(self.root, 'reset', '--keep', remote)
+        with self.assertRaisesRegex(LifecycleError, 'HEAD changed outside the recorded synchronization'):
+            self.finish()
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/trunk'), remote)
+        with self.assertRaisesRegex(LifecycleError, 'CAS mismatch'):
+            release(local=remote)
+        self.assertEqual(release()['target_head'], remote)
+        with self.assertRaisesRegex(LifecycleError, 'no uncommitted integration synchronization'):
+            release()
+
+        result = self.finish()
+        trunk = git(self.remote, 'rev-parse', 'refs/heads/trunk')
+        self.assertEqual(trunk, result['integration']['commit'])
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), trunk)
+        self.assertNotEqual(subprocess.run(['git', '-C', str(self.remote), 'merge-base', '--is-ancestor',
+                                            local_only, trunk]).returncode, 0)
+        self.assertEqual((self.root / 'candidate').read_text(), 'candidate accepted\n')
+        state = service.status(self.topic, 'candidate')['integration_synchronization']
+        self.assertEqual(state['synchronization_history'][-1]['released']['evidence'], 'decision/keep-local')
+        self.assertEqual(git(self.root, 'rev-parse', 'keep/local-only'), local_only)
+
+    def test_committed_synchronization_cannot_be_released(self):
+        self.begin_candidate()
+        self.remote_commit()
+        before = self.legacy_pending(self.root)
+        pending = before['integration_synchronization']['synchronization']
+        self.finish()
+        with self.assertRaisesRegex(LifecycleError, 'no uncommitted integration synchronization'):
+            service.release_synchronization(self.root, task='candidate', expected_local=pending['local'],
+                                            expected_source=pending['source'], evidence='decision/late')
+
     def test_parent_validator_runs_before_candidate_and_both_on_merged_result(self):
         self.begin_parent()
         remote = self.remote_commit(branch='topic/parent')
