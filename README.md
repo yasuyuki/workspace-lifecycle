@@ -470,6 +470,17 @@ Integration uses the same synchronization operation to resume its own target;
 parent acceptance changes only after the complete child/parent validation and
 normal push. Conflicts and interruptions remain in the existing task.
 
+An integration target synchronization that `finish` recorded but never
+committed is otherwise resumed from its recorded local and remote OIDs. When
+its owner decides not to resume it, for example to keep local-only target
+commits out of a published merge, abort any merge it started, preserve and
+move the target as that decision allows, then run `release-synchronization`
+with the recorded `--expected-local`, `--expected-source` and a durable
+`--evidence`. It refuses a committed synchronization, a pending task
+operation, a target with dirty or merge state, and a target whose HEAD is the
+recorded merge. The released record stays in `synchronization_history`; the
+next `finish` synchronizes from the current target HEAD.
+
 Retirement requires the exact accepted result, completed integration, explicit
 external-user release, unchanged worktree identity and accepted HEAD, and an
 invocation outside the target worktree. It checks preexisting dirty data, then
@@ -774,6 +785,11 @@ call to the C JSON encoder instead of streaming them through the pure-Python
 one. The bytes written are unchanged. A retire that reclaims 640 files took
 16 s instead of 32 s on Windows. A rollback to 0.8.19 reads and writes the same
 files and only restores the slower encoding.
+
+Version 0.8.21 adds `release-synchronization`, which drops an integration
+target synchronization that `finish` recorded but never committed (#72). A
+rollback to 0.8.20 reads the released record as history and again resumes any
+synchronization still pending from its recorded OIDs.
 
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
