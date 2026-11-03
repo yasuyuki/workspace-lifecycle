@@ -18,8 +18,9 @@ def save_json(path: Path, value: dict) -> None:
     fd, temporary = tempfile.mkstemp(prefix="state-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-            json.dump(value, stream, sort_keys=True, indent=2)
-            stream.write("\n")
+            # json.dump to a stream never uses the C encoder; reclaim writes its
+            # journal about three times per member (#70).
+            stream.write(json.dumps(value, sort_keys=True, indent=2) + "\n")
             stream.flush(); os.fsync(stream.fileno())
         os.replace(temporary, path)
         if os.name != "nt":
