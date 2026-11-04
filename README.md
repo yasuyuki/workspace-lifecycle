@@ -801,6 +801,12 @@ target synchronization that `finish` recorded but never committed (#72). A
 rollback to 0.8.20 reads the released record as history and again resumes any
 synchronization still pending from its recorded OIDs.
 
+Version 0.8.22 makes `finish --wait-checks` keep polling when a check query
+gets a GitHub server error, an empty body or a timeout, and refuse only if
+GitHub still cannot answer at the limit (#76). Task state is unchanged. A
+rollback to 0.8.21 again stops at the first such query, and the same finish
+resumes from the candidate.
+
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
 default branch carries the accepted commit's SHA. `integration_checks` counts
