@@ -3,7 +3,9 @@
 \* mutations and release(). One action is one lock call, one receipt write
 \* or one process event in that file.
 CONSTANTS Sessions, \* run() supervisors of one task
-          JobBeforeSpawn, \* TRUE: Windows, run() saves windows_job before Popen
+          Windows, \* TRUE: run() saves windows_job before Popen and the command
+                  \* holds the job; FALSE (Linux): release() finds the command
+                  \* by the use token in its environment
           Release \* "never"; "after-death": lease-release only while no supervisor
                   \* lives, as its recovery text asks; "any": at any time
 
@@ -37,7 +39,7 @@ Init ==
 
 Receipts == {s \in Sessions : receipt[s] # "none"}
 
-\* ---- run(): leases.py:416-506 ----
+\* ---- run(): leases.py:434-531 ----
 
 RunRegister(s) == \* with _lock(register.lock, blocking=True)
   /\ pc[s] = "idle" /\ reg = None
@@ -61,7 +63,7 @@ RunShare(s) == \* use.enter_context(_lock(lock, shared=True))
 RunSaveReceipt(s) == \* _save(receipt, record) without child; register.lock released
   /\ pc[s] = "save" /\ sup[s]
   /\ receipt' = [receipt EXCEPT ![s] = "bare"] /\ reg' = None
-  /\ pc' = [pc EXCEPT ![s] = IF JobBeforeSpawn THEN "job" ELSE "spawn"]
+  /\ pc' = [pc EXCEPT ![s] = IF Windows THEN "job" ELSE "spawn"]
   /\ UNCHANGED <<sup, child, mut, shared, excl, outPc, inPc, relPc, seen, relPick>>
 
 RunSaveJob(s) == \* Windows: record['windows_job'] = job; _save(receipt, record)
@@ -156,7 +158,7 @@ InDone(s) ==
   /\ inPc' = [inPc EXCEPT ![s] = "idle"]
   /\ UNCHANGED <<pc, sup, child, receipt, reg, shared, outPc, relPc, seen, relPick>>
 
-\* ---- release(): leases.py:511-532 ----
+\* ---- release(): leases.py:536-564 ----
 
 RelEnter ==
   /\ Release # "never"
@@ -172,10 +174,11 @@ RelPick == \* matches[0]: the receipt of the token given
        ELSE \E s \in Receipts : relPick' = <<s, receipt[s]>> /\ relPc' = "check" /\ mut' = mut
   /\ UNCHANGED <<pc, sup, child, receipt, reg, shared, excl, outPc, inPc, seen>>
 
-RelCheck == \* owner alive, then child/process group/job alive only if the read record has them
+RelCheck == \* owner alive; then, from the receipt read again, the job (Windows)
+            \* or any process with the use token (Linux)
   /\ relPc = "check"
   /\ LET s == relPick[1] IN
-       IF sup[s] \/ (relPick[2] = "tracked" /\ child[s])
+       IF sup[s] \/ (child[s] /\ (receipt[s] = "tracked" \/ ~Windows))
          THEN relPc' = "idle" /\ mut' = None /\ receipt' = receipt
          ELSE relPc' = "idle" /\ mut' = None /\ receipt' = [receipt EXCEPT ![s] = "none"]
   /\ relPick' = None

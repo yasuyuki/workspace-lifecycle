@@ -21,8 +21,9 @@ RULE = 'NoMutationUnderAnotherSession'
 EXPECTED = {
     'protocol': None,
     'release-after-death-windows': None,
-    'release-after-death-linux': RULE,      # issue: child not yet in the receipt
-    'release-any-time-windows': RULE,       # issue: release judges a stale record
+    'release-after-death-linux': None,
+    'release-any-time-windows': None,
+    'release-any-time-linux': None,
 }
 
 # (name, code it stands for, configuration, model text, broken text)
@@ -38,7 +39,13 @@ MUTANTS = [
      'pc[s] = "wait" /\\ sup[s] /\\ ~child[s]', 'pc[s] = "wait" /\\ sup[s]'),
     ('release skips the child and job checks', 'leases.py release() child/group/job checks',
      'release-after-death-windows',
-     'IF sup[s] \\/ (relPick[2] = "tracked" /\\ child[s])', 'IF sup[s]'),
+     'IF sup[s] \\/ (child[s] /\\ (receipt[s] = "tracked" \\/ ~Windows))', 'IF sup[s]'),
+    ('the command does not hold the job', 'leases.py run() startupinfo handle_list', 'release-after-death-windows',
+     '(receipt[s] = "tracked" \\/ ~Windows)', '~Windows'),
+    ('release skips the use token scan', 'leases.py release() _token_active', 'release-after-death-linux',
+     '(receipt[s] = "tracked" \\/ ~Windows)', 'receipt[s] = "tracked"'),
+    ('release judges the receipt it read first', 'leases.py release() second _read', 'release-any-time-windows',
+     'receipt[s] = "tracked" \\/ ~Windows', 'relPick[2] = "tracked" \\/ ~Windows'),
 ]
 
 

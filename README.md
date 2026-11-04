@@ -548,7 +548,9 @@ evidence is still required. On Windows, a caller whose current directory remains
 inside the task still holds a directory handle; `--users-released` cannot turn
 that use into a removable worktree. Release that caller before retrying pending
 retirement. `lease-status` lists the task's uses and
-`lease-release` recovers exactly one dead-owner use after review. A crashed
+`lease-release` recovers exactly one dead-owner use after review. It refuses
+while the command that use started still runs, also when its supervisor died
+before recording it. A crashed
 use does not stop new uses; it stops mutations until it is released. A
 0.4 supervisor's exclusive lease and receipt still count as a use, but a 0.4
 client cannot see newer uses, so supervise one clone with one version. On

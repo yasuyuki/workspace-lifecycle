@@ -248,6 +248,24 @@ def _group_active(pgid):
     return False
 
 
+def _token_active(token):
+    # The command gets the use token when it is started, before its supervisor
+    # can record it, and descendants keep it when they leave its process group.
+    entry = b'WORKSPACE_LIFECYCLE_USE=' + token.encode('ascii')
+    for directory in Path('/proc').iterdir():
+        if not directory.name.isdecimal():
+            continue
+        try:
+            if (directory / 'stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z':
+                continue
+            environment = (directory / 'environ').read_bytes()
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        if entry in environment.split(b'\0'):
+            return True
+    return False
+
+
 def _linux_subreaper():
     import ctypes
     libc = ctypes.CDLL(None, use_errno=True)
@@ -341,7 +359,7 @@ def _windows_job(token):
         if not kernel.QueryInformationJobObject(handle, 1, ctypes.byref(info), ctypes.sizeof(info), None):
             raise ValueError('cannot inspect Windows process-tree lease')
         return info.active > 1
-    return name, active, lambda: kernel.CloseHandle(handle)
+    return name, active, lambda: kernel.CloseHandle(handle), handle
 
 
 def _windows_job_member(name):
@@ -438,10 +456,15 @@ def run(repo, task, argv, cwd, before_spawn=None, child_env=None):
             options = {'cwd': str(cwd), 'env': {**os.environ, **(child_env or {}),
                                                 'WORKSPACE_LIFECYCLE_USE': record['token']}}
             if os.name == 'nt':
-                job, descendants, close_job = _windows_job(record['token'])
+                job, descendants, close_job, job_handle = _windows_job(record['token'])
                 record['windows_job'] = job
                 _save(receipt, record)
                 options['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP
+                # The command holds the job open from its start, so release()
+                # can still inspect the job after this supervisor dies.
+                os.set_handle_inheritable(job_handle, True)
+                options['startupinfo'] = subprocess.STARTUPINFO(
+                    lpAttributeList={'handle_list': [job_handle]})
                 def forward_console(_number, _frame):
                     if child is not None and child.poll() is None:
                         try:
@@ -471,6 +494,8 @@ def run(repo, task, argv, cwd, before_spawn=None, child_env=None):
                         os.close(terminal)
                     terminal = None
             child = subprocess.Popen(argv, **options)
+            if os.name == 'nt':
+                os.set_handle_inheritable(job_handle, False)
             record.update(child_pid=child.pid, child_identity=_identity(child.pid))
             if os.name != 'nt':
                 record['process_group'] = child.pid
@@ -521,12 +546,19 @@ def release(repo, task, token, evidence):
         receipt, record = matches[0]
         if _identity(record['owner_pid']) == record['owner_identity']:
             raise ValueError('lease supervisor is still alive')
+        # Only the owner writes its receipt, and it may have recorded its child
+        # or job after the read above; judge what the dead owner wrote last.
+        record = _read(receipt)
+        if record is None:
+            raise ValueError('lease receipt no longer exists')
         if record.get('child_identity') is not None and _identity(record['child_pid']) == record['child_identity']:
             raise ValueError('lease child is still alive')
         if record.get('process_group') and _group_active(record['process_group']):
             raise ValueError('lease process group is still alive')
         if record.get('windows_job') and _windows_active(record['windows_job']):
             raise ValueError('lease Windows job still has active descendants')
+        if os.name != 'nt' and _token_active(record['token']):
+            raise ValueError('a process started under this lease is still alive')
         record['release_evidence'] = evidence
         _save(receipt.with_suffix('.released.json'), record)
         _remove(receipt)

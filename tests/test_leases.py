@@ -218,6 +218,84 @@ class LeaseTests(unittest.TestCase):
         leases.release(self.repo, 'task', token, 'fixture child exited; no detached users')
         self.assertFalse(leases.is_in_use(self.repo, 'task'))
 
+    def crashing_supervisor(self, pause):
+        """A supervisor that dies right after it starts the command, as SIGKILL would."""
+        code = r'''
+import os, subprocess, sys, time
+from pathlib import Path
+from workspace_lifecycle import leases
+repo, pause = sys.argv[1], sys.argv[2] == 'pause'
+start = subprocess.Popen
+def start_then_die(*args, **kwargs):
+    child = start(*args, **kwargs)
+    if args and args[0][0] == sys.executable:
+        os._exit(9)
+    return child
+leases.subprocess.Popen = start_then_die
+name = '_windows_job' if os.name == 'nt' else '_linux_subreaper'
+before_spawn = getattr(leases, name)
+def paused(*args):
+    Path(repo, 'saved').touch()
+    while not Path(repo, 'go').exists():
+        time.sleep(.02)
+    return before_spawn(*args)
+if pause:
+    setattr(leases, name, paused)
+command = 'import pathlib,time; p=pathlib.Path("crash-gate"); p.write_text("ready");\nwhile p.exists(): time.sleep(.02)'
+leases.run(repo, 'task', [sys.executable, '-c', command], repo)
+'''
+        # A venv launcher kills its job when the supervisor dies; start without one.
+        env = {**os.environ, 'PYTHONPATH': str(Path(leases.__file__).resolve().parents[1])}
+        child = subprocess.Popen([sys._base_executable, '-c', code, str(self.repo), 'pause' if pause else ''],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        self.addCleanup(self.stop, child)
+        return child
+
+    def released(self, token):
+        try:
+            leases.release(self.repo, 'task', token, 'fixture command exited')
+        except ValueError:
+            return False
+        return True
+
+    def assert_release_waits_for_command(self, token):
+        gate = self.repo / 'crash-gate'
+        with self.assertRaises(ValueError):
+            with leases.guard(self.repo, 'task'):
+                self.fail('mutation admitted beside a live command')
+        gate.unlink()
+        self.until(lambda: self.released(token))
+        with leases.guard(self.repo, 'task'):
+            pass
+
+    def test_release_refuses_command_its_dead_supervisor_never_recorded(self):
+        supervisor = self.crashing_supervisor(pause=False)
+        self.until((self.repo / 'crash-gate').exists)
+        self.assertEqual(supervisor.wait(timeout=10), 9)
+        token = self.use()['token']
+        with self.assertRaises(ValueError):
+            leases.release(self.repo, 'task', token, 'claimed release')
+        self.assert_release_waits_for_command(token)
+
+    def test_release_judges_what_the_dead_owner_wrote_last(self):
+        supervisor = self.crashing_supervisor(pause=True)
+        self.until((self.repo / 'saved').exists)
+        token = self.use()['token']
+        identity = leases._identity
+        read = []
+        def owner_dies_after_release_read(pid):
+            if not read:
+                read.append(pid)
+                (self.repo / 'go').touch()
+                self.assertEqual(supervisor.wait(timeout=10), 9)
+                self.until((self.repo / 'crash-gate').exists)
+            return identity(pid)
+        with patch.object(leases, '_identity', owner_dies_after_release_read):
+            with self.assertRaises(ValueError):
+                leases.release(self.repo, 'task', token, 'claimed release')
+        self.assertEqual(read, [self.use()['owner_pid']])
+        self.assert_release_waits_for_command(token)
+
     def test_release_requires_exact_receipt_and_cannot_release_live_owner(self):
         gate = self.repo / 'release-gate'
         child = self.supervisor('import pathlib,time; p=pathlib.Path("release-gate"); p.write_text("ready");\nwhile p.exists(): time.sleep(.02)')
