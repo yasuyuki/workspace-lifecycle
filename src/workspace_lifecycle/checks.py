@@ -27,6 +27,15 @@ DEFAULT_WAIT_SECONDS = 360 * 60
 PENDING = frozenset({'missing', 'queued', 'in_progress', 'waiting', 'requested', 'pending'})
 _POLL_SECONDS = 30
 
+# gh prints its JSON parser's error instead of the status when a 5xx response
+# has an empty body and --jq is given.
+_TRANSIENT = re.compile(r'HTTP 5\d\d\b|unexpected end of JSON input')
+
+
+class ChecksUnavailable(LifecycleError):
+    """GitHub did not answer this query, though a later one may."""
+
+
 _GITHUB = re.compile(r'^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)'
                      r'([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$')
 
@@ -145,10 +154,16 @@ def _suites(repository: str, commit: str) -> dict[int, str | None]:
 def _api(argv: list[str]) -> list[dict]:
     try:
         result = subprocess.run(argv, text=True, capture_output=True, timeout=120)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired as exc:
+        raise ChecksUnavailable('required check status unavailable: ' + type(exc).__name__)
+    except OSError as exc:
         raise LifecycleError('required check status unavailable: ' + type(exc).__name__)
     if result.returncode:
-        raise LifecycleError('required check status unavailable: ' + result.stderr.strip()[-500:])
+        error = result.stderr.strip()[-500:]
+        if _TRANSIENT.search(error):
+            raise ChecksUnavailable('required check status unavailable: GitHub server error or empty response: '
+                                    + error)
+        raise LifecycleError('required check status unavailable: ' + error)
     try:
         return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
     except ValueError:
@@ -188,24 +203,30 @@ def watch(repository: str, commit: str, required: list[dict], seconds: float,
           branch: str | None = None) -> tuple[str, list[dict]]:
     """Poll the checks on ``commit``, from runs on ``branch`` when given:
     ``success`` once every one succeeded, ``failed`` at the first failed one,
-    or ``pending`` when ``seconds`` run out."""
+    or ``pending`` when ``seconds`` run out. A query GitHub could not answer
+    is asked again at the next poll, and refuses only when ``seconds`` run out."""
     deadline = time.monotonic() + seconds; reported = None
     while True:
-        results = _states(repository, commit, required, branch)
-        if any(entry['state'] not in PENDING | {'success'} for entry in results):
-            return 'failed', results
-        unmet = [entry for entry in results if entry['state'] != 'success']
-        if not unmet:
-            return 'success', results
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return 'pending', results
-        states = [(entry['name'], entry['state']) for entry in unmet]
+        try:
+            results = _states(repository, commit, required, branch)
+        except ChecksUnavailable as exc:
+            if time.monotonic() >= deadline:
+                raise
+            states = str(exc)
+        else:
+            if any(entry['state'] not in PENDING | {'success'} for entry in results):
+                return 'failed', results
+            unmet = [entry for entry in results if entry['state'] != 'success']
+            if not unmet:
+                return 'success', results
+            if time.monotonic() >= deadline:
+                return 'pending', results
+            states = 'waiting for required checks on ' + commit + ': ' + json.dumps(
+                {entry['name']: entry['state'] for entry in unmet})
         if states != reported:
-            print('waiting for required checks on ' + commit + ': ' + json.dumps(dict(states)),
-                  file=sys.stderr, flush=True)
+            print(states, file=sys.stderr, flush=True)
             reported = states
-        time.sleep(min(_POLL_SECONDS, remaining))
+        time.sleep(min(_POLL_SECONDS, deadline - time.monotonic()))
 
 
 def wait(repository: str, commit: str, required: list[dict], seconds: float) -> None:

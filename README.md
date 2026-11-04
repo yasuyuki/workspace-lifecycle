@@ -350,6 +350,10 @@ It asks GitHub every 30 seconds and stops as soon as any required check
 completes without success, naming each failed check with its state, run ID and
 GitHub URL. Missing, queued and running checks keep it waiting until SECONDS
 have passed; the default, 21600, is GitHub Actions' default job timeout.
+A query that GitHub answers with a server error or an empty body, or that
+times out, is asked again at the next poll, and refuses only if GitHub still
+cannot answer when SECONDS have passed. Any other query failure, such as
+rejected credentials, refuses at once.
 While those checks run, finish already integrates the accepted commit into the
 target checkout (fast-forward or merge) and validates it there, but pushes
 nothing until the checks succeed. The push then reuses that validation when the

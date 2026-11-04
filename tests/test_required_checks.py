@@ -32,7 +32,15 @@ class FakeGitHub:
     """
 
     def __init__(self, trunk):
-        self.runs = {}; self.queries = []; self.suite_queries = []; self.unavailable = False; self.trunk = trunk
+        self.runs = {}; self.queries = []; self.suite_queries = []; self.trunk = trunk
+        self.unavailable = False; self.denied = False
+
+    def answer(self):
+        if self.unavailable:
+            raise checks.ChecksUnavailable("required check status unavailable: GitHub server error or empty response: "
+                                           "gh: Server Error (HTTP 502)")
+        if self.denied:
+            raise LifecycleError("required check status unavailable: HTTP 401: Bad credentials")
 
     def add(self, repository, commit, check, status="completed", conclusion="success", app=None, url=None,
             branch=None):
@@ -49,14 +57,12 @@ class FakeGitHub:
 
     def __call__(self, repository, commit, name):
         self.queries.append((repository, commit, name))
-        if self.unavailable:
-            raise LifecycleError("required check status unavailable: HTTP 502")
+        self.answer()
         return list(self.runs.get((repository, commit, name), []))
 
     def suites(self, repository, commit):
         self.suite_queries.append((repository, commit))
-        if self.unavailable:
-            raise LifecycleError("required check status unavailable: HTTP 502")
+        self.answer()
         return {self.suite(branch): branch for branch in ("trunk", "topic")}
 
 
@@ -587,11 +593,12 @@ class RequiredChecksTest(unittest.TestCase):
                 finish(self.topic, task="limit", plan_path=str(self.plan), result_ref="issue/limit", wait_checks=seconds)
         self.assertNotIn("acceptance", status(self.topic, "limit"))
 
-    def test_unavailable_status_during_wait_resumes_the_saved_candidate(self):
+    def test_an_outage_lasting_the_whole_wait_refuses_and_resumes_the_saved_candidate(self):
         validations = self.counted("flaky")
         candidate = status(self.topic, "flaky")["candidate"]
         def outage(): self.github.unavailable = True
-        self.waiting_refused("flaky", "unavailable", [outage])
+        _, clock = self.waiting_refused("flaky", "unavailable", [outage])
+        self.assertEqual(sum(clock.sleeps), 600, "the outage is polled until the limit")
         self.github.unavailable = False
         self.github.add("example/repo", candidate["commit"], TEST)
         with patch("workspace_lifecycle.service._push", wraps=service._push) as pushes:
@@ -600,6 +607,37 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertEqual([Path(call.args[0]) for call in pushes.call_args_list], [self.root.resolve()])
         self.assertEqual(status(self.topic, "flaky")["acceptance"]["push"], candidate["push"])
         self.assertEqual(result["integration"]["commit"], self.trunk())
+
+    def test_a_brief_outage_during_the_wait_keeps_waiting_and_integrates(self):
+        self.counted("brief")
+        commit = status(self.topic, "brief")["candidate"]["commit"]
+        def outage(): self.github.unavailable = True
+        def recovered():
+            self.github.unavailable = False
+            self.github.add("example/repo", commit, TEST)
+        result, clock = self.waiting("brief", [outage, lambda: None, recovered])
+        self.assertEqual(result["integration"]["commit"], self.trunk())
+        self.assertEqual(clock.sleeps[:3], [30, 30, 30])
+
+    def test_a_refused_query_during_the_wait_stops_it(self):
+        self.counted("denied")
+        def denied(): self.github.denied = True
+        error, clock = self.waiting_refused("denied", "Bad credentials", [denied])
+        self.assertEqual(len(clock.sleeps), 1, "no poll after the refusal")
+
+    def test_server_errors_and_empty_responses_are_transient(self):
+        def query(returncode, stderr):
+            completed = subprocess.CompletedProcess([], returncode, "", stderr)
+            with patch("workspace_lifecycle.checks.subprocess.run", return_value=completed):
+                return checks._api(["gh"])
+        for stderr in ("gh: Server Error (HTTP 502)", "HTTP 503: Service Unavailable", "unexpected end of JSON input"):
+            with self.subTest(stderr=stderr), self.assertRaises(checks.ChecksUnavailable):
+                query(1, stderr)
+        for stderr in ("HTTP 401: Bad credentials", "HTTP 404: Not Found"):
+            with self.subTest(stderr=stderr), self.assertRaises(LifecycleError) as caught:
+                query(1, stderr)
+            self.assertNotIsInstance(caught.exception, checks.ChecksUnavailable)
+            self.assertIn(stderr, str(caught.exception))
 
     def test_a_hold_during_the_wait_refuses_integration(self):
         from workspace_lifecycle.service import hold
