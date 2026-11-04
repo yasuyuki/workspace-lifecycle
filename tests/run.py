@@ -100,6 +100,31 @@ def run_one(python, tests, environment, test_id):
     return outcome
 
 
+def load_timings(path):
+    try:
+        timings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"--timings {path}: {error}") from None
+    if not (isinstance(timings, dict) and all(
+            isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and seconds >= 0
+            for seconds in timings.values())):
+        raise ValueError(f"--timings {path} must map test ids to non-negative seconds")
+    return timings
+
+
+def shards(ids, count, timings):
+    # An untimed test weighs as much as the slowest one, so a new test starts early
+    # instead of extending a shard's tail.
+    unknown = max(timings.values(), default=1.0)
+    weight = lambda test_id: timings.get(test_id, unknown)
+    loads, assigned = [0.0] * count, [[] for _ in range(count)]
+    for test_id in sorted(ids, key=lambda test_id: (-weight(test_id), test_id)):
+        lightest = min(range(count), key=lambda shard: (loads[shard], shard))
+        assigned[lightest].append(test_id)
+        loads[lightest] += weight(test_id)
+    return assigned
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("names", nargs="*", help="unittest names relative to tests/; default: discover all")
@@ -107,10 +132,16 @@ def main(argv=None):
                         help="concurrent test processes (default: %(default)s)")
     parser.add_argument("--wheel", type=Path, help="install this wheel instead of importing the copied src")
     parser.add_argument("--shard", metavar="K/N", default="1/1",
-                        help="run every Nth collected test starting at the Kth (default: %(default)s)")
+                        help="run the Kth of N shards that together run the selection once (default: %(default)s)")
+    parser.add_argument("--timings", type=Path, help="JSON of test id to seconds that balances shards and order")
+    parser.add_argument("--report", type=Path, help="write the seconds of each test run here as JSON")
     arguments = parser.parse_args(argv)
     if arguments.wheel and not arguments.wheel.is_file():
         parser.error(f"--wheel is not a file: {arguments.wheel}")
+    try:
+        timings = load_timings(arguments.timings) if arguments.timings else {}
+    except ValueError as error:
+        parser.error(str(error))
     index, _, count = arguments.shard.partition("/")
     if not (index.isdigit() and count.isdigit() and 1 <= int(index) <= int(count)):
         parser.error(f"--shard must be K/N with 1 <= K <= N: {arguments.shard}")
@@ -124,11 +155,15 @@ def main(argv=None):
         if collected.returncode:
             sys.stderr.write(collected.stdout + collected.stderr); return 1
         listing = json.loads(collected.stdout)
-        selected = listing["ids"][index - 1::count]
+        selected = shards(listing["ids"], count, timings)[index - 1]
         if listing["errors"] or not selected:
             sys.stderr.write("".join(listing["errors"]) or "no tests collected\n"); return 1
         with ThreadPoolExecutor(max(1, arguments.jobs)) as pool:
             outcomes = list(pool.map(lambda test_id: run_one(python, tests, environment, test_id), selected))
+    if arguments.report:
+        arguments.report.write_text(json.dumps(
+            {outcome["id"]: round(outcome["seconds"], 1) for outcome in outcomes}, indent=1, sort_keys=True) + "\n",
+            encoding="utf-8", newline="\n")
     failed = [outcome for outcome in outcomes if not outcome["ok"]]
     for outcome in failed:
         sys.stderr.write(f"FAIL {outcome['id']}\n{outcome['output']}\n")

@@ -64,10 +64,14 @@ start Git itself rather than a launcher such as `Git\cmd\git.exe`; without a
 subset; `-j` sets the number of concurrent tests, by default 8 or the processor
 count if lower. Failed tests are printed with their output and the exit code is
 1; a test that fails to import or an empty selection also fails.
-`--shard K/N` runs every Nth collected test starting at the Kth, so shards 1/N
-to N/N together run the selection once. CI runs the same entry with `--wheel` on
-the built wheel, on Windows as eight shards whose `package (windows-latest, 3.14)`
-check succeeds only when all eight do.
+`--shard K/N` runs the Kth of N shards, and shards 1/N to N/N together run the
+selection once. `--timings` takes a JSON object of test ids to seconds: each
+test goes to the shard with the least time so far, longest first, and each
+shard starts its longest tests first. A test missing from the file counts as
+the slowest. `--report` writes the seconds of the tests it ran in the same form.
+CI runs the same entry with `--wheel` on the built wheel, on Windows as eight
+shards whose `package (windows-latest, 3.14)` check succeeds only when all eight
+do. Each Windows shard keeps its report as a `windows-timings-K` artifact.
 
 A lifecycle task of this repository does not register the suite as its
 validation. Both CI jobs are required checks, so finish already waits for the
