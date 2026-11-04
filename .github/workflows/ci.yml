@@ -36,7 +36,7 @@ jobs:
       - run: python -m build --wheel
       - name: Test the wheel outside checkout
         shell: bash
-        run: python -B tests/run.py --wheel dist/*.whl --shard ${{ matrix.shard }}/8 --report "$RUNNER_TEMP/timings.json"
+        run: python -B tests/run.py --wheel dist/*.whl --shard ${{ matrix.shard }}/8 --timings tests/windows-timings.json --report "$RUNNER_TEMP/timings.json"
       - uses: actions/upload-artifact@v4
         with:
           name: windows-timings-${{ matrix.shard }}

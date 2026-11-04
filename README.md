@@ -71,7 +71,9 @@ shard starts its longest tests first. A test missing from the file counts as
 the slowest. `--report` writes the seconds of the tests it ran in the same form.
 CI runs the same entry with `--wheel` on the built wheel, on Windows as eight
 shards whose `package (windows-latest, 3.14)` check succeeds only when all eight
-do. Each Windows shard keeps its report as a `windows-timings-K` artifact.
+do. The Windows shards use `tests/windows-timings.json`, and each keeps its report
+as a `windows-timings-K` artifact. When new or slower tests make one shard the
+slowest, rebuild the file by merging the eight reports of a recent main run.
 
 A lifecycle task of this repository does not register the suite as its
 validation. Both CI jobs are required checks, so finish already waits for the
