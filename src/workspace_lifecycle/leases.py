@@ -181,7 +181,7 @@ def _alive(record):
     try:
         return _identity(record['owner_pid']) == record['owner_identity']
     except (KeyError, TypeError, ValueError):
-        return True  # Uncertainty is not proof of release.
+        return True
 
 
 def status(repo, task):
@@ -277,7 +277,6 @@ def _linux_descendants():
         if expanded == descendants:
             break
         descendants = expanded
-    # Reap exited adopted children; never terminate a live process.
     while True:
         try:
             pid, _ = os.waitpid(-1, os.WNOHANG)
@@ -358,7 +357,7 @@ def _windows_job_member(name):
     kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
     handle = kernel.OpenJobObjectW(4, False, name)  # JOB_OBJECT_QUERY
     if not handle:
-        return False  # A missing or inaccessible Job cannot prove membership.
+        return False
     try:
         member = wintypes.BOOL()
         if not kernel.IsProcessInJob(kernel.GetCurrentProcess(), handle,
@@ -428,7 +427,7 @@ def run(repo, task, argv, cwd, before_spawn=None, child_env=None):
             record = {'token': uuid.uuid4().hex, 'owner_pid': os.getpid(),
                       'owner_identity': _identity(os.getpid()), 'task': task}
             receipt = lock.with_name(lock.name[:-len('.lock')] + '.' + record['token'] + '.json')
-            _save(receipt, record)  # crash between intent and spawn stays unresolved
+            _save(receipt, record)
         child = None
         previous = {}
         close_job = None
@@ -514,8 +513,6 @@ def release(repo, task, token, evidence):
     lock, _ = _paths(repo, task)
     if not isinstance(evidence, str) or not evidence.strip():
         raise ValueError('external user release evidence is required')
-    # Other live uses keep the shared lock; owner identities, not the lock,
-    # prove that this receipt's users are gone.
     with _mutation(lock):
         matches = [(path, record) for path in _receipts(lock)
                    for record in [_read(path)] if record is not None and record.get('token') == token]
@@ -530,8 +527,6 @@ def release(repo, task, token, evidence):
             raise ValueError('lease process group is still alive')
         if record.get('windows_job') and _windows_active(record['windows_job']):
             raise ValueError('lease Windows job still has active descendants')
-        # A lost Windows job name / pre-attachment crash requires the caller's
-        # explicit evidence. Never infer release from inability to open a job.
         record['release_evidence'] = evidence
         _save(receipt.with_suffix('.released.json'), record)
         _remove(receipt)

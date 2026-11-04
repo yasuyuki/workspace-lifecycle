@@ -33,7 +33,6 @@ class GitEncodingTests(unittest.TestCase):
                               encoding="utf-8", capture_output=True, check=True).stdout.strip()
 
     def test_git_readers_ignore_cp932_default(self):
-        # Simulate the affected locale even on UTF-8 CI hosts.
         native_run = subprocess.run
 
         def cp932_run(argv, **kwargs):
@@ -53,7 +52,6 @@ class GitEncodingTests(unittest.TestCase):
 
     def test_japanese_managed_root_advertised_finish_and_unmanaged(self):
         environment = os.environ.copy()
-        # No UTF-8 mode workaround may be inherited by the advertised finish child.
         environment.pop("PYTHONUTF8", None)
         command = [sys.executable, "-X", "utf8=0", "-m", "workspace_lifecycle"]
         unmanaged = subprocess.run(

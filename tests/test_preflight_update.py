@@ -46,7 +46,6 @@ class PreflightUpdateTests(unittest.TestCase):
             before.pop(key, None); after.pop(key, None)
         self.assertEqual(after, before)
         self.assertEqual((self.f.topic / 'dirty.txt').read_text(), 'retain this work\n')
-        # A stale caller cannot overwrite the first migration.
         stale = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(stale.returncode, 2)
         self.assertIn('CAS mismatch', stale.stderr)
@@ -108,7 +107,6 @@ class PreflightUpdateTests(unittest.TestCase):
         self.assertEqual(after['integrated'], before['integrated'])
         self.assertEqual(after['live'], before['live'])
         self.assertEqual(after['baseline_dirty'], before['baseline_dirty'])
-        # The accepted task remains current until its explicit retirement.
         from workspace_lifecycle.service import release_hold
         release_hold(self.f.root, 'current', 'fixture owner released hold')
         retire(self.f.root, task='current', result_ref='issue/16', users_released=True)

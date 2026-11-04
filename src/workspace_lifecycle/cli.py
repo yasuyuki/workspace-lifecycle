@@ -243,8 +243,6 @@ def main(argv=None):
                        before_spawn=lambda: _notify(service.before_run(repo, args.task, cwd,
                            lexical_cwd=Path(args.cwd).absolute())),
                        child_env=_managed_context(repo, args.task))
-            # Native output and status pass through; management JSON belongs to
-            # status/finish, not the program's stdout stream.
             recovery = _recover_selected_task(repo, args.task)
             if recovery['error']:
                 print(json.dumps(_recovery_output(state_path, recovery['report'])), file=sys.stderr)
@@ -366,7 +364,6 @@ def _native_code(code):
 
 
 def _notify(notices):
-    # Native stdout stays the program's; lifecycle notices are one JSON line each on stderr.
     for notice in notices:
         print(json.dumps({'notice': notice}, ensure_ascii=False), file=sys.stderr, flush=True)
 
@@ -378,7 +375,6 @@ def _integration_target(repo):
         return None
     for remote in (git(repo, 'remote') or '').splitlines():
         default = git(repo, 'symbolic-ref', '--quiet', '--short', 'refs/remotes/%s/HEAD' % remote, optional=True)
-        # Without a recorded remote HEAD the default is unknown; assume it.
         if default is None or default == remote + '/' + branch:
             return branch
     return None
@@ -438,8 +434,6 @@ def _resolve_run(effective, launch, argv):
         raise LifecycleError('effective cwd is outside its resolved Git worktree')
     common = common_dir(repo)
     if (common / 'agent-branches' / 'state.json').exists():
-        # Launching changes nothing the old registry owns; only migration and
-        # lifecycle mutations stay unauthorized there.
         return _unmanaged(argv, launch, repo, 'legacy agent-branches registry; this lifecycle does not supervise it')
     lifecycle = common / 'workspace-lifecycle'
     if not lifecycle.exists():
@@ -449,9 +443,6 @@ def _resolve_run(effective, launch, argv):
     try:
         task = bound_task(repo)
     except LifecycleError:
-        # Retirement finds a task's checkout only through its binding. The one
-        # unbound checkout a mutation writes is the default-branch integration
-        # target, so a session there holds the use that integration waits for.
         target = _integration_target(repo)
         reason = 'checkout is not bound to a lifecycle task'
         if target is None:

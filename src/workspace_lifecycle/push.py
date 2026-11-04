@@ -20,13 +20,8 @@ from urllib.parse import urlsplit
 from urllib.request import url2pathname
 
 
-# Deliberately conservative: an unknown SPDX identifier is not evidence that a
-# public repository is OSS.  This small verified initial set can be bypassed
-# only by an explicit ``--oss yes`` declaration.
 OSI_LICENSES = frozenset({"MIT", "Apache-2.0", "BSD-3-Clause", "ISC"})
 
-# Only push exits 0, so ``preflight && git push`` cannot run a push the
-# decision withheld.  argparse already uses 2 for invalid usage.
 DECISION_EXIT = {"push": 0, "hold": 10, "ask": 11}
 
 
@@ -388,8 +383,6 @@ def main() -> int:
     policy = load_policy(args.policy) if need_metadata and args.policy is not None else None
     output = decide(collect_state(Path(args.repo).resolve(), need_metadata), args.user_intent, args.temporary, args.oss, policy)
     if output["decision"] == "push":
-        # Git owns reference/upstream facts. The lifecycle service independently
-        # enforces task acceptance and exact merge identity before invoking push.
         legacy = Path(run_git(Path(args.repo), 'rev-parse', '--path-format=absolute',
                               '--git-common-dir') or '') / 'agent-branches/state.json'
         if legacy.exists():

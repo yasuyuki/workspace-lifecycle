@@ -44,7 +44,7 @@ def _directories(target, protected=None):
         for name in list(dirs):
             path = Path(current) / name
             if path == target / '.git':
-                dirs.remove(name)  # Our own state/index/leases are Git metadata.
+                dirs.remove(name)
                 continue
             relative = path.relative_to(target).as_posix()
             if relative in protected:

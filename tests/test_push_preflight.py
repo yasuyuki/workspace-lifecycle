@@ -265,8 +265,6 @@ class PolicyTests(unittest.TestCase):
                 if argv[0] == "gh":
                     argv = [sys.executable, "-c",
                             f"import sys; sys.stdout.buffer.write({metadata!r})"]
-                # Simulate a non-UTF-8 default without depending on private
-                # subprocess helpers, which differ across supported Pythons.
                 if kwargs.get("text") and kwargs.get("encoding") is None:
                     kwargs["encoding"] = "cp932"
                 return native_run(argv, **kwargs)

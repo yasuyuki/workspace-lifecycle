@@ -590,8 +590,6 @@ def remove_tree(root, manifest, root_identity, progress: dict, persist) -> dict:
     if (progress.get("manifest_id") == wanted_id
             and progress.get("root_identity") == list(root_identity)
             and "root" not in progress):
-        # A retirement-time capture is the preferred starting progress.  Add
-        # only operation journal fields; the captured identities stay fixed.
         progress["root"] = {"identity": list(root_identity),
                             "tombstone": _root_tombstone(root, root_identity).name}
         for logical, member in progress["members"].items():
@@ -632,9 +630,6 @@ def remove_tree(root, manifest, root_identity, progress: dict, persist) -> dict:
     root_state["status"] = "quarantined"
     persist()
 
-    # Before the first effect, revalidate the full immutable capture.  On a
-    # retry, a complete manifest is no longer expected; only journal-explained
-    # source/quarantine/absence states are admitted.
     if not any(member.get("intent") for member in progress["members"].values()):
         if not same_capture(progress, _scan_linux(staging, manifest, root_identity)):
             raise LifecycleError("reclaim captured identities changed")

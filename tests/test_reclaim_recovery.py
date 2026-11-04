@@ -110,8 +110,6 @@ raise SystemExit(main(['--repo', repo, 'reclaim', '--task', 'one', '--result-ref
         return child
 
     def _reclaim_pending_cli(self):
-        # The pending command must resume only the receipt already authorized by
-        # the killed child; it receives no new task, reference, or evidence.
         completed = subprocess.run(
             [sys.executable, '-m', 'workspace_lifecycle', '--repo', str(self.root), 'reclaim', '--pending'],
             text=True, capture_output=True, env={**os.environ, 'PYTHONPATH': str(Path(__file__).parents[1] / 'src')})
@@ -122,16 +120,12 @@ raise SystemExit(main(['--repo', repo, 'reclaim', '--task', 'one', '--result-ref
         receipt = self._retire()
         immutable_content = copy.deepcopy(receipt['content_manifest'])
         immutable_admin = copy.deepcopy(receipt['admin_manifest'])
-        # The second removal is in the middle of a multi-file payload.  The
-        # unlink has happened, but its completed status has not been saved.
         child = self._paused_cli_reclaim('after-member-remove', require_phase='renamed', occurrence=2)
         paused = self._state()['retired']['one']
         self.assertEqual(paused['content_manifest'], immutable_content)
         self.assertEqual(paused['admin_manifest'], immutable_admin)
         self.assertTrue(any(row.get('intent') for row in self._progress('payload_progress')['members'].values()))
 
-        # The reclaimer holds only the per-task lease; another task can make a
-        # normal durable update while this task is paused inside deletion.
         other = Path(self.temp.name) / 'other'
         begin(self.root, task='other', request='issue/147', remote='origin', branch='topic/other',
               worktree=str(other), validation=['git', 'diff', '--check'], preflight=self.fixture.preflight)
@@ -170,9 +164,6 @@ raise SystemExit(main(['--repo', repo, 'reclaim', '--task', 'one', '--result-ref
         receipt = self._retire()
         marker = self._killed_cli_reclaim('before-member-remove', require_phase='admin-removing')
         archive = Path(receipt['admin_archive_path'])
-        # At this point the checkpoint has an intent and the targeted name is a
-        # deterministic quarantine entry. Replacing it must not be treated as a
-        # completed deletion on the next run.
         if os.name == 'nt':
             replacement = archive / marker.read_text()
         else:

@@ -122,7 +122,6 @@ def capture(workspace, entries, records=None):
                 raise LifecycleError('preserved data refuses former admin mount traversal')
         if os.path.lexists(original):
             raise LifecycleError('preserved data still has an active Git admin')
-        # No tracked source or Gitlink may be hidden behind this contract.
         protected = [root.relative_to(workspace).as_posix() for root in roots
                      if workspace in root.parents and '.git' not in root.relative_to(workspace).parts]
         for name in protected:

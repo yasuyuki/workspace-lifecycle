@@ -134,7 +134,6 @@ class SynchronizationTest(unittest.TestCase):
         self.assertEqual(git(self.topic, 'rev-parse', 'MERGE_HEAD'), wrong)
 
     def test_unrelated_remote_history_is_rejected(self):
-        # Move only this disposable remote fixture to an independently rooted history.
         git(self.other, 'checkout', '--orphan', 'unrelated')
         git(self.other, 'commit', '-m', 'independent root')
         unrelated = git(self.other, 'rev-parse', 'HEAD')

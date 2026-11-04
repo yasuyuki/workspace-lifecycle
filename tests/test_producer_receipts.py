@@ -123,8 +123,6 @@ class ProducerReceiptTests(unittest.TestCase):
         with self.assertRaises(LifecycleError):
             self._register()
 
-        # A separate normally accepted task remains ineligible for a new owner
-        # generation even when it has no output.
         other = Path(self.temp.name) / 'accepted'
         begin(self.root, task='accepted', request='issue/148', remote='origin', branch='topic/accepted',
               worktree=str(other), validation=['git', 'diff', '--check'], preflight=self.fixture.preflight)
@@ -139,8 +137,6 @@ class ProducerReceiptTests(unittest.TestCase):
                                [str(Path(self.temp.name) / 'accepted.wav')], self._provider())
 
     def test_registration_refuses_absent_tracked_output_and_receipt_outside_task_root(self):
-        # Remove the tracked file from disk and index: it remains a tracked path
-        # for the registration check while satisfying the absent-output precondition.
         from test_lifecycle import run
         run(self.topic, 'update-index', '--assume-unchanged', 'README')
         (self.topic / 'README').unlink()
@@ -191,8 +187,6 @@ class ProducerReceiptTests(unittest.TestCase):
         plan.write_text(json.dumps(self.fixture.source_plan(self.topic, 'source.txt')))
         initial = finish(self.topic, task='one', plan_path=str(plan), result_ref='issue/146', users_released=True)
         self.assertFalse(initial['producers']['results'][0]['reclaimed'])
-        # Replace only the registered executable contents; the generation and
-        # argv are unchanged, so the retry proves it did not scan or select a new owner.
         failed_script = Path(self._provider(fail=True)[1])
         good_script = Path(self._provider()[1])
         failed_script.write_text(good_script.read_text())

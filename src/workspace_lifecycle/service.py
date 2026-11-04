@@ -24,8 +24,6 @@ def _sha(path: Path): return hashlib.sha256(path.read_bytes()).hexdigest()
 
 @contextmanager
 def _lease(repo, task, allow_use=False):
-    # This is intentionally mandatory: a missing lease module means a partial
-    # installation must not mutate a workspace.
     try:
         from .leases import guard
     except ImportError as exc:
@@ -254,7 +252,6 @@ def begin(repo, *, task: str, request: str, remote: str, branch: str, worktree: 
                 else:
                     base = policy['commit']
                     integration = {'kind': 'remote-default', 'remote': remote}
-                # This is a transient operation intent, not a live Git-state mirror.
                 intent = {'kind': 'begin', 'desired': desired, 'base': base,
                           'integration': integration, 'required_checks': selected,
                           'required_checks_policy': policy, 'at': _now()}
@@ -382,9 +379,6 @@ def update_validation(repo, *, task: str, expected_head: str,
             item['validation'] = list(validation)
             item.setdefault('validation_updates', []).append(receipt)
             if effectless:
-                # A finish that failed before any recorded effect only pins the
-                # old validator. Its receipt outlives retirement like a revision.
-                # A finish with recorded effects stays pending and resumes them.
                 item.setdefault('finish_receipts', []).append({**intent, 'validation_update': receipt})
                 state['intents'].pop(task)
             save_state(directory, state)
@@ -442,7 +436,6 @@ def update_required_checks(repo, *, task: str, expected: list[dict],
             policy = checks.current(repo, item['remote'])
             checks.require(policy, required_checks)
             item['required_checks_policy'] = policy
-            # A candidate was pushed for the previous requirement; finish decides again.
             item.pop('candidate', None)
             if required_checks:
                 item['required_checks'] = required_checks
@@ -524,8 +517,6 @@ def release_hold(repo, task, evidence):
 def _validate(repo: Path, argv: list[str]) -> dict:
     if not argv: return {"argv": [], "returncode": 0}
     argv = [str(repo) if value == "{repo}" else value for value in argv]
-    # The session that runs finish may be bound to another task; like CI, a
-    # validation gets its checkout from cwd and {repo}, never a task binding.
     environment = {key: value for key, value in os.environ.items()
                    if not key.upper().startswith("WORKSPACE_LIFECYCLE_")}
     try:
@@ -539,8 +530,6 @@ def _validate(repo: Path, argv: list[str]) -> dict:
     return evidence
 
 
-# The documented preflight exit statuses. The configured preflight may be
-# another install, so this does not import the bundled one.
 PREFLIGHT_EXIT = {"push": 0, "hold": 10, "ask": 11}
 
 
@@ -640,7 +629,6 @@ def _checked_paths(repo, entries, *, need, owner, completed=None):
             continue
         if need == 'source' and item.get('deleted') is True:
             previous = subprocess.run(['git', '-C', str(repo), 'cat-file', '--filters', 'HEAD:' + name], capture_output=True)
-            # After a recorded commit, the exact before-image remains in its parent.
             if previous.returncode:
                 previous = subprocess.run(['git', '-C', str(repo), 'cat-file', '--filters', 'HEAD^:' + name], capture_output=True)
             if (candidate.exists() or candidate.is_symlink() or previous.returncode
@@ -856,7 +844,7 @@ def _resolve_files(repo, plan, intent, directory, state):
         if tracked:
             git(repo, 'restore', '--source=HEAD', '--staged', '--worktree', '--', name)
         elif path.exists():
-            path.unlink()  # exact owned reproducible file, never a recursive clean
+            path.unlink()
         intent['actions'][name]['phase'] = 'resolved'; save_state(directory, state)
 
 
@@ -941,8 +929,6 @@ def _pushed(task):
 
 
 def _is_candidate(task):
-    # Finish keeps only one of them; an acceptance beside a candidate was
-    # written later by an earlier version, which does not know candidates.
     return 'candidate' in task and 'acceptance' not in task
 
 
@@ -967,8 +953,6 @@ def _acceptance_holds(repo, task, branch, identity, plan_digest, result_ref):
 
 
 def _refuse_pending_merge(state, branch):
-    # A pending merge may hold an unpushed commit that failed validation in
-    # this branch's checkout; nothing may accept, build on or push it.
     for other, operation in state['intents'].items():
         if operation.get('kind') == 'merge' and operation['target'] == branch:
             raise LifecycleError('pending integration of ' + other + ' holds ' + branch)
@@ -990,8 +974,6 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                                      or not revision_head or any(c not in '0123456789abcdef' for c in revision_head)):
         raise LifecycleError('HEAD revision requires a full commit OID and durable evidence')
     plan_digest = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
-    # A saved release lets retire --pending retire the task, so with a check
-    # wait it is saved only once the integrated commit's checks allow it.
     release_now = users_released and wait_checks is None
     with _lease(repo, task_id, allow_use=True):
         with locked_state(repo) as (directory, state):
@@ -1009,9 +991,6 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
             accepted_revision_retry = False
             if revision_head is not None:
                 if not intent or intent['kind'] != 'finish':
-                    # Acceptance may have been saved before an interrupted
-                    # integration. Repeating the recovery arguments still joins
-                    # that ordinary integration; it never starts a new revision.
                     receipts = task.get('finish_receipts', [])
                     previous = receipts[-1] if receipts else {}
                     if (previous.get('new_initial_head') != revision_head
@@ -1039,9 +1018,6 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     _operation_check(repo, 'finish HEAD revision')
                     if git(repo, 'merge-base', '--is-ancestor', old_head, revision_head, optional=True) is None:
                         raise LifecycleError('revision head must descend from the original finish HEAD')
-                    # The lifecycle lock cannot serialize native Git writers. Pin
-                    # the caller-reviewed OID and compare again before replacement;
-                    # a later move is refused by the ordinary pinned-HEAD check.
                     if _finish_checkpoint(repo, task_id, branch) != (identity, revision_head):
                         raise LifecycleError('HEAD or identity changed during finish revision')
                     _operation_check(repo, 'finish HEAD revision')
@@ -1063,8 +1039,6 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
             accepted_resume = (not intent and revision_evidence is None
                                and _acceptance_holds(repo, task, branch, identity, plan_digest, result_ref))
             if accepted_revision_retry or accepted_resume or (intent and intent['kind'] != 'finish'):
-                # A preserved integration operation belongs to _integrate; do
-                # not replace it or recommit the accepted source on resume.
                 accepted = _pushed(task)
                 if not accepted or accepted['commit'] != head(repo):
                     raise LifecycleError('pending operation does not match accepted source')
@@ -1104,8 +1078,6 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 if intent.get('synchronization') and not synchronized_head:
                     raise LifecycleError('resume the pending synchronization before finish')
                 if head(repo) not in {intent['initial_head'], intent.get('committed'), synchronized_head}:
-                    # Crash after commit but before receipt: prove the exact
-                    # planned tree and sole parent from native immutable objects.
                     expected_tree = intent.get('commit_tree')
                     parents = (git(repo, 'rev-list', '--parents', '-n', '1', 'HEAD') or '').split()
                     if not expected_tree or git(repo, 'rev-parse', 'HEAD^{tree}') != expected_tree or parents[1:] != [intent['initial_head']]:
@@ -1130,11 +1102,6 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     raise LifecycleError('index contains changes outside the owned finish plan')
                 dirty = _snapshot(repo, excluded=_preserved_paths(task))
                 uncovered = set(dirty) - set(all_paths)
-                # Safe owned actions run first. Remaining dirt is never waived
-                # merely because it existed before this session. No plan action
-                # touches uncovered dirt, so refuse what the final check would
-                # refuse before validation, commit and push; the final check
-                # still catches dirt that validation creates.
                 leftover, _ = _unexcused_dirty(repo, task, {name: dirty[name] for name in uncovered})
                 early = None
                 if leftover:
@@ -1155,9 +1122,6 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 if start_head not in {intent['initial_head'], intent.get('committed'), synchronized_head}:
                     raise LifecycleError('HEAD changed before finish preservation')
                 _operation_check(repo, 'finish preservation')
-                # Validation runs once, after preservation and the commit, on the
-                # exact HEAD that is pushed. A failure leaves the recorded commit
-                # and actions in this intent; the same plan resumes them.
                 _resolve_files(repo, plan, intent, directory, state)
                 _check_preserved(repo, task)
                 _checked_paths(repo, plan.get('commit', []), need='source', owner=task_id,
@@ -1180,10 +1144,6 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                         if parents[1:] != [start_head] or git(repo, 'rev-parse', committed_head + '^{tree}') != intent['commit_tree']:
                             raise LifecycleError('finish commit identity changed')
                         intent['committed'] = committed_head; save_state(directory, state)
-                # With required checks, the topic CI checks this exact commit and
-                # the target validates what is pushed before it is accepted, so
-                # the task checkout is not validated; it only becomes a
-                # candidate. Checks that cannot be read keep the validation.
                 current_head = head(repo)
                 candidate = ((task.get('integrated') or {}).get('source') != current_head
                              and bool(_gated_checks(repo, task, current_head)))
@@ -1206,8 +1166,6 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 task.pop('exception', None)
                 record = {'commit': commit, 'result_ref': result_ref, 'push': pushed,
                           'finish_input': _finish_input(repo, task, identity, plan_digest)}
-                # Only one of them describes the current source; an older
-                # acceptance must not let dependents or retirement use it.
                 task.pop('acceptance', None); task.pop('candidate', None)
                 if candidate:
                     task['candidate'] = record = {**record, 'pushed_at': _now()}
@@ -1224,15 +1182,11 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     task['preservation_evidence'] = _bind_preservation_evidence(
                         task.get('preservation_evidence'), reclaim_evidence)
                 if release_now and not candidate:
-                    # Save acceptance and last-user release together. A crash
-                    # before the callback must not lose the pending request.
                     _release_users(task, result_ref, commit)
                 state['intents'].pop(task_id, None); save_state(directory, state)
     if wait_checks is None:
         integration = _integrate(repo, task_id, result_ref)
     else:
-        # Integrate and validate in the target while the accepted commit's
-        # checks run; push only once they succeed, otherwise undo the target.
         integration = _integrate(repo, task_id, result_ref, prepare=True)
         prepared = integration.get('prepared')
         if prepared:
@@ -1248,8 +1202,6 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 raise
     result = {'task': task_id, 'accepted': True, 'commit': commit, 'result_ref': result_ref, 'integration': integration}
     if wait_checks is not None:
-        # Retirement waits for the integrated commit's checks, so a failure
-        # still has its task checkout for a fix or revert.
         result['integration_checks'] = _await_integration_checks(repo, task_id, wait_checks)
         if result['integration_checks']['state'] not in ('success', 'undeclared'):
             return result
@@ -1266,8 +1218,6 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
             remote = _task(state, task_id)['remote']
         control = task_worktree(repo, remote_default(repo, remote))
         retire(control, task=task_id, result_ref=result_ref, users_released=True, request_only=True)
-        # The recorded request carries the release and preservation evidence, so
-        # this one command resumes retirement and reclaim from outside the task.
         resume = {'cwd': str(control), 'argv': [os.sys.executable, '-m', 'workspace_lifecycle', '--repo', str(control),
                                                 'retire', '--task', task_id, '--result-ref', result_ref]}
         cwd = Path.cwd().resolve()
@@ -1401,8 +1351,6 @@ def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
         if git(repo, 'merge-base', '--is-ancestor', remote_head, current, optional=True) is not None:
             pass
         elif git(repo, 'merge-base', '--is-ancestor', current, remote_head, optional=True) is not None:
-            # Validate the incoming tree without accepting it. The subsequent
-            # validation binds evidence to the actual new checkout.
             _refuse_ignored_collisions(repo, remote_head)
             git(repo, 'merge', '--ff-only', '--no-overwrite-ignore', remote_head)
         else:
@@ -1659,12 +1607,6 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
             gated = (_pushed(item) or {}).get('commit')
             pending = state['intents'].get(task_id)
             settled = (item.get('integrated') or {}).get('source') == gated or pending
-        # Query outside the state lock; the leases pin this task and its target.
-        # A declaration added or strengthened since the task began closes the gate
-        # until the task requires it too; a pending merge keeps its decision.
-        # A declaration the accepted commit itself changes must pass on that commit.
-        # An integration prepared ahead of its checks has not decided yet, so
-        # it reads the declaration again like a new one.
         deferred = bool(pending) and pending.get('deferred') and not pending.get('remote_checks')
         def withdraw():
             if deferred:
@@ -1740,7 +1682,6 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                     holder = item.get('integration_synchronization', {})
                     pending = holder.get('synchronization')
                     if pending and pending.get('commit') == head(target_worktree):
-                        # The exact prior synchronization is already complete.
                         target_head = pending['commit']
                     elif pending and not pending.get('commit'):
                         target_head = pending['local']
@@ -1802,8 +1743,6 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                     if git(repo, 'merge-base', '--is-ancestor', source_commit, current, optional=True) is not None:
                         intent['merged'] = current
                     elif git(repo, 'merge-base', '--is-ancestor', current, source_commit, optional=True) is not None:
-                        # The target has not moved past the accepted commit, so
-                        # that commit is the integration and keeps its SHA.
                         _index_protection(target_worktree)
                         _refuse_ignored_collisions(target_worktree, source_commit)
                         git(target_worktree, 'merge', '--ff-only', '--no-overwrite-ignore', source_commit)
@@ -1853,13 +1792,6 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                             holder=intent, persist=lambda: save_state(directory, state), workspace_record=parent,
                             ignored=parent is not None)
                         merged = synced['commit']
-                # Validate the commit about to be pushed, not the merge state
-                # before it: a validator may read HEAD's metadata, not only its
-                # tree. Both the child and its parent contract must hold for the
-                # new parent identity before it can progress to the next edge.
-                # The same finish may reuse the run it made while the checks
-                # ran: the commit and checkout are the same, the checkout is
-                # clean and its preserved data is checked unchanged below.
                 if reuse and reuse['commit'] == merged:
                     evidence = {**reuse['validation'], 'reused': 'prepared integration'}
                     parent_evidence = {**reuse['parent_validation'], 'reused': 'prepared integration'} if parent else None
@@ -1868,9 +1800,6 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                         evidence = _validate(target_worktree, item['validation'])
                         parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
                     except LifecycleError as exc:
-                        # A prepared integration is not pushed yet. Returning its
-                        # target releases the intent, so update-validation can
-                        # correct a wrong validator before the finish is repeated.
                         try:
                             _withdraw(repo, task_id, state, directory)
                         except LifecycleError as undo:
@@ -1889,8 +1818,6 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                                   **({'source_checks_policy': proposed} if proposed else {}))
                     save_state(directory, state)
                 if _is_candidate(item):
-                    # The source's checks succeeded and the target validated
-                    # the exact commit pushed next: the candidate is accepted.
                     candidate = item.pop('candidate')
                     item['acceptance'] = {**candidate, 'validation': {'integration': evidence},
                                           'remote_checks': intent['remote_checks'], 'accepted_at': _now()}
@@ -1948,8 +1875,6 @@ def _retirement_contents(workspace):
                     empty_directories.add(logical)
             elif logical not in tracked or not stat.S_ISREG(info.st_mode):
                 raise LifecycleError('retire refuses nontracked or special filesystem content')
-    # An ignored Git entry is admissible only when this filesystem walk proved
-    # it is an unowned directory tree containing no files or protected objects.
     if any(name.rstrip('/') not in empty_directories for name in snapshot):
         raise LifecycleError('retire refuses ignored filesystem content')
 
@@ -2318,8 +2243,6 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
         expected = deepcopy(receipt)
 
         def persist():
-            # Re-read the common state and replace only this task's receipt.
-            # Never publish a snapshot captured before another task's update.
             nonlocal expected
             with locked_state(repo) as (directory, latest):
                 if task in latest.get('tasks', {}) or latest.get('retired', {}).get(task) != expected:
@@ -2353,8 +2276,6 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
         receipt['preservation_evidence'] = preservation_evidence
         if not receipt.get('reclaim_phase'):
             receipt['reclaim_phase'] = 'requested'
-        # Evidence and the pending request become durable together, including
-        # explicit late-evidence reclamation. A fetch failure cannot lose it.
         persist()
         try:
             if not receipt.get('users_released'):
@@ -2386,9 +2307,6 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
                         raise LifecycleError('recovery payload disappeared before reclaim')
                     payload = reclamation.capture(recovery, receipt['content_manifest'], receipt['recovery_identity'])
                     admin = reclamation.capture(archive, receipt['admin_manifest'], receipt['admin_identity'])
-                    # New retirement receipts retain member identities, which
-                    # stay the evidence even from another mount session. A legacy
-                    # receipt is bound to its original manifest before any intent.
                     for key, snapshot in (('payload_progress', payload), ('admin_progress', admin)):
                         if key not in receipt:
                             receipt[key] = snapshot
@@ -2413,9 +2331,6 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
                     raise LifecycleError('reclaim staging identity changed')
                 if _tree_manifest(staging) != receipt['content_manifest']:
                     raise LifecycleError('recovery content changed after rename; holding payload')
-                # Receipts interrupted by the earlier implementation may have an
-                # authorization but no per-member snapshot yet. Capture only
-                # while the original complete manifest can still be proved.
                 if 'payload_progress' not in receipt:
                     receipt['payload_progress'] = reclamation.capture(staging, receipt['content_manifest'], receipt['recovery_identity'])
                 if 'admin_progress' not in receipt:
@@ -2457,8 +2372,6 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
                 'reason': str(exc), 'at': _now(),
                 'next_action': 'Release conflicting use or repair the recorded identity; retry the same reclaim request. Never replace its manifest.',
             }
-            # Saving the failure is best effort; the already durable request and
-            # intent remain authoritative if the storage failure also persists.
             try: persist()
             except (LifecycleError, OSError): pass
             raise
@@ -2497,8 +2410,6 @@ def retire_pending(repo, task: str | None = None) -> dict:
             if requested:
                 results.append(retire(repo, task=name, result_ref=reference))
             else:
-                # Integration rechecks exact accepted identities and resumes its
-                # existing intent. It cannot create acceptance for new work.
                 with locked_state(repo) as (_, state):
                     if _is_candidate(_task(state, name)):
                         raise LifecycleError('a candidate is accepted only by finish')
@@ -2536,8 +2447,6 @@ def before_run(repo, task: str, cwd=None, lexical_cwd=None) -> list[dict]:
                                  'inspect `status --task %s` and resolve its recorded retirement '
                                  'recovery before starting new use' % task)
         check_run_identity(repo, task)
-        # A hold stops acceptance and integration, not looking at or working in
-        # the checkout; the session learns why it was held.
         if item.get('hold'):
             return [{'task': task, 'hold': item['hold'],
                      'recovery': 'finish and sync stay refused until `release-hold --task %s '
@@ -2567,7 +2476,6 @@ def _check_preserved_cwd(repo, state, cwd):
 
 @operation()
 def check_preserved_cwd(cwd, repo=None):
-    # Inspect outer managed roots before probing a retired payload as live Git.
     cwd = Path(os.path.abspath(cwd))
     if repo is not None:
         with locked_state(repo) as (_, state):
@@ -2581,8 +2489,6 @@ def check_preserved_cwd(cwd, repo=None):
         if root is None or Path(root).resolve() != ancestor.resolve():
             continue
         common = Path(git(ancestor, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
-        # A legacy registry's repository is not supervised here, so its state
-        # selects no managed root; resolve-run launches it unmanaged.
         if (not (common / 'workspace-lifecycle' / 'state.json').is_file()
                 or (common / 'agent-branches' / 'state.json').exists()):
             continue

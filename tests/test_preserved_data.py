@@ -90,7 +90,6 @@ class PreservedDataTest(unittest.TestCase):
         good, payload, admin, receipt = self.retired()
         old, old_payload, old_admin, old_receipt = self.retired('old', legacy=True)
         before = self.tree(payload, admin, receipt, old_payload, old_admin, old_receipt)
-        # Prove adoption never consults either retired checkout through live Git.
         original = adoption.top
         def top(path):
             self.assertNotIn(Path(path), (payload, old_payload))
@@ -131,7 +130,6 @@ class PreservedDataTest(unittest.TestCase):
                 'import os; print(os.environ["WORKSPACE_LIFECYCLE_TASK"])'], capture_output=True, text=True)
             self.assertEqual(command.returncode, 0, command.stderr)
             self.assertEqual(command.stdout.strip(), task)
-        # An active child's untracked checkout remains owned by that child.
         (self.root / '.git' / 'info' / 'exclude').write_text('consumer/\n')
         completed = service.finish(self.root, task='primary', plan_path=str(self.feature_plan()), result_ref='issue/primary')
         self.assertTrue(completed['accepted'])
@@ -185,7 +183,6 @@ class PreservedDataTest(unittest.TestCase):
     def test_interrupted_identical_intent_resumes_without_content_ownership(self):
         entry, payload, _, _ = self.retired('old', legacy=True)
         self.interrupt([entry])
-        # Foreign owner's data changes do not make root its content owner.
         (payload / 'private').write_text('foreign owner still owns this file')
         self.assertFalse(self.adopt([entry])['accepted'])
 
@@ -230,8 +227,6 @@ class PreservedDataTest(unittest.TestCase):
         entry.update(path='active', identity=self.identity(active))
         with self.assertRaisesRegex(LifecycleError, 'active Git worktree'):
             self.adopt([entry])
-        # Independent live Git isn't in our native worktree list, but its admin
-        # is present and must never be treated as retired either.
         independent = self.root / 'independent'
         test_lifecycle.run(self.other.root, 'worktree', 'add', '-b', 'topic/independent', str(independent))
         entry.update(path='independent', identity=self.identity(independent))

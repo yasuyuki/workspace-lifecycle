@@ -1066,7 +1066,6 @@ class FinishRetireReclaimTests(unittest.TestCase):
         self.assertEqual(receipt['preservation_evidence'], self.evidence)
         self.assertEqual(run(self.root, 'rev-parse', 'refs/heads/topic/one'), receipt['commit'])
 
-        # link
         self.tearDown(); self.setUp()
         def link_then_reclaim(repo, **kwargs):
             state = self._state()
@@ -1087,7 +1086,6 @@ class FinishRetireReclaimTests(unittest.TestCase):
         self.assertEqual(retired['receipt']['reclaim_phase'], 'requested')
         self.assertTrue(retired['receipt']['reclaim_failure']['reason'])
 
-        # nested repo
         self.tearDown(); self.setUp()
         def nest_then_reclaim(repo, **kwargs):
             state = self._state()
@@ -1106,7 +1104,6 @@ class FinishRetireReclaimTests(unittest.TestCase):
         self.assertEqual(retired['receipt']['reclaim_phase'], 'requested')
         self.assertTrue(retired['receipt']['reclaim_failure']['reason'])
 
-        # mount
         self.tearDown(); self.setUp()
         def mount_then_reclaim(repo, **kwargs):
             state = self._state()
@@ -1127,12 +1124,10 @@ class FinishRetireReclaimTests(unittest.TestCase):
         self.assertEqual(retired['receipt']['reclaim_phase'], 'requested')
         self.assertTrue(retired['receipt']['reclaim_failure']['reason'])
 
-        # commit left remote default
         self.tearDown(); self.setUp()
         def orphan_then_reclaim(repo, **kwargs):
             state = self._state()
             commit = state['retired']['one']['commit']
-            # Move trunk so accepted commit is no longer an ancestor of remote default tip.
             run(self.root, 'checkout', '--orphan', 'fresh')
             (self.root / 'README').write_text('other history\n')
             run(self.root, 'add', 'README')
@@ -1162,7 +1157,6 @@ class FinishRetireReclaimTests(unittest.TestCase):
         def crash_once(repo, **kwargs):
             calls['n'] += 1
             if calls['n'] == 1:
-                # Receipt already saved by retire before this call.
                 state = self._state()
                 self.assertEqual(state['retired']['one']['reclaim_phase'], 'requested')
                 raise OSError('crash after receipt')

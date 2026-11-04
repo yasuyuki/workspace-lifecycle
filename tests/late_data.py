@@ -14,8 +14,6 @@ IGNORE = '*.log\n'
 # Git's refusal of untracked data in the way of what it writes.
 REFUSAL = 'would (be overwritten|be removed|lose untracked files)'
 
-# Each shape: the tracked path Git brings into the checkout, and the ignored
-# files the other process writes where that path, or one of its parents, goes.
 SHAPES = {
     'file': ('late.log', ('late.log',)),
     'directory': ('dir.log', ('dir.log/inner.txt',)),

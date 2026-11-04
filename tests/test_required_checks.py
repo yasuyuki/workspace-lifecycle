@@ -392,7 +392,6 @@ class RequiredChecksTest(unittest.TestCase):
         self.start("wait", required=(TEST, LINT))
         commit = lambda: self.pushed("wait")
         def unlocked():
-            # Waiting holds neither the state lock nor the integration target's lease.
             status(self.topic, "wait")
             with service._lease(self.root, "@default"):
                 pass
@@ -619,8 +618,6 @@ class RequiredChecksTest(unittest.TestCase):
         declared = []; before = run(self.root, "rev-parse", "HEAD")
         other = Path(self.temp.name) / "other"
         def declare():
-            # Published from another clone: the integration checkout holds
-            # the integration prepared while the checks run.
             run(self.root.parent, "clone", "-q", str(self.remote), str(other))
             (other / ".github").mkdir(exist_ok=True)
             (other / ".github" / "required-checks.json").write_text(json.dumps([TEST, LINT]))
@@ -686,8 +683,6 @@ class RequiredChecksTest(unittest.TestCase):
     def test_resume_with_another_push_url_accepts_again(self):
         mirror = Path(self.temp.name) / "mirror.git"
         run(self.root, "clone", "-q", "--bare", str(self.remote), str(mirror))
-        # The checks of an unknown push repository cannot be read, so the
-        # task checkout is validated as without required checks.
         self.accepts_again("push-url", lambda: run(self.topic, "remote", "set-url", "--push", "origin", str(mirror)),
                            "PUSH_REPOSITORY_MISMATCH", validated=1)
 

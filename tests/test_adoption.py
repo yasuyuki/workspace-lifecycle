@@ -158,7 +158,6 @@ class AdoptionTests(unittest.TestCase):
         with patch.object(adoption, 'save_state', side_effect=crash):
             with self.assertRaises(LifecycleError):
                 self.adopt(task='primary', worktree=str(self.f.root), branch='topic/primary')
-        # A replacement at the same path must not satisfy the saved intent.
         nested.rename(Path(self.f.temp.name) / 'saved-member')
         test_lifecycle.run(self.f.root, 'clone', str(self.f.remote), str(nested))
         with self.assertRaisesRegex(LifecycleError, 'snapshot changed'):
@@ -198,7 +197,6 @@ class AdoptionTests(unittest.TestCase):
             finish(self.f.root, task='primary', plan_path=str(plan), result_ref='issue/primary')
         self.assertEqual(private.read_text(), 'member data')
         self.assertFalse(list(store.iterdir()))
-        # Losing the live marker does not transfer the member's data to its parent.
         (nested / '.git').rename(Path(self.f.temp.name) / 'saved-member-git')
         with self.assertRaisesRegex(LifecycleError, 'preserved nested Git checkout'):
             finish(self.f.root, task='primary', plan_path=str(plan), result_ref='issue/primary')
@@ -217,7 +215,6 @@ class AdoptionTests(unittest.TestCase):
         with patch.object(adoption.os.path, 'ismount', side_effect=lambda path: Path(path).resolve() == canonical_topic):
             with self.assertRaisesRegex(LifecycleError, 'mounted'):
                 self.adopt()
-        # An interrupted durable intent is tied to this physical checkout, not its path text.
         original = adoption.save_state
         def crash_after_intent(directory, state):
             original(directory, state); raise OSError('crash after intent')
@@ -282,7 +279,6 @@ adoption.adopt_existing(sys.argv[1], task='adopt', request='issue/adopt', remote
         test_lifecycle.run(self.topic, 'add', 'README')
         with patch.object(adoption, 'save_state', side_effect=crash_after_intent):
             with self.assertRaises(LifecycleError): self.adopt()
-        # HEAD and porcelain's staged status remain `M `, while the index blob changes.
         (self.topic / 'README').write_text('stage two\n')
         test_lifecycle.run(self.topic, 'add', 'README')
         with self.assertRaisesRegex(LifecycleError, 'snapshot changed'):
@@ -350,7 +346,6 @@ adoption.adopt_existing(sys.argv[1], task='adopt', request='issue/adopt', remote
         test_lifecycle.run(self.f.root, 'worktree', 'remove', '--force', str(duplicate))
         self.adopt()
         with self.assertRaises(LifecycleError): self.adopt()
-        # A retired task name remains an identity, even if its branch is still present.
         plan = self.plan('adopt', self.topic / 'f', 'f')
         finish(self.topic, task='adopt', plan_path=str(plan), result_ref='issue/adopt')
         retire(self.f.root, task='adopt', result_ref='issue/adopt', users_released=True)
@@ -409,7 +404,6 @@ adoption.adopt_existing(sys.argv[1], task='adopt', request='issue/adopt', remote
         hold(parent, 'parent', 'waiting on review', 'release with evidence')
         with self.assertRaises(LifecycleError):
             self.adopt(task='child', parent='parent', dependencies=['parent'])
-        # The task itself can be born held, but no work may start until explicit release.
         other = Path(self.f.temp.name) / 'held'
         test_lifecycle.run(self.f.root, 'worktree', 'add', '-b', 'topic/held', str(other))
         item = self.adopt(task='held', branch='topic/held', worktree=str(other),
@@ -441,7 +435,6 @@ adoption.adopt_existing(sys.argv[1], task='adopt', request='issue/adopt', remote
                 raise OSError('simulated interruption after intent write')
         with patch.object(adoption, 'save_state', side_effect=crash_once):
             with self.assertRaises(LifecycleError): self.adopt()
-        # No live task exists yet, so inspect the durable operation intent directly.
         from workspace_lifecycle.state import locked_state
         with locked_state(self.f.root) as (_, state):
             self.assertEqual(state['intents']['adopt']['kind'], 'adopt-existing')
@@ -473,7 +466,6 @@ adoption.adopt_existing(sys.argv[1], task='adopt', request='issue/adopt', remote
             return value
         with patch.object(adoption, 'git', side_effect=crash_after_binding):
             with self.assertRaises(LifecycleError): self.adopt()
-        # Porcelain status remains ??; only the captured dirty bytes changed.
         dirty.write_text('after!')
         with self.assertRaisesRegex(LifecycleError, 'snapshot changed'):
             self.adopt()
@@ -511,7 +503,6 @@ adoption.adopt_existing(sys.argv[1], task='adopt', request='issue/adopt', remote
 
     @unittest.skipUnless(hasattr(os, 'symlink'), 'symlink support unavailable')
     def test_dirty_symlink_leaf_is_preserved_as_baseline_content(self):
-        # Package-manager style ignored .bin entries are leaves, not traversal paths.
         (self.f.root / '.git' / 'info' / 'exclude').write_text('node_modules/\n')
         bin_dir = self.topic / 'node_modules' / '.bin'; bin_dir.mkdir(parents=True)
         link = bin_dir / 'tool'

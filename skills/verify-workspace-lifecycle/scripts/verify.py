@@ -22,8 +22,6 @@ import time
 
 TASK = "shared"
 UNMANAGED_EXIT = 41
-# A session records what the lifecycle gave it, signals readiness and waits for
-# the gate, so both sessions are provably alive at the same time.
 SESSION = """import json, os, pathlib, sys, time
 name, gate, out = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
 record = {'name': name, 'cwd': os.getcwd(), 'task': os.environ.get('WORKSPACE_LIFECYCLE_TASK'),
@@ -50,7 +48,7 @@ NOT_RUN = ["held-task launch notice", "detached task worktree", "legacy-registry
            "run --task", "finish and retire under shared use", "Windows Job reentry of nested agents",
            "0.4 supervisor coexistence", "console signals", "other OS than the one running the helper"]
 SKIP = shutil.ignore_patterns(".git", "build", "dist", "*.egg-info", "__pycache__", ".venv")
-DEADLINE = 60  # seconds for two fixture sessions to start; startup takes about one second.
+DEADLINE = 60
 
 
 def sha(data):
@@ -132,7 +130,7 @@ def run(repo, evidence_root=None, doctor_only=False, agent="unknown"):
         result["artifacts"].append(name or path.name)
         record()
 
-    record()  # Expectations exist before the first operation.
+    record()
     try:
         result["target"] = doctor(repo)
         if doctor_only:
@@ -264,7 +262,6 @@ def run(repo, evidence_root=None, doctor_only=False, agent="unknown"):
         result["status"] = result["feature_status"] = "pass"
     except (OSError, ValueError, AssertionError, KeyError, IndexError, subprocess.TimeoutExpired) as exc:
         result["error"] = type(exc).__name__ + ": " + str(exc)
-        # Preparation errors stay blocked; mismatches after Drive stay fail.
     finally:
         if scratch is not None:
             if gate is not None:
@@ -273,7 +270,7 @@ def run(repo, evidence_root=None, doctor_only=False, agent="unknown"):
                 try:
                     stdout, stderr = child.communicate(timeout=DEADLINE)
                 except subprocess.TimeoutExpired:
-                    child.kill()  # Only this run's own session process.
+                    child.kill()
                     stdout, stderr = child.communicate()
                 log("session " + name, argv, scratch, child.returncode, stdout, stderr)
             try:

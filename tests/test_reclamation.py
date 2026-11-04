@@ -186,7 +186,6 @@ class ReclamationTests(unittest.TestCase):
         def persist():
             self.persist(progress, durable)
             calls["n"] += 1
-            # First persistence contains the exact capture, before root intent.
             if calls["n"] == 1:
                 old = self.root / "one.old"
                 (self.root / "one").rename(old)

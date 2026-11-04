@@ -833,7 +833,6 @@ class IntegrationValidationTest(unittest.TestCase):
         self.begin_candidate()
         self.force_commit(self.topic, 'build.log', 'incoming\n')
         self.assert_collision(r'build\.log \(ignored data at incoming path\)', merge=merge)
-        # The refusal keeps the pending integration; moving the data aside resumes it.
         (self.root / 'build.log').rename(self.base / 'build.log')
         self.assertTrue(self.finish()['accepted'])
         self.assertEqual((self.root / 'build.log').read_text(), 'incoming\n')
@@ -927,7 +926,6 @@ class IntegrationValidationTest(unittest.TestCase):
         self.assertTrue(self.finish()['accepted'])
 
     def test_returning_to_an_earlier_head_over_ignored_data_is_refused(self):
-        # A withdrawal resets the target to its HEAD before the preparation.
         self.keep_cache()
         self.force_commit(self.root, 'old.log', 'tracked\n')
         before = git(self.root, 'rev-parse', 'HEAD')
