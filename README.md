@@ -66,8 +66,8 @@ count if lower. Failed tests are printed with their output and the exit code is
 1; a test that fails to import or an empty selection also fails.
 `--shard K/N` runs every Nth collected test starting at the Kth, so shards 1/N
 to N/N together run the selection once. CI runs the same entry with `--wheel` on
-the built wheel, on Windows as four shards whose `package (windows-latest, 3.14)`
-check succeeds only when all four do.
+the built wheel, on Windows as eight shards whose `package (windows-latest, 3.14)`
+check succeeds only when all eight do.
 
 A lifecycle task of this repository does not register the suite as its
 validation. Both CI jobs are required checks, so finish already waits for the

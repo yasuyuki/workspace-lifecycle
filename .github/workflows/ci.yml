@@ -18,11 +18,13 @@ jobs:
       - name: Test the wheel outside checkout
         run: python -B tests/run.py --wheel dist/*.whl
   # One saturated 4-vCPU Windows runner took about 16 minutes for the suite (#37, #62).
+  # With four shards the slowest test step still took 290-330 s against about
+  # 40-70 s of setup per shard, and finish waits for this job twice (#37).
   windows-shard:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1/4, 2/4, 3/4, 4/4]
+        shard: [1/8, 2/8, 3/8, 4/8, 5/8, 6/8, 7/8, 8/8]
     name: windows shard ${{ matrix.shard }}
     runs-on: windows-latest
     steps:
