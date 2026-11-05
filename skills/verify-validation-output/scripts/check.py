@@ -22,9 +22,8 @@ TLC_VERSION = 'TLC2 Version 2.19 of 08 August 2024'
 EXPECTED = {
     'clean': None,
     'candidate-default-writes': None,
-    'task-writes': 'NoSelfInflictedRefusal',       # workspace-lifecycle#38
-    'task-writes-loop': 'FinishCompletes',         # workspace-lifecycle#38
-    'candidate-parent-writes': 'NoSelfInflictedRefusal',  # workspace-lifecycle#89
+    'task-writes': None,
+    'candidate-parent-writes': None,
 }
 
 # (name, code it stands for, configuration, rule, model text, broken text)
@@ -34,11 +33,26 @@ MUTANTS = [
      'AcceptedClean',
      '  /\\ IF task # {}\n       THEN Refuse(task)',
      '  /\\ IF FALSE\n       THEN Refuse(task)'),
-    ('the default branch target counts its ignored data',
-     'service.py _target_snapshot() `ignored=parent is not None`', 'candidate-default-writes',
+    ('validation leaves its declared outputs',
+     'service.py _run_validation() removes declared outputs the run created', 'task-writes',
      'NoSelfInflictedRefusal',
-     'TargetDirt == IF kind = "parent" THEN target ELSE {}',
-     'TargetDirt == target'),
+     'Sweep(paths) == IF declared THEN paths \\cap made ELSE {}',
+     'Sweep(paths) == {}'),
+    ('the cleanup removes files the run did not create from its declaration',
+     'service.py _run_validation() `name in before` and the declared patterns', 'task-writes',
+     'ForeignKept',
+     'Sweep(paths) == IF declared THEN paths \\cap made ELSE {}',
+     'Sweep(paths) == IF declared THEN paths \\cap (made \\cup {"foreign"}) ELSE {}'),
+    ('a refusal does not say the validation created the file',
+     'service.py _created_hint() in finish() and _integrate()', 'task-writes',
+     'FinishCompletes',
+     "declared' = (declared \\/ refused \\cap made # {})",
+     "declared' = declared"),
+    ('update-validation refuses to declare outputs for a candidate beside its pending merge',
+     'service.py update_validation() `outputs_only`', 'candidate-parent-writes',
+     'FinishCompletes',
+     "declared' = (declared \\/ refused \\cap made # {})",
+     "declared' = (declared \\/ (~accepted /\\ refused \\cap made # {}))"),
     ('archived files stay in the checkout',
      'service.py _resolve_files() moves each archive entry out before validation', 'clean',
      'FinishCompletes',

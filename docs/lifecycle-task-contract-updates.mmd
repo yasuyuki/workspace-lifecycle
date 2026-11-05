@@ -13,6 +13,6 @@ stateDiagram-v2
   Current --> Pending : finish などが途中で止まる
   Pending --> Current : 既存の回復手順で解消
   Accepted --> Retiring : 退役を開始
-  %% update-validation は受入済み・pending・利用中を拒否する
+  %% update-validation は受入済み・pending・利用中を拒否する（argv を変えず --validation-outputs-json だけを変える訂正は、受入済みと pending の統合でも受け付ける）
   %% update-preflight は pending と利用中を拒否し、退役中の task は取り替えられない
   %% update-required-checks は pending 中を拒否する

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import stat
 import subprocess
@@ -199,8 +199,9 @@ def _no_links(path, stop=None):
 def begin(repo, *, task: str, request: str, remote: str, branch: str, worktree: str,
           parent: str | None = None, dependencies: list[str] | None = None,
           validation: list[str] | None = None, preflight: list[str] | None = None,
-          required_checks: list[dict] | None = None) -> dict:
+          required_checks: list[dict] | None = None, validation_outputs: list[str] | None = None) -> dict:
     repo = Path(repo).resolve(); dependencies = dependencies or []
+    validation_outputs = _output_patterns(validation_outputs or [])
     required_checks = None if required_checks is None else checks.parse(required_checks)
     if not task or not request or not branch or not worktree or '\n' in task or '\0' in task:
         raise LifecycleError('task, request, branch, and worktree are required')
@@ -220,6 +221,8 @@ def begin(repo, *, task: str, request: str, remote: str, branch: str, worktree: 
                'parent': parent, 'dependencies': dependencies, 'validation': validation, 'preflight': preflight}
     if required_checks:
         desired['required_checks'] = required_checks
+    if validation_outputs:
+        desired['validation_outputs'] = validation_outputs
     with ExitStack() as stack:
         for identity in sorted({task, *dependencies, *([parent] if parent else [])}):
             stack.enter_context(_lease(repo, identity))
@@ -279,6 +282,7 @@ def begin(repo, *, task: str, request: str, remote: str, branch: str, worktree: 
             state['tasks'][task] = {'request': request, 'remote': remote,
                 'integration': intent['integration'], 'dependencies': dependencies,
                 'validation': validation, 'preflight': preflight,
+                **({'validation_outputs': validation_outputs} if validation_outputs else {}),
                 'baseline_dirty': _snapshot(target), 'created_at': _now(),
                 **_required_checks_fields(intent)}
             state['intents'].pop(task); save_state(directory, state)
@@ -340,9 +344,17 @@ def update_preflight(repo, *, task: str, expected_preflight: list[str],
 
 @operation()
 def update_validation(repo, *, task: str, expected_head: str,
-                      expected_validation: list[str], validation: list[str], evidence: str) -> dict:
-    """Correct an unaccepted task's validator without changing its contract history."""
+                      expected_validation: list[str], validation: list[str], evidence: str,
+                      outputs: list[str] | None = None) -> dict:
+    """Correct an unaccepted task's validator without changing its contract history.
+
+    ``outputs`` replaces the declared validator outputs. Declaring outputs with
+    an unchanged argv changes nothing an acceptance was decided from, so it is
+    also accepted for an accepted task and beside a pending integration.
+    """
     repo = top(repo)
+    if outputs is not None:
+        outputs = _output_patterns(outputs)
     if (not isinstance(expected_validation, list)
             or not all(isinstance(x, str) and x for x in expected_validation)):
         raise LifecycleError('expected validation requires a string argv array')
@@ -357,32 +369,41 @@ def update_validation(repo, *, task: str, expected_head: str,
             intent = state['intents'].get(task)
             if item.get('retire'):
                 raise LifecycleError('pending task operation prevents validation update')
-            if item.get('acceptance'):
+            outputs_only = outputs is not None and validation == expected_validation
+            if item.get('acceptance') and not outputs_only:
                 raise LifecycleError('accepted task validation cannot be replaced')
             branch = branch_for_task(repo, task)
             identity = _finish_identity(repo, task, branch)
             if expected_head != head(repo):
                 raise LifecycleError('validation update HEAD mismatch; supply the exact full commit OID')
             _operation_check(repo, 'validation update')
-            effectless = intent and _effectless_finish(intent, identity, expected_head)
-            if intent and not effectless and not _recorded_finish(repo, intent, identity, expected_head):
+            effectless = intent and not outputs_only and _effectless_finish(intent, identity, expected_head)
+            if (intent and not outputs_only and not effectless
+                    and not _recorded_finish(repo, intent, identity, expected_head)):
                 raise LifecycleError('pending task operation prevents validation update')
             if item.get('validation') != expected_validation:
                 raise LifecycleError('validation CAS mismatch')
             receipt = {'from': list(expected_validation), 'to': list(validation),
                        'evidence': evidence, 'head': expected_head, 'identity': identity, 'at': _now()}
+            if outputs is not None:
+                receipt.update(outputs_from=item.get('validation_outputs', []), outputs_to=outputs)
             _operation_check(repo, 'validation update')
             if _finish_checkpoint(repo, task, branch) != (identity, expected_head):
                 raise LifecycleError('HEAD or identity changed during validation update')
-            if intent and _index_paths(repo):
+            if intent and not outputs_only and _index_paths(repo):
                 raise LifecycleError('pending task operation prevents validation update')
             item['validation'] = list(validation)
+            if outputs:
+                item['validation_outputs'] = outputs
+            elif outputs is not None:
+                item.pop('validation_outputs', None)
             item.setdefault('validation_updates', []).append(receipt)
             if effectless:
                 item.setdefault('finish_receipts', []).append({**intent, 'validation_update': receipt})
                 state['intents'].pop(task)
             save_state(directory, state)
-    return {'task': task, 'validation': list(validation)}
+    return {'task': task, 'validation': list(validation),
+            **({'validation_outputs': outputs} if outputs is not None else {})}
 
 
 _FINISH_INTENT_FIELDS = {'kind', 'initial_head', 'plan_digest', 'result_ref', 'actions', 'at', 'identity'}
@@ -519,6 +540,8 @@ def _validate(repo: Path, argv: list[str]) -> dict:
     argv = [str(repo) if value == "{repo}" else value for value in argv]
     environment = {key: value for key, value in os.environ.items()
                    if not key.upper().startswith("WORKSPACE_LIFECYCLE_")}
+    # Python children of the validator inherit this; -B reaches only the first interpreter (#38).
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         result = subprocess.run(argv, cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=environment)
@@ -528,6 +551,65 @@ def _validate(repo: Path, argv: list[str]) -> dict:
     evidence = {"argv": argv, "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
     if result.returncode: raise LifecycleError("configured validation failed: " + json.dumps(evidence, ensure_ascii=True))
     return evidence
+
+
+def _output_patterns(value):
+    """Declared validator outputs: relative globs matched with PurePosixPath.full_match."""
+    if not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
+        raise LifecycleError('validation outputs require an array of nonempty glob patterns')
+    for pattern in value:
+        parts = PurePosixPath(pattern).parts
+        if (pattern.startswith('/') or '\\' in pattern or ':' in pattern
+                or any(part in ('..', '.git') for part in parts)):
+            raise LifecycleError('validation output pattern must be a relative glob inside the checkout: ' + pattern)
+    return list(value)
+
+
+def _outputs(*records):
+    """Declared outputs of each record's validator, keyed by its argv; equal argv share their patterns."""
+    outputs = {}
+    for record in records:
+        if record:
+            outputs.setdefault(json.dumps(record['validation']), []).extend(record.get('validation_outputs', []))
+    return outputs
+
+
+def _run_validation(repo: Path, argv: list[str], outputs=()) -> dict:
+    """_validate, then remove the declared outputs this run created.
+
+    Only an ignored regular file that was absent before the run and matches a
+    declared pattern is removed, also when the validator fails. Anything else the
+    run created stays for the dirt checks, which name it as created here.
+    """
+    before = _snapshot(repo)
+    try:
+        evidence = _validate(repo, argv)
+    finally:
+        after = _snapshot(repo)
+        removed = []
+        for name, code in sorted(after.items()):
+            if (code != '!!' or name in before or name.endswith('/')
+                    or not any(PurePosixPath(name).full_match(pattern) for pattern in outputs)):
+                continue
+            try:
+                path = _file_path(repo, name)
+                if path.is_symlink() or not path.is_file():
+                    continue
+                path.unlink()
+            except (LifecycleError, OSError):
+                continue
+            removed.append(name)
+    created = sorted(set(after) - set(before) - set(removed))
+    return {**evidence, **({'removed_outputs': removed} if removed else {}),
+            **({'created': created} if created else {})}
+
+
+def _created_hint(paths, evidence):
+    created = sorted(set(paths) & {name for item in evidence if item for name in item.get('created', [])})
+    if not created:
+        return ''
+    return ('; validation created ' + _preview(created) + '; if the validator regenerates them, declare them'
+            ' with update-validation --validation-outputs-json so finish removes them after each run')
 
 
 PREFLIGHT_EXIT = {"push": 0, "hold": 10, "ask": 11}
@@ -1149,7 +1231,8 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 current_head = head(repo)
                 candidate = ((task.get('integrated') or {}).get('source') != current_head
                              and bool(_gated_checks(repo, task, current_head)))
-                evidence = None if candidate else _validate(repo, task['validation'])
+                evidence = None if candidate else _run_validation(repo, task['validation'],
+                                                                  task.get('validation_outputs', []))
                 _check_preserved(repo, task)
                 expected_finish_head = synchronized_head or intent.get('committed') or intent['initial_head']
                 if _finish_checkpoint(repo, task_id, branch) != (identity, expected_finish_head):
@@ -1157,7 +1240,13 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                 _operation_check(repo, 'finish validation')
                 final_dirty, waived = _unexcused_dirty(repo, task, _snapshot(repo, excluded=_preserved_paths(task)))
                 if final_dirty:
-                    exception = _exception(plan, final_dirty)
+                    try:
+                        exception = _exception(plan, final_dirty)
+                    except LifecycleError as exc:
+                        hint = _created_hint(final_dirty, [evidence])
+                        if not hint:
+                            raise
+                        raise LifecycleError(str(exc) + hint) from None
                     task['exception'] = exception
                     state['intents'].pop(task_id, None); save_state(directory, state)
                     return {'task': task_id, 'completion': 'exception', 'dirty': sorted(final_dirty)}
@@ -1259,7 +1348,7 @@ def _sync_identity(repo, branch, remote, remote_head, remote_url=None):
 
 
 def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
-                 validation, holder, persist, workspace_record=None, ignored=True):
+                 validation, holder, persist, workspace_record=None, ignored=True, outputs=None):
     """One exact native merge, shared by task repair and integration targets.
 
     The receipt extends an existing operation; it is never task acceptance.
@@ -1377,15 +1466,18 @@ def _synchronize(repo, *, branch, remote, expected_head, remote_head, evidence,
                                      stdout=subprocess.PIPE, check=True).stdout
         if {os.fsdecode(row) for row in differences.split(b'\0') if row} - set(receipt['conflicts']):
             raise LifecycleError('synchronization index changed outside the recorded conflict paths')
-    checked = [_validate(repo, argv) for argv in validation]
+    checked = [_run_validation(repo, argv, (outputs or {}).get(json.dumps(argv), [])) for argv in validation]
     _check_preserved(repo, workspace_record)
     _sync_identity(repo, branch, remote, observed_remote, receipt['remote_url'])
     if head(repo) != current or git(repo, 'write-tree') != tree:
         raise LifecycleError('HEAD or index changed during synchronization validation')
     if git(repo, 'rev-parse', '--verify', 'MERGE_HEAD', optional=True) != merge_head:
         raise LifecycleError('merge state changed during synchronization validation')
-    if _snapshot(repo, excluded=_preserved_paths(workspace_record), ignored=ignored) != dirty:
-        raise LifecycleError('validation changed synchronization working content')
+    changed = _snapshot(repo, excluded=_preserved_paths(workspace_record), ignored=ignored)
+    if changed != dirty:
+        moved = {name for name in set(changed) | set(dirty) if changed.get(name) != dirty.get(name)}
+        raise LifecycleError('validation changed synchronization working content: ' + _preview(moved)
+                             + _created_hint(moved, checked))
     if merge_head:
         receipt['tree'] = tree; persist()
         git(repo, 'commit', '-m', 'Merge same-name remote branch ' + branch)
@@ -1424,7 +1516,7 @@ def synchronize(repo, *, task, expected_head, remote_head, evidence):
                 if any(action['phase'] != 'resolved' for action in intent['actions'].values()):
                     raise LifecycleError('finish preservation must complete before synchronization')
             result = _synchronize(repo, branch=branch, remote=item['remote'], expected_head=expected_head,
-                remote_head=remote_head, evidence=evidence, validation=[item['validation']],
+                remote_head=remote_head, evidence=evidence, validation=[item['validation']], outputs=_outputs(item),
                 holder=holder, persist=lambda: save_state(directory, state), workspace_record=item)
             return {'task': task, 'commit': result['commit'], 'synchronization': result}
 
@@ -1703,7 +1795,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                             expected_head=pending['local'] if pending and not pending.get('commit') else target_head,
                             remote_head=pending['source'] if pending and not pending.get('commit') else remote_head,
                             evidence=result_ref,
-                            validation=[parent['validation']] if parent else [],
+                            validation=[parent['validation']] if parent else [], outputs=_outputs(parent),
                             holder=item.setdefault('integration_synchronization', {}),
                             persist=lambda: save_state(directory, state), workspace_record=parent,
                             ignored=parent is not None)
@@ -1712,7 +1804,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                         if synced['source'] != remote_head:
                             synced = _synchronize(target_worktree, branch=target_branch, remote=item['remote'],
                                 expected_head=target_head, remote_head=remote_head, evidence=result_ref,
-                                validation=[parent['validation']] if parent else [],
+                                validation=[parent['validation']] if parent else [], outputs=_outputs(parent),
                                 holder=item['integration_synchronization'],
                                 persist=lambda: save_state(directory, state), workspace_record=parent,
                                 ignored=parent is not None)
@@ -1729,6 +1821,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                     _synchronize(target_worktree, branch=target_branch, remote=item['remote'],
                         expected_head=pending_sync['local'], remote_head=pending_sync['source'],
                         evidence=result_ref, validation=[item['validation']] + ([parent['validation']] if parent else []),
+                            outputs=_outputs(item, parent),
                         holder=intent, persist=lambda: save_state(directory, state), workspace_record=parent,
                         ignored=parent is not None)
                 current = head(target_worktree)
@@ -1794,6 +1887,7 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                             expected_head=pending_sync['local'] if pending_sync and not pending_sync.get('commit') else merged,
                             remote_head=pending_sync['source'] if pending_sync and not pending_sync.get('commit') else remote_head,
                             evidence=result_ref, validation=[item['validation']] + ([parent['validation']] if parent else []),
+                            outputs=_outputs(item, parent),
                             holder=intent, persist=lambda: save_state(directory, state), workspace_record=parent,
                             ignored=parent is not None)
                         merged = synced['commit']
@@ -1802,8 +1896,11 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                     parent_evidence = {**reuse['parent_validation'], 'reused': 'prepared integration'} if parent else None
                 else:
                     try:
-                        evidence = _validate(target_worktree, item['validation'])
-                        parent_evidence = _validate(target_worktree, parent['validation']) if parent else None
+                        evidence = _run_validation(target_worktree, item['validation'],
+                                                   item.get('validation_outputs', []))
+                        parent_evidence = (_run_validation(target_worktree, parent['validation'],
+                                                           parent.get('validation_outputs', []))
+                                           if parent else None)
                     except LifecycleError as exc:
                         try:
                             _withdraw(repo, task_id, state, directory)
@@ -1812,8 +1909,12 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                                                  + str(undo), getattr(exc, 'recovery', None)) from exc
                         raise
                 _check_preserved(target_worktree, parent or {})
-                if head(target_worktree) != merged or _target_snapshot(target_worktree, parent):
+                if head(target_worktree) != merged:
                     raise LifecycleError('integration changed during final validation')
+                changed = _target_snapshot(target_worktree, parent)
+                if changed:
+                    raise LifecycleError('integration changed during final validation: ' + _preview(changed)
+                                         + _created_hint(changed, [evidence, parent_evidence]))
                 if gated_checks and not intent.get('remote_checks'):
                     if not gate:
                         return {'destination': target_branch, 'prepared': {

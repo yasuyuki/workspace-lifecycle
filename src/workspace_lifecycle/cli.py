@@ -87,6 +87,9 @@ def parser():
     for name in ("task", "request", "remote", "branch", "worktree"): begin.add_argument("--" + name, required=True)
     begin.add_argument("--parent"); begin.add_argument("--dependency", action="append", default=[])
     begin.add_argument("--validation-json", type=_json_list, default=[], help="validation argv array; an element equal to {repo} resolves to the current validation checkout, including the integration destination; embedded placeholders are unchanged")
+    outputs_help = ('JSON array of globs (PurePosixPath.full_match, such as **/__pycache__/*.pyc) naming ignored files the '
+        'validator regenerates; after each validation run, finish removes the ones that run created')
+    begin.add_argument("--validation-outputs-json", type=_json_list, default=[], help=outputs_help)
     preflight_help = ("push preflight argv array; it must contain an element equal to {repo}, which resolves to the "
                       "checkout being pushed; an element equal to {lifecycle_python} resolves to the interpreter "
                       "running this lifecycle; embedded placeholders are unchanged")
@@ -124,6 +127,8 @@ def parser():
     validation.add_argument('--expected-validation-json', type=_json_list, required=True)
     validation.add_argument('--validation-json', type=_json_list, required=True,
         help='nonempty argv executed by finish in the candidate and integration checkout')
+    validation.add_argument('--validation-outputs-json', type=_json_list, default=None,
+        help=outputs_help + '; with an unchanged argv, this also applies to an accepted task or a pending integration')
     validation.add_argument('--evidence', required=True, help='durable reference explaining the correction')
     required = commands.add_parser('update-required-checks', help='replace the remote checks one task requires before integration by exact CAS')
     required.add_argument('--task', required=True)
@@ -163,7 +168,7 @@ def main(argv=None):
     args = parser().parse_args(argv)
     state_path = None
     try:
-        if args.command == "begin": result = service.begin(args.repo, task=args.task, request=args.request, remote=args.remote, branch=args.branch, worktree=args.worktree, parent=args.parent, dependencies=args.dependency, validation=args.validation_json, preflight=args.preflight_json, required_checks=args.required_checks_json)
+        if args.command == "begin": result = service.begin(args.repo, task=args.task, request=args.request, remote=args.remote, branch=args.branch, worktree=args.worktree, parent=args.parent, dependencies=args.dependency, validation=args.validation_json, preflight=args.preflight_json, required_checks=args.required_checks_json, validation_outputs=args.validation_outputs_json)
         elif args.command == 'update-required-checks':
             result = service.update_required_checks(args.repo, task=args.task, expected=args.expected_json,
                                                     required_checks=args.required_checks_json, evidence=args.evidence)
@@ -186,7 +191,8 @@ def main(argv=None):
         elif args.command == 'update-validation':
             result = service.update_validation(args.repo, task=args.task, expected_head=args.expected_head,
                 expected_validation=args.expected_validation_json,
-                validation=args.validation_json, evidence=args.evidence)
+                validation=args.validation_json, evidence=args.evidence,
+                outputs=args.validation_outputs_json)
         elif args.command == 'register-owner-receipt':
             from . import producers
             result = producers.register(args.repo, args.task, args.owner, args.generation,

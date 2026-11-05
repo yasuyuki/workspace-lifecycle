@@ -1,6 +1,6 @@
 ---
 name: verify-validation-output
-description: Model-check that finish's dirt checks accept only a clean checkout, never refuse a file that the same run's validator wrote, and integrate a task whose owner keeps rerunning finish and deleting what each refusal names. Use when a change touches the dirt snapshot, _unexcused_dirty(), _exception(), _initial_target_dirt() or the _validate() call in finish(), _target_snapshot() or _target_dirt(), or the target validation and `integration changed during final validation` check in _integrate() in src/workspace_lifecycle/service.py.
+description: Model-check that finish's dirt checks accept only a clean checkout, remove only the declared outputs the same run's validator created, never remove another session's data, and integrate a task whose owner keeps rerunning finish and doing what each refusal names. Use when a change touches the dirt snapshot, _unexcused_dirty(), _exception(), _initial_target_dirt() or the validation call in finish(), _run_validation(), _created_hint(), _output_patterns(), _target_snapshot() or _target_dirt(), the target validation and `integration changed during final validation` check in _integrate(), or validation_outputs in begin() and update_validation() in src/workspace_lifecycle/service.py.
 license: MIT
 ---
 
@@ -9,12 +9,13 @@ license: MIT
 **Rules.**
 
 - `AcceptedClean`: finish accepts a task only when its checkout holds no dirt, including private data another session of the task wrote while the validator ran.
-- `NoSelfInflictedRefusal`: a refusal never names a file that the validation of the same run created.
-- `FinishCompletes` (a liveness property): if the owner keeps running finish, and after each refusal deletes the reproducible files it names and archives the private ones, the task is integrated. Running `update-validation` is allowed but never required.
+- `NoSelfInflictedRefusal`: once the task declares its validator outputs, a refusal never names one that the validation of the same run created.
+- `ForeignKept`: finish never removes data another session wrote.
+- `FinishCompletes` (a liveness property): if the owner keeps running finish and, after each refusal, deletes the reproducible files it names, archives the private ones, and declares the outputs it says the validation created, the task is integrated. Replacing the validator is allowed but never required.
 
-**Harm when they break.** A finish that skips the dirt check accepts and later retires a checkout with unsaved data. A refusal of the validator's own output repeats on every rerun: deleting the file does not help, because the validator writes it again, so the task cannot be finished through the normal entry. This has stopped tasks in four repositories (#38, #89, agent-rules#74, agent-environment#24 and #32).
+**Harm when they break.** A finish that skips the dirt check accepts and later retires a checkout with unsaved data. A cleanup that removes more than the run's declared outputs deletes another session's work. A refusal of the validator's own output repeats on every rerun, because the validator writes it again: before #38 and #89 were fixed, this stopped tasks in four repositories (agent-rules#74, agent-environment#24 and #32).
 
-`model/ValidationOutput.tla` is a TLA+ model of one task with one owned change. Its checkout can also hold `valout` (ignored output the validator writes, such as `__pycache__/*.pyc`), `manual` (ignored output of a test the agent ran by hand) and `foreign` (private data another session writes during finish, which the run lease of finish allows). The integration target is the default branch checkout or a parent task's checkout. TLC checks every order of these steps.
+`model/ValidationOutput.tla` is a TLA+ model of one task with one owned change. Its checkout can also hold `valout` (ignored output the validator writes), `manual` (ignored output of a test the agent ran by hand) and `foreign` (private data another session writes during finish, which the run lease of finish allows). The integration target is the default branch checkout or a parent task's checkout. TLC checks every order of these steps.
 
 ## When to use
 
@@ -22,7 +23,7 @@ Run the check when a diff touches any covered code below. To see what changed si
 
 ```sh
 sync=$(git log -1 --format=%H -- skills/verify-validation-output)
-git diff $sync -- src/workspace_lifecycle/service.py | grep -nE "^@@|_snapshot|_unexcused_dirty|_exception|_initial_target_dirt|_target_dirt|_target_snapshot|_validate|final_dirty|leftover|candidate|integration changed during final validation|allow_use"
+git diff $sync -- src/workspace_lifecycle/service.py | grep -nE "^@@|_snapshot|_unexcused_dirty|_exception|_initial_target_dirt|_target_dirt|_target_snapshot|_validate|_run_validation|_created_hint|_output_patterns|validation_outputs|outputs_only|final_dirty|leftover|candidate|integration changed during final validation|allow_use"
 ```
 
 Empty output means the model still describes the code.
@@ -33,21 +34,23 @@ Sync commit: the last commit that changed this skill folder, as `sync` above fin
 
 | Code at the sync commit (`service.py`) | Model |
 | --- | --- |
-| `finish()` takes its run lease with `allow_use=True` (980), so another session of the task can write meanwhile | `Foreign` |
-| `finish()` resumes an accepted task straight at `_integrate()` (`accepted_resume`, 1041) | `Pre`, accepted branch |
-| `finish()` refuses dirt the plan does not cover before any effect: `_snapshot`, `uncovered`, `_unexcused_dirty`, `_exception` (1105-1112, 648-664, 667-674) | `Pre`, `leftover` |
-| `finish()` refuses target dirt before any effect: `_initial_target_dirt()` (1116, 677-699) | `Pre`, `TargetDirt` |
-| `_resolve_files()` moves archive entries out (1127, 766-) | `Resolve` |
-| `finish()` `git commit` of the commit paths (1143) | `Commit` |
-| `finish()` `evidence = None if candidate else _validate(...)` (1152) | `Validate` |
-| `finish()` `final_dirty` refused by `_exception()`, else push and acceptance (1158-1167) | `Post` |
+| `begin()` stores `validation_outputs` checked by `_output_patterns()` (199-, 556-565) | `Init`, `declared` |
+| `finish()` takes its run lease with `allow_use=True` (1058), so another session of the task can write meanwhile | `Foreign` |
+| `finish()` resumes an accepted task straight at `_integrate()` (`accepted_resume`, 1119) | `Pre`, accepted branch |
+| `finish()` refuses dirt the plan does not cover before any effect: `_snapshot`, `uncovered`, `_unexcused_dirty`, `_exception` (1183-1190, 726-742, 745-752) | `Pre`, `leftover` |
+| `finish()` refuses target dirt before any effect: `_initial_target_dirt()` (1194, 755-777) | `Pre`, `TargetDirt` |
+| `_resolve_files()` moves archive entries out (1205, 844-) | `Resolve` |
+| `finish()` `git commit` of the commit paths (1221) | `Commit` |
+| `finish()` `evidence = None if candidate else _run_validation(...)` (1230); the validator run in `_run_validation()` (573-584) | `Validate` |
+| `_run_validation()` removes ignored regular files that are new and match a declared pattern (585-600) | `Clean`, `ItClean`, `Sweep` |
+| `finish()` `final_dirty` refused by `_exception()` with `_created_hint()`, else push and acceptance (1237-1252, 603-609) | `Post` |
 | `_target_snapshot()`: a default branch target does not count ignored data, a parent task target does (49-58) | `TargetDirt` |
-| `_integrate()` `_target_dirt()` before the merge (1694-1696, 702-706) | `Integrate` |
-| `_integrate()` `_validate(target_worktree, item['validation'])` (1805) | `ItValidate` |
-| `_integrate()` `integration changed during final validation`; the merge is withdrawn and the files stay (1815-1816) | `ItCheck` |
-| the owner deletes named files with `guarded_delete`, or archives them with a revised plan | `Recover` |
+| `_integrate()` `_target_dirt()` before the merge, only when no merge intent is pending (1772, 1782) | `Integrate`, `pending` |
+| `_integrate()` `_run_validation(target_worktree, item['validation'], ...)` (1895) | `ItValidate`, `ItClean` |
+| `_integrate()` `integration changed during final validation: <paths>`; the merge intent stays (1909-1913) | `ItCheck` |
+| the owner deletes named files with `guarded_delete`, archives them with a revised plan, or declares outputs with `update_validation()` and an unchanged argv, which `outputs_only` (372) allows also for an accepted task and beside a pending merge | `Recover` |
 | the owner runs tests by hand in the task checkout | `Manual` |
-| `update_validation()` (342-) | `UpdateValidation` |
+| `update_validation()` to another validator (346-) | `UpdateValidation` |
 
 ## Run
 
@@ -59,43 +62,43 @@ From the repository root:
 python -B skills/verify-validation-output/scripts/check.py --mutants --java JAVA --tla2tools TLA2TOOLS_JAR
 ```
 
-`--java` and `--tla2tools` fall back to the `JAVA` and `TLA2TOOLS` environment variables. It takes about 6 seconds. Exit 0 means every result matched `EXPECTED` in `scripts/check.py`; 1 means a mismatch; 2 means TLC could not run.
+`--java` and `--tla2tools` fall back to the `JAVA` and `TLA2TOOLS` environment variables. It takes about 8 seconds. Exit 0 means every result matched `EXPECTED` in `scripts/check.py`; 1 means a mismatch; 2 means TLC could not run.
 
-Each output line is JSON, one per configuration in `model/`:
+Each output line is JSON, one per configuration in `model/`. Every configuration starts with outputs declared or not, and every rule holds in each at the sync commit:
 
-| Configuration | Validator | Target, gating | Expected at the sync commit |
-| --- | --- | --- | --- |
-| `clean` | writes nothing | both, gated or not; one manual test run, one foreign write | every rule holds |
-| `candidate-default-writes` | writes output | default branch, gated by required checks | every rule holds |
-| `task-writes` | writes output | both, not gated | `NoSelfInflictedRefusal` breaks: #38 |
-| `task-writes-loop` | writes output | default, not gated; only `FinishCompletes` | `FinishCompletes` breaks: #38 |
-| `candidate-parent-writes` | writes output | parent task, gated | `NoSelfInflictedRefusal` breaks: #89 |
+| Configuration | Validator | Target, gating |
+| --- | --- | --- |
+| `clean` | writes nothing | both, gated or not; one manual test run, one foreign write |
+| `task-writes` | writes output | both, not gated; one manual test run, one foreign write |
+| `candidate-default-writes` | writes output | default branch, gated by required checks |
+| `candidate-parent-writes` | writes output | parent task, gated (#89) |
 
-With `--mutants`, it also breaks one check at a time in a copy of the model and requires each break to be caught by its rule: finish accepting without the dirt check after validation (`AcceptedClean`), a default branch target counting its ignored data, as before #24 (`NoSelfInflictedRefusal`), and archive entries staying in the checkout (`FinishCompletes`).
+With `--mutants`, it also breaks one check at a time in a copy of the model and requires each break to be caught by its rule: finish accepting without the dirt check after validation (`AcceptedClean`); the cleanup leaving declared outputs (`NoSelfInflictedRefusal`); the cleanup removing a file the run did not create from its declaration (`ForeignKept`); a refusal not saying the validation created the file, and `update-validation` refusing a declaration beside a pending merge (`FinishCompletes`, the #38 and #89 dead ends); archive entries staying in the checkout (`FinishCompletes`).
 
 ## Read a result
 
-Read every result with the `/statechart` skill, with `model/ValidationOutput.tla`, `model/chart.cfg` and the view `model/chart.mjs`. It tells each invariant violation as its shortest path in plain words and charts how a task moves between work, refusal and integration, including the `update-validation` escape. For a `FinishCompletes` violation, read TLC's lasso in the output of `check.py`'s run; the loop is refusal, delete, finish, refusal.
+Read every result with the `/statechart` skill, with `model/ValidationOutput.tla`, `model/chart.cfg` and the view `model/chart.mjs`. It tells each invariant violation as its shortest path in plain words and charts how a task moves between work, refusal, declaration and integration. For a `FinishCompletes` violation, read TLC's lasso; the loop is refusal, delete, finish, refusal.
 
 A `match: false` line or a mutant with `caught: false` needs a decision:
 
-1. **A real bug.** Replay the path against the real code. For the task checkout, use the fixture of `tests/test_dirty.py`: commit a `.gitignore` for `cache/`, begin with a validator such as `[sys.executable, "-c", "import pathlib; p=pathlib.Path('cache'); p.mkdir(exist_ok=True); (p/'m.pyc').write_bytes(b'x')"]`, and call `finish()` once per `Start`, deleting what the refusal names for each `Recover`. For a target, use `RequiredChecksTest` in `tests/test_required_checks.py` with `required_checks=[TEST]` and add a successful check for the pushed commit with `self.github.add`. Run the scratch test with `PYTHONPATH` set to the absolute `src` and `tests` paths, because the push preflight runs in a child process. If the replay reaches the end state, it is a bug. File it as an Issue with the path and the replay, and add the rule to `EXPECTED` with the Issue number. Do not weaken a rule or the model to make it pass.
+1. **A real bug.** Replay the path against the real code. `ValidatorOutputTest` in `tests/test_dirty.py` drives the task checkout with a validator that writes `cache/m.pyc`; `test_a_gated_child_declares_its_validator_output_after_the_parent_refuses_it` in `tests/test_required_checks.py` drives a gated child into its parent. Call `finish()` once per `Start`, and for `Recover` delete what the refusal names or call `update_validation(..., outputs=[...])` with the same argv. If the replay reaches the end state, it is a bug. File it as an Issue with the path and the replay, and add the rule to `EXPECTED` with the Issue number. Do not weaken a rule or the model to make it pass.
 2. **A modeling error.** If the replay cannot reach the end state, the model allows a step the code does not have. Find the action that differs from the code and fix it against the Coverage table.
 3. **A mutant that is no longer caught.** Either the model lost the check that the mutant removes, or `MUTANTS` in `scripts/check.py` no longer matches the model text, which the script reports as `model text not found once`.
 
-When #38 or #89 is fixed, the configuration's expected value becomes `None`. Confirm the fix with the same configuration before you change `EXPECTED`.
-
 ## Change the model with the code
 
-When a change to covered code is intended, update the action that the Coverage table names, so that one action is still one dirt check, one validation or one file effect. Update the table's line numbers and the mutant text if they moved.
+When a change to covered code is intended, update the action that the Coverage table names, so that one action is still one dirt check, one validation, one cleanup or one file effect. Update the table's line numbers and the mutant text if they moved.
 
-To prove that the check still catches a break after you change it, break the real code on a scratch copy, for example set `ignored=True` in `_target_snapshot()`. Make the same edit to the model (`TargetDirt == target`) and run the script. `candidate-default-writes` must report a mismatch. Then undo both edits and confirm that the script exits 0 again.
+To prove that the check still catches a break after you change it, break the real code on a scratch copy, for example replace the pattern test `not any(PurePosixPath(name).full_match(pattern) for pattern in outputs)` in `_run_validation()` with `not outputs`. Then `test_files_outside_the_declaration_stay_and_are_refused` fails, because finish removes `cache/secret.env` and accepts. Make the same edit to the model (`Sweep(paths) == IF declared THEN paths \cap (made \cup {"foreign"}) ELSE {}`) and run the script. The `clean` and `task-writes` lines must report a mismatch (`ForeignKept`). Then undo both edits and confirm that the script exits 0 again.
 
 ## What the model leaves out
 
 - Bounds: one owned change, one validator output path, one manual test run and one foreign write per configuration.
+- A declared pattern that also matches another session's file removes it. The model takes the owner's declaration to name only files the validator regenerates; `foreign` stands for private data outside it.
+- `PYTHONDONTWRITEBYTECODE=1` in `_validate()` is not modeled; for a Python validator it makes `TaskWrites` false.
+- Synchronization validation (`_synchronize()`, 1465) uses the same `_run_validation()` but is not modeled.
 - Kills and resumption are the subject of `verify-validation-update` and `verify-finish-integration`; this model runs each step to its end.
-- Plan restore entries are not modeled: restore runs in `_resolve_files()`, before validation, so it acts like `Recover` and cannot remove output the validator writes later. The replay of #38 confirms this.
-- Plan exceptions (`completion: exception`), producer owner receipts, primary checkout waivers, preserved paths, synchronization, merge conflicts and the wait for required checks are not modeled.
-- The parent task's own validator (`parent['validation']`, 1806) is taken to write nothing, because the parent's own finish already refuses one that does.
+- Plan restore entries are not modeled: restore runs in `_resolve_files()`, before validation, so it cannot remove output the validator writes later.
+- Plan exceptions (`completion: exception`), producer owner receipts, primary checkout waivers, preserved paths, merge conflicts and the wait for required checks are not modeled.
+- The parent task's own validator (`parent['validation']`) is taken to write nothing, because the parent's own finish already refuses one that does.
 - A pass covers this model under these bounds, not the whole lifecycle.

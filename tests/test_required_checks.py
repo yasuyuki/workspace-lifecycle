@@ -353,6 +353,45 @@ class RequiredChecksTest(unittest.TestCase):
                 self.assertNotIn("integrated", status(worktree, child))
         self.assertNotIn("acceptance", status(parent, "parent"))
 
+    def test_a_gated_child_declares_its_validator_output_after_the_parent_refuses_it(self):
+        """#89: the child's validation runs only in the parent checkout, which counts ignored data."""
+        import hashlib
+        from workspace_lifecycle.service import update_validation
+        (self.root / ".gitignore").write_text("cache/\n")
+        run(self.root, "add", ".gitignore"); run(self.root, "commit", "-qm", "ignore"); run(self.root, "push", "-q", "origin", "trunk")
+        base = Path(self.temp.name)
+
+        def plan(task, worktree, name):
+            (worktree / name).write_bytes(b"x\n")
+            path = base / ("plan-" + task + ".json")
+            path.write_text(json.dumps({"commit": [{
+                "path": name, "classification": "source", "owner": task, "evidence": "disposable task",
+                "safe_to_commit": True, "sha256": hashlib.sha256(b"x\n").hexdigest()}]}))
+            return path
+
+        parent = base / "parent"
+        begin(self.root, task="parent", request="issue/parent", remote="origin", branch="topic/parent",
+              worktree=str(parent), validation=["git", "diff", "--check"], preflight=self.preflight, required_checks=[])
+        finish(parent, task="parent", plan_path=str(plan("parent", parent, "parent.txt")), result_ref="issue/parent")
+        writes = [sys.executable, "-c",
+                  "import pathlib; p = pathlib.Path('cache'); p.mkdir(exist_ok=True); (p / 'm.pyc').write_bytes(b'x')"]
+        child = base / "child"
+        begin(self.root, task="child", request="issue/child", remote="origin", branch="topic/child",
+              worktree=str(child), parent="parent", validation=writes, preflight=self.preflight, required_checks=[TEST])
+        child_plan = plan("child", child, "child.txt")
+        with self.assertRaisesRegex(LifecycleError, "missing"):
+            finish(child, task="child", plan_path=str(child_plan), result_ref="issue/child")
+        self.github.add("example/repo", status(child, "child")["candidate"]["commit"], TEST)
+        with self.assertRaisesRegex(LifecycleError, "integration changed during final validation: cache/m.pyc; "
+                                                    "validation created cache/m.pyc"):
+            finish(child, task="child", plan_path=str(child_plan), result_ref="issue/child")
+        update_validation(child, task="child", expected_head=run(child, "rev-parse", "HEAD"), expected_validation=writes,
+                          validation=writes, evidence="issue/child", outputs=["cache/*.pyc"])
+        (parent / "cache" / "m.pyc").unlink()
+        result = finish(child, task="child", plan_path=str(child_plan), result_ref="issue/child")
+        self.assertEqual(result["integration"]["destination"], "topic/parent")
+        self.assertFalse((parent / "cache" / "m.pyc").exists())
+
     def test_an_acceptance_saved_by_an_earlier_version_resumes(self):
         validations = self.counted("earlier")
         from workspace_lifecycle.state import locked_state, save_state

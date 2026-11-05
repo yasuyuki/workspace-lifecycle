@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from workspace_lifecycle.errors import LifecycleError
 from workspace_lifecycle import leases
-from workspace_lifecycle.service import begin, finish, hold, reclaim, retire, status
+from workspace_lifecycle.service import begin, finish, hold, reclaim, retire, status, update_validation
 from workspace_lifecycle.state import locked_state, save_state
 
 
@@ -788,3 +788,73 @@ finish(repo, task=os.environ['WORKSPACE_LIFECYCLE_TASK'], plan_path=str(plan),
                         revision_head=revised_head, revision_evidence=evidence)
         self.assertTrue(result['accepted'])
         self.assertEqual(git(self.topic, 'show', 'HEAD:owned.txt'), 'owned')
+
+
+class ValidatorOutputTest(unittest.TestCase):
+    """Ignored files the validator writes (#38): declared ones are removed, others are named."""
+    WRITES = [sys.executable, '-c', "import os, pathlib; p = pathlib.Path('cache'); p.mkdir(exist_ok=True); "
+              "(p / 'm.pyc').write_bytes(b'x'); "
+              "(p / 'secret.env').write_bytes(b'k') if os.environ.get('WRITE_SECRET') else None"]
+    tearDown, entry, plan = DirtyLifecycleTest.tearDown, DirtyLifecycleTest.entry, DirtyLifecycleTest.plan
+
+    def setUp(self):
+        DirtyLifecycleTest.setUp(self)
+        (self.root / '.gitignore').write_text('cache/\n')
+        git(self.root, 'add', '.gitignore'); git(self.root, 'commit', '-m', 'ignore'); git(self.root, 'push', 'origin', 'trunk')
+
+    def begin_writer(self, task, outputs=None):
+        begin(self.root, task=task, request='issue/' + task, remote='origin', branch='topic/' + task,
+              worktree=str(self.topic), validation=self.WRITES, preflight=self.preflight,
+              validation_outputs=outputs)
+        (self.topic / 'owned.txt').write_text('owned\n')
+        return self.plan(task + '.json', {'commit': [self.entry(task, 'owned.txt')]})
+
+    def test_undeclared_output_is_named_as_created_by_validation(self):
+        plan = self.begin_writer('undeclared')
+        with self.assertRaisesRegex(LifecycleError, 'completion exception: cache/m.pyc;.*validation created cache/m.pyc'):
+            finish(self.topic, task='undeclared', plan_path=str(plan), result_ref='issue/undeclared')
+        self.assertTrue((self.topic / 'cache/m.pyc').exists())
+
+    def test_declared_output_is_removed_after_validation(self):
+        plan = self.begin_writer('declared', ['cache/*.pyc'])
+        result = finish(self.topic, task='declared', plan_path=str(plan), result_ref='issue/declared')
+        self.assertTrue(result['accepted'])
+        self.assertFalse((self.topic / 'cache/m.pyc').exists())
+        self.assertEqual(status(self.topic, 'declared')['acceptance']['validation']['postcommit']['removed_outputs'],
+                         ['cache/m.pyc'])
+
+    def test_files_outside_the_declaration_stay_and_are_refused(self):
+        plan = self.begin_writer('narrow', ['cache/*.pyc'])
+        with patch.dict(os.environ, {'WRITE_SECRET': '1'}), \
+                self.assertRaisesRegex(LifecycleError, 'completion exception: cache/secret.env;'):
+            finish(self.topic, task='narrow', plan_path=str(plan), result_ref='issue/narrow')
+        self.assertFalse((self.topic / 'cache/m.pyc').exists())
+        self.assertTrue((self.topic / 'cache/secret.env').exists())
+
+    def test_declaring_outputs_after_a_refusal_lets_the_same_finish_complete(self):
+        plan = self.begin_writer('later')
+        with self.assertRaises(LifecycleError):
+            finish(self.topic, task='later', plan_path=str(plan), result_ref='issue/later')
+        update_validation(self.topic, task='later', expected_head=git(self.topic, 'rev-parse', 'HEAD'),
+                          expected_validation=self.WRITES, validation=self.WRITES, evidence='issue/later',
+                          outputs=['cache/*.pyc'])
+        (self.topic / 'cache/m.pyc').unlink()
+        self.assertTrue(finish(self.topic, task='later', plan_path=str(plan), result_ref='issue/later')['accepted'])
+        self.assertFalse((self.topic / 'cache/m.pyc').exists())
+        with self.assertRaisesRegex(LifecycleError, 'accepted task validation cannot be replaced'):
+            update_validation(self.topic, task='later', expected_head=git(self.topic, 'rev-parse', 'HEAD'),
+                              expected_validation=self.WRITES, validation=['git', 'diff', '--check'],
+                              evidence='issue/later')
+
+    def test_output_patterns_stay_inside_the_checkout(self):
+        for pattern in ('../x', '/abs', '.git/config', 'C:/x', 'a\\b'):
+            with self.subTest(pattern=pattern), self.assertRaisesRegex(LifecycleError, 'relative glob'):
+                self.begin_writer('bad', [pattern])
+
+    def test_validation_runs_without_bytecode(self):
+        check = [sys.executable, '-c', "import os, sys; sys.exit(os.environ.get('PYTHONDONTWRITEBYTECODE') != '1')"]
+        with patch.dict(os.environ, {'PYTHONDONTWRITEBYTECODE': ''}):
+            begin(self.root, task='bytecode', request='issue/bytecode', remote='origin', branch='topic/bytecode',
+                  worktree=str(self.topic), validation=check, preflight=self.preflight)
+            self.assertTrue(finish(self.topic, task='bytecode', plan_path=str(self.plan('empty.json', {})),
+                                   result_ref='issue/bytecode')['accepted'])
