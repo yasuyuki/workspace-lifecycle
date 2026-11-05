@@ -813,6 +813,17 @@ GitHub still cannot answer at the limit (#76). Task state is unchanged. A
 rollback to 0.8.21 again stops at the first such query, and the same finish
 resumes from the candidate.
 
+Version 0.8.23 makes `lease-release` refuse while the use's command still
+runs, also after its supervisor died before recording it (#77). It keeps a
+child task's integration through its parent resumable after a kill: while a
+child's merge into its parent is pending, the parent's own integration and
+`run` in the parent's checkout are refused; while the parent's integration is
+pending, a child's integration into it is refused; and a child that also
+depends on its parent resumes after its own merge (#85, #86, #87). Task state
+is unchanged. A rollback to 0.8.22 allows those orders again, and an
+integration stuck in one of them stays refused until its intent is resolved
+by hand.
+
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
 default branch carries the accepted commit's SHA. `integration_checks` counts
