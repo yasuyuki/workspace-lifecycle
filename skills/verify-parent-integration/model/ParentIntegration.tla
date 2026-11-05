@@ -67,12 +67,15 @@ CStart ==
   /\ lockP' = "child" /\ Go("child", "cLock")
   /\ UNCHANGED <<pHead, pRemote, pAcc, pOwn, cIntent, cChecked, cRecord, dIntent, dLocal, dRemote, dRecord, accepted, lockD, kills, commits>>
 
-(* Lines 1632-1716: a dependency's branch must be at its accepted commit
-   (1645-1651); an existing record must still be in the parent's HEAD;
-   otherwise a new intent needs the parent HEAD at its accepted commit. *)
+(* Lines 1634-1721: a dependency's branch must be at its accepted commit,
+   unless it is the parent and the child's own merge intent is pending
+   (1647-1654); an existing record must still be in the parent's HEAD;
+   otherwise a new intent needs no pending integration of the parent
+   (_refuse_pending_merge with the parent as owner) and the parent HEAD at
+   its accepted commit. *)
 CLock ==
   /\ pc["child"] = "cLock"
-  /\ IF ParentIsDependency /\ pHead # pAcc
+  /\ IF ParentIsDependency /\ pHead # pAcc /\ ~cIntent.open
      THEN Refuse("child") /\ UNCHANGED cIntent
      ELSE IF cRecord # {}
      THEN IF cRecord \subseteq pHead
@@ -80,13 +83,13 @@ CLock ==
           ELSE Refuse("child") /\ UNCHANGED cIntent
      ELSE IF cIntent.open
           THEN Go("child", "cMerge") /\ UNCHANGED <<cIntent, lockP, lockD>>
-          ELSE IF pHead = pAcc
+          ELSE IF dIntent = {} /\ pHead = pAcc
                THEN /\ cIntent' = [target |-> pHead, merged |-> {}, open |-> TRUE]
                     /\ Go("child", "cMerge") /\ UNCHANGED <<lockP, lockD>>
                ELSE Refuse("child") /\ UNCHANGED cIntent
   /\ UNCHANGED <<pHead, pRemote, pAcc, pOwn, cChecked, cRecord, dIntent, dLocal, dRemote, dRecord, accepted, kills, commits>>
 
-(* Lines 1730-1785: at target_head, merge the child (fast-forward, or a
+(* Lines 1735-1790: at target_head, merge the child (fast-forward, or a
    --no-ff merge committed at once); a HEAD that is exactly that merge is
    adopted; any other HEAD is refused. *)
 CMerge ==
@@ -111,7 +114,7 @@ CMerged ==
   /\ Go("child", "cValidate")
   /\ UNCHANGED <<pHead, pRemote, pAcc, pOwn, cChecked, cRecord, dIntent, dLocal, dRemote, dRecord, accepted, lockP, lockD, kills, commits>>
 
-(* Lines 1795-1811: the child's and the parent's validation in the parent
+(* Lines 1800-1816: the child's and the parent's validation in the parent
    checkout; HEAD must still be the merged commit. *)
 CValidate ==
   /\ pc["child"] = "cValidate"
@@ -120,13 +123,13 @@ CValidate ==
      ELSE Refuse("child") /\ UNCHANGED cChecked
   /\ UNCHANGED <<pHead, pRemote, pAcc, pOwn, cIntent, cRecord, dIntent, dLocal, dRemote, dRecord, accepted, lockD, kills, commits>>
 
-\* Line 1825: _push of the parent branch with expected_head=merged.
+\* Line 1830: _push of the parent branch with expected_head=merged.
 CPush ==
   /\ pc["child"] = "cPush"
   /\ pRemote' = cIntent.merged /\ Go("child", "cRecord")
   /\ UNCHANGED <<pHead, pAcc, pOwn, cIntent, cChecked, cRecord, dIntent, dLocal, dRemote, dRecord, accepted, lockP, lockD, kills, commits>>
 
-(* Lines 1826-1837: the child's integrated record and the parent's new
+(* Lines 1831-1842: the child's integrated record and the parent's new
    acceptance in one save; the intent is popped and the leases released. *)
 CRecord ==
   /\ pc["child"] = "cRecord"
@@ -145,8 +148,8 @@ FStart ==
   /\ lockP' = "parent" /\ Go("parent", "fEnter")
   /\ UNCHANGED <<pHead, pRemote, pAcc, pOwn, cIntent, cChecked, cRecord, dIntent, dLocal, dRemote, dRecord, accepted, lockD, kills, commits>>
 
-(* Line 986 _refuse_pending_merge(state, branch); with the parent's own merge
-   intent pending, the HEAD must be the accepted commit (1042-1044); else a new
+(* Line 988 _refuse_pending_merge(state, branch); with the parent's own merge
+   intent pending, the HEAD must be the accepted commit (1044-1046); else a new
    HEAD is validated, pushed and accepted (verify-validation-update covers its
    steps); the finish lease is released before integration. *)
 FEnter ==
@@ -162,34 +165,35 @@ FEnter ==
 
 ----------------------------------------------------------------------------
 (* The parent's edge into the default branch: _integrate(parent), from the
-   child's recursion (line 1840) or the parent's finish. *)
+   child's recursion (line 1845) or the parent's finish. *)
 
 PStart(x) ==
   /\ pc[x] = "pStart" /\ lockP = None /\ lockD = None
   /\ lockP' = x /\ lockD' = x /\ Go(x, "pLock")
   /\ UNCHANGED <<pHead, pRemote, pAcc, pOwn, cIntent, cChecked, cRecord, dIntent, dLocal, dRemote, dRecord, accepted, kills, commits>>
 
-(* Lines 1632-1721: the parent branch must be at its accepted commit; an
+(* Lines 1634-1726: the parent branch must be at its accepted commit; an
    existing record of that commit ends the edge; a pending intent must have
-   the same source; otherwise a new intent is saved. *)
+   the same source; otherwise a new intent needs no pending merge into the
+   parent's own branch (_refuse_pending_merge(state, source_branch)). *)
 PLock(x) ==
   /\ pc[x] = "pLock"
   /\ IF pHead # pAcc
      THEN Refuse(x) /\ UNCHANGED dIntent
      ELSE IF dRecord = pAcc
           THEN Refuse(x) /\ UNCHANGED dIntent    \* already integrated: returns, leases dropped
-          ELSE IF dIntent # {} /\ dIntent # pAcc
+          ELSE IF (dIntent # {} /\ dIntent # pAcc) \/ (dIntent = {} /\ cIntent.open)
                THEN Refuse(x) /\ UNCHANGED dIntent
                ELSE dIntent' = pAcc /\ Go(x, "pMerge") /\ UNCHANGED <<lockP, lockD>>
   /\ UNCHANGED <<pHead, pRemote, pAcc, pOwn, cIntent, cChecked, cRecord, dLocal, dRemote, dRecord, accepted, kills, commits>>
 
-\* Lines 1730-1785: fast-forward or merge into the default checkout.
+\* Lines 1735-1790: fast-forward or merge into the default checkout.
 PMerge(x) ==
   /\ pc[x] = "pMerge"
   /\ dLocal' = dLocal \cup dIntent /\ Go(x, "pPush")
   /\ UNCHANGED <<pHead, pRemote, pAcc, pOwn, cIntent, cChecked, cRecord, dIntent, dRemote, dRecord, accepted, lockP, lockD, kills, commits>>
 
-\* Lines 1795-1825: the parent's validation in the default checkout, then the push.
+\* Lines 1800-1830: the parent's validation in the default checkout, then the push.
 PPush(x) ==
   /\ pc[x] = "pPush"
   /\ dRemote' = dLocal /\ Go(x, "pRecord")
@@ -211,9 +215,10 @@ Kill(x) ==
   /\ UNCHANGED <<pHead, pRemote, pAcc, pOwn, cIntent, cChecked, cRecord, dIntent, dLocal, dRemote, dRecord, accepted, commits>>
 
 (* The parent's session commits in its checkout. run() cannot start while a
-   mutation holds the parent's lease; nothing refuses it otherwise. *)
+   mutation holds the parent's lease, and before_run() refuses it while a
+   merge into the parent's branch is pending (_refuse_pending_merge). *)
 SessionCommits ==
-  /\ Writer = "session" /\ commits < 1 /\ lockP = None
+  /\ Writer = "session" /\ commits < 1 /\ lockP = None /\ ~cIntent.open
   /\ pHead' = pHead \cup {"m"} /\ commits' = commits + 1
   /\ UNCHANGED <<pRemote, pAcc, pOwn, cIntent, cChecked, cRecord, dIntent, dLocal, dRemote, dRecord, accepted, lockP, lockD, pc, kills>>
 

@@ -62,7 +62,7 @@ Start ==
   /\ Go("auth")
   /\ UNCHANGED <<fs, progress, deleted, writes>>
 
-\* Lines 2301-2317: phase requested captures the payload and authorizes.
+\* Lines 2306-2322: phase requested captures the payload and authorizes.
 Auth ==
   /\ pc = "auth"
   /\ IF phase = "requested"
@@ -71,7 +71,7 @@ Auth ==
      ELSE UNCHANGED phase /\ Go(IF phase = "authorized" THEN "stageCheck" ELSE "remove")
   /\ UNCHANGED <<fs, rootIntent, rootRmIntent, mIntent, mStatus, deleted, writes>>
 
-\* Lines 2318-2329: before the rename, the payload must match its manifest.
+\* Lines 2323-2334: before the rename, the payload must match its manifest.
 StageCheck ==
   /\ pc = "stageCheck"
   /\ CASE dirAt = "rec" /\ ManifestMatches -> Go("stageRename")
@@ -79,13 +79,13 @@ StageCheck ==
        [] OTHER -> Refuse
   /\ UNCHANGED <<fs, progress, deleted, writes>>
 
-\* Line 2323: recovery.rename(staging).
+\* Line 2328: recovery.rename(staging).
 StageRename ==
   /\ pc = "stageRename"
   /\ dirAt' = "stg" /\ Go("stagedCheck")
   /\ UNCHANGED <<name, tomb, content, progress, deleted, writes>>
 
-\* Lines 2330-2339: after the rename, the staging tree must match its manifest.
+\* Lines 2335-2344: after the rename, the staging tree must match its manifest.
 StagedCheck ==
   /\ pc = "stagedCheck"
   /\ IF dirAt = "stg" /\ ManifestMatches
@@ -190,7 +190,7 @@ Rmdir ==
      ELSE Refuse /\ UNCHANGED dirAt
   /\ UNCHANGED <<name, tomb, content, progress, deleted, writes>>
 
-\* service.py 2347-2348: phase payload-removed.
+\* service.py 2352-2353: phase payload-removed.
 Finish ==
   /\ pc = "finish"
   /\ phase' = "payload-removed" /\ Go("idle")

@@ -32,14 +32,14 @@ Sync commit: the last commit that changed this skill folder, as `sync` above fin
 
 | Code at the sync commit (`service.py`) | Model |
 | --- | --- |
-| `finish()` opens the intent, or adopts a commit that matches `commit_tree` (lines 1068-1085) | `Enter` |
+| `finish()` opens the intent, or adopts a commit that matches `commit_tree` (lines 1070-1087) | `Enter` |
 | `_resolve_files()` restore: phase `restoring` saved, file restored or removed, phase `resolved` saved (826-849) | `RestoreIntent`, `RestoreEffect`, `RestoreDone` |
-| `finish()` `git add` of the commit paths (1133-1134) | `Stage` |
-| `finish()` `commit_tree` saved (1138) | `Tree` |
-| `finish()` `git commit` (1141) | `Commit` |
-| `finish()` `committed` saved (1146) | `Committed` |
-| `finish()` `_validate`; a failure keeps the intent (1150) | `Validate` |
-| `finish()` push and acceptance, intent dropped (1165-1186) | `Record` |
+| `finish()` `git add` of the commit paths (1135-1136) | `Stage` |
+| `finish()` `commit_tree` saved (1140) | `Tree` |
+| `finish()` `git commit` (1143) | `Commit` |
+| `finish()` `committed` saved (1148) | `Committed` |
+| `finish()` `_validate`; a failure keeps the intent (1152) | `Validate` |
+| `finish()` push and acceptance, intent dropped (1167-1188) | `Record` |
 | `update_validation()` (354-384), `_effectless_finish()` (391-398), `_recorded_finish()` (401-419), the index check (377-378) | `UpdateValidation`, `Effectless`, `Recorded` |
 | process killed; the state file stays | `Kill` |
 

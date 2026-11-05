@@ -42,7 +42,7 @@ Init ==
 
 Refuse == pc' = "idle" /\ lock' = FALSE
 
-(* Lines 2035-2068 for a new request, with the checks of 1996-2030. finish
+(* Lines 2040-2073 for a new request, with the checks of 2001-2030. finish
    --users-released inside the worktree calls retire(request_only=True) under
    guard(allow_use=True): the session's own run may be active. It saves the
    request and returns before any move. *)
@@ -60,7 +60,7 @@ Start ==
   /\ lock' = TRUE /\ pc' = "enter"
   /\ UNCHANGED <<payload, gitdir, admin, content, head, binding, other, use, request, receipt, kills, writes>>
 
-(* Lines 1996-2078: accepted result, integration and branch HEAD checks; a new
+(* Lines 2001-2083: accepted result, integration and branch HEAD checks; a new
    request is saved with phase "requested". *)
 Enter ==
   /\ pc = "enter"
@@ -71,7 +71,7 @@ Enter ==
           /\ UNCHANGED lock
   /\ UNCHANGED <<payload, gitdir, admin, content, head, binding, other, use, receipt, kills, writes>>
 
-(* Lines 2095-2109: the checkout is still the registered worktree of the
+(* Lines 2100-2114: the checkout is still the registered worktree of the
    branch at the accepted HEAD; in phase "requested" _retirement_contents()
    refuses any nontracked data, then phase "moving" is saved. *)
 Check ==
@@ -84,7 +84,7 @@ Check ==
                /\ pc' = "rename" /\ UNCHANGED lock
   /\ UNCHANGED <<payload, gitdir, admin, content, head, binding, other, use, receipt, kills, writes>>
 
-(* Line 2110, git worktree move: Git renames the directory, then writes the
+(* Line 2115, git worktree move: Git renames the directory, then writes the
    new path into the admin entry's gitdir file. *)
 Rename ==
   /\ pc = "rename"
@@ -96,7 +96,7 @@ Pointer ==
   /\ gitdir' = "recovery" /\ pc' = "held"
   /\ UNCHANGED <<payload, admin, content, head, binding, other, use, request, receipt, lock, kills, writes>>
 
-(* Lines 2111-2124: with the admin entry still active, the recovery path must
+(* Lines 2116-2129: with the admin entry still active, the recovery path must
    be its registered worktree at the accepted HEAD; phases "recovery-held"
    and "archiving-admin" are saved. *)
 Held ==
@@ -108,13 +108,13 @@ Held ==
           ELSE Refuse /\ UNCHANGED request
   /\ UNCHANGED <<payload, gitdir, admin, content, head, binding, other, use, receipt, kills, writes>>
 
-\* Line 2125: admin.rename(archive).
+\* Line 2130: admin.rename(archive).
 Archive ==
   /\ pc = "archive"
   /\ admin' = "archive" /\ pc' = "unbind"
   /\ UNCHANGED <<payload, gitdir, content, head, binding, other, use, request, receipt, lock, kills, writes>>
 
-(* Lines 2128-2140: the archived gitdir names the recovery path, neither path
+(* Lines 2133-2145: the archived gitdir names the recovery path, neither path
    is an active worktree, the branch is still at the accepted commit; the
    branch binding is unset. *)
 Unbind ==
@@ -124,7 +124,7 @@ Unbind ==
      ELSE Refuse /\ UNCHANGED binding
   /\ UNCHANGED <<payload, gitdir, admin, content, head, other, use, request, receipt, kills, writes>>
 
-(* Lines 2141-2166: the manifest of the recovery payload goes into the
+(* Lines 2146-2171: the manifest of the recovery payload goes into the
    retired receipt, the task and its request are removed, one persist(). *)
 Receipt ==
   /\ pc = "receipt"
@@ -141,7 +141,7 @@ Kill ==
 
 (* leases.py run(): the use lock is shared, so a run cannot start while retire
    holds the task lease; before_run() refuses a task with a retirement
-   request (lines 2436-2454), and check_run_identity() needs the checkout at
+   request (lines 2441-2460), and check_run_identity() needs the checkout at
    its original path. *)
 RunStarts ==
   /\ use = "none" /\ ~lock /\ request = None /\ receipt = None /\ payload = "active"

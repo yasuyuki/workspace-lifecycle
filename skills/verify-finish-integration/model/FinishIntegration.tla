@@ -60,7 +60,7 @@ Start(m) ==
   /\ pc' = "enter" /\ mode' = m /\ prep' = (m = "wait")
   /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, gate>>
 
-\* finish() lines 988-1072: resume a pending merge or accepted record, or open a finish intent.
+\* finish() lines 990-1074: resume a pending merge or accepted record, or open a finish intent.
 FinEnter ==
   /\ pc = "enter"
   /\ CASE intent.kind = "merge" ->
@@ -79,13 +79,13 @@ FinEnter ==
             ELSE intent' = [NoIntent EXCEPT !.kind = "finish", !.src = head] /\ pc' = "validate"
   /\ UNCHANGED <<task, ci, topic, rec, integrated, tLocal, tRemote, otherDone, mode, prep, gate>>
 
-\* finish() line 1150: a candidate skips the task checkout validation.
+\* finish() line 1152: a candidate skips the task checkout validation.
 FinValidate ==
   /\ pc = "validate"
   /\ pc' = IF Candidate \/ valid[head] THEN "push" ELSE "idle"
   /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
 
-\* finish() line 1165: _push of the topic; CI starts on the pushed commit.
+\* finish() line 1167: _push of the topic; CI starts on the pushed commit.
 FinPush ==
   /\ pc = "push"
   /\ topic' = head
@@ -93,7 +93,7 @@ FinPush ==
   /\ pc' = "record"
   /\ UNCHANGED <<task, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
 
-\* finish() lines 1169-1186: save the candidate or acceptance and drop the finish intent.
+\* finish() lines 1171-1188: save the candidate or acceptance and drop the finish intent.
 FinRecord ==
   /\ pc = "record"
   /\ rec' = [kind |-> IF Candidate THEN "candidate" ELSE "acceptance", commit |-> head]
@@ -104,7 +104,7 @@ FinRecord ==
 ----------------------------------------------------------------------------
 (* _integrate() *)
 
-\* Lines 1603-1631: read the state, then checks.verify outside the state lock.
+\* Lines 1605-1633: read the state, then checks.verify outside the state lock.
 IntVerify ==
   /\ pc = "integrate"
   /\ LET src == rec.commit
@@ -116,7 +116,7 @@ IntVerify ==
         ELSE gate' = FALSE /\ pc' = "lock"
   /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep>>
 
-\* Lines 1632-1721: identity and proof checks, synchronize the target with the
+\* Lines 1634-1726: identity and proof checks, synchronize the target with the
 \* remote, and save the merge intent.
 IntLock ==
   /\ pc = "lock"
@@ -134,20 +134,20 @@ IntLock ==
                /\ pc' = "merge"
   /\ UNCHANGED <<task, ci, topic, rec, integrated, tRemote, otherDone, mode, prep, gate>>
 
-\* Lines 1729-1779: fast-forward or merge the source into the default checkout.
+\* Lines 1734-1784: fast-forward or merge the source into the default checkout.
 IntMerge ==
   /\ pc = "merge"
   /\ tLocal' = tLocal \cup {intent.src}
   /\ pc' = "validateTarget"
   /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tRemote, otherDone, mode, prep, gate>>
 
-\* Lines 1795-1808: validate in the target; a failure withdraws a deferred merge.
+\* Lines 1800-1813: validate in the target; a failure withdraws a deferred merge.
 IntValidate ==
   /\ pc = "validateTarget"
   /\ pc' = IF validT[intent.src] THEN "gate" ELSE "withdraw"
   /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
 
-\* Lines 1812-1819: without check evidence return the prepared integration.
+\* Lines 1817-1824: without check evidence return the prepared integration.
 IntGate ==
   /\ pc = "gate"
   /\ IF Gated /\ ~intent.checks
@@ -156,21 +156,21 @@ IntGate ==
      ELSE pc' = "accept" /\ UNCHANGED intent
   /\ UNCHANGED <<task, ci, topic, rec, integrated, tLocal, tRemote, otherDone, mode, prep, gate>>
 
-\* Lines 1820-1824: a candidate becomes the acceptance.
+\* Lines 1825-1829: a candidate becomes the acceptance.
 IntAccept ==
   /\ pc = "accept"
   /\ rec' = [rec EXCEPT !.kind = "acceptance"]
   /\ pc' = "pushTarget"
   /\ UNCHANGED <<task, ci, topic, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
 
-\* Line 1825: _push of the default checkout.
+\* Line 1830: _push of the default checkout.
 IntPush ==
   /\ pc = "pushTarget"
   /\ tRemote' = tLocal
   /\ pc' = "record2"
   /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, otherDone, mode, prep, gate>>
 
-\* Lines 1826-1837: save the integration and drop the merge intent.
+\* Lines 1831-1842: save the integration and drop the merge intent.
 IntRecord ==
   /\ pc = "record2"
   /\ integrated' = intent.src /\ intent' = NoIntent
@@ -178,7 +178,7 @@ IntRecord ==
   /\ UNCHANGED <<task, ci, topic, rec, tLocal, tRemote, otherDone, mode, prep, gate>>
 
 ----------------------------------------------------------------------------
-(* finish() lines 1191-1202: wait for the checks, then push or withdraw *)
+(* finish() lines 1193-1204: wait for the checks, then push or withdraw *)
 
 \* _await_checks holds no lease or lock. A pending check here is the wait timing out.
 Await ==
@@ -188,7 +188,7 @@ Await ==
      ELSE pc' = "withdraw" /\ UNCHANGED prep    \* _withdraw_prepared
   /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, gate>>
 
-\* _withdraw() lines 1558-1582: return the default checkout to its HEAD before the merge.
+\* _withdraw() lines 1560-1584: return the default checkout to its HEAD before the merge.
 Withdraw ==
   /\ pc = "withdraw"
   /\ IF ~Deferred THEN pc' = "idle" /\ UNCHANGED tLocal
@@ -197,7 +197,7 @@ Withdraw ==
      ELSE tLocal' = intent.before /\ pc' = "withdrawPop"                    \* git checkout -B
   /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tRemote, otherDone, mode, prep, gate>>
 
-\* _withdraw() line 1585: drop the merge intent.
+\* _withdraw() line 1587: drop the merge intent.
 WithdrawPop ==
   /\ pc = "withdrawPop"
   /\ intent' = NoIntent /\ pc' = "idle"

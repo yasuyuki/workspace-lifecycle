@@ -38,7 +38,7 @@ Start ==
   /\ pc' = "enter"
   /\ UNCHANGED <<head, staged, restored, validator, intent, accepted, kills>>
 
-\* Lines 1068-1085: open the intent, or adopt a commit that matches commit_tree.
+\* Lines 1070-1087: open the intent, or adopt a commit that matches commit_tree.
 Enter ==
   /\ pc = "enter"
   /\ CASE intent.kind = None ->
@@ -68,38 +68,38 @@ RestoreDone ==
   /\ intent' = [intent EXCEPT !.phase = "resolved"] /\ pc' = "stage"
   /\ UNCHANGED <<head, staged, restored, validator, accepted, kills>>
 
-\* Lines 1133-1134: git add of the commit paths.
+\* Lines 1135-1136: git add of the commit paths.
 Stage ==
   /\ pc = "stage"
   /\ IF intent.committed THEN pc' = "validate" /\ UNCHANGED staged
      ELSE staged' = TRUE /\ pc' = "tree"
   /\ UNCHANGED <<head, restored, validator, intent, accepted, kills>>
 
-\* Line 1138: commit_tree saved.
+\* Line 1140: commit_tree saved.
 Tree ==
   /\ pc = "tree"
   /\ intent' = [intent EXCEPT !.tree = TRUE] /\ pc' = "commit"
   /\ UNCHANGED <<head, staged, restored, validator, accepted, kills>>
 
-\* Line 1141: git commit.
+\* Line 1143: git commit.
 Commit ==
   /\ pc = "commit"
   /\ head' = "c1" /\ staged' = FALSE /\ pc' = "committed"
   /\ UNCHANGED <<restored, validator, intent, accepted, kills>>
 
-\* Line 1146: committed saved.
+\* Line 1148: committed saved.
 Committed ==
   /\ pc = "committed"
   /\ intent' = [intent EXCEPT !.committed = TRUE] /\ pc' = "validate"
   /\ UNCHANGED <<head, staged, restored, validator, accepted, kills>>
 
-\* Line 1150: a failing validator leaves the intent for update-validation.
+\* Line 1152: a failing validator leaves the intent for update-validation.
 Validate ==
   /\ pc = "validate"
   /\ pc' = IF validator = "good" THEN "record" ELSE "idle"
   /\ UNCHANGED <<head, staged, restored, validator, intent, accepted, kills>>
 
-\* Lines 1165-1186: push and save the acceptance, dropping the intent.
+\* Lines 1167-1188: push and save the acceptance, dropping the intent.
 Record ==
   /\ pc = "record"
   /\ accepted' = TRUE /\ intent' = NoIntent /\ pc' = "idle"

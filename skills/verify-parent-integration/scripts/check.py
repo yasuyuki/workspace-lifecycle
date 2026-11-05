@@ -22,12 +22,9 @@ TLC_VERSION = 'TLC2 Version 2.19 of 08 August 2024'
 EXPECTED = {
     'child-only': None,
     'parent-finish': None,
-    # Known: a session commit after an interrupted child merge blocks both finishes (#86).
-    'parent-session': 'ChildReachesDefault',
-    # Known: a child integrated during the parent's interrupted default edge blocks that edge (#85).
-    'parent-edge-kill': 'ChildReachesDefault',
-    # Known: a child that also depends on its parent cannot resume after its merge (#87).
-    'parent-dependency': 'ChildReachesDefault',
+    'parent-session': None,
+    'parent-edge-kill': None,
+    'parent-dependency': None,
 }
 
 # (name, code it stands for, configuration, rule, model text, broken text)
@@ -35,7 +32,23 @@ MUTANTS = [
     ('the child merges onto a parent HEAD the parent did not accept',
      "service.py _integrate() `if parent and target_head != parent['acceptance']['commit']`", 'parent-session',
      'ParentAcceptsOnlyItsOwn',
-     'ELSE IF pHead = pAcc', 'ELSE IF TRUE'),
+     'ELSE IF dIntent = {} /\\ pHead = pAcc', 'ELSE IF dIntent = {}'),
+    ("the child merges while the parent's own integration is pending (#85)",
+     'service.py _integrate() `_refuse_pending_merge(state, target_branch, direction.get(\'task\'))`',
+     'parent-edge-kill', 'ChildReachesDefault',
+     'ELSE IF dIntent = {} /\\ pHead = pAcc', 'ELSE IF pHead = pAcc'),
+    ("the parent integrates while a child's merge into it is pending (#85)",
+     'service.py _integrate() `_refuse_pending_merge(state, source_branch)`', 'parent-edge-kill',
+     'ChildReachesDefault',
+     ' \\/ (dIntent = {} /\\ cIntent.open)', ''),
+    ("the parent's run starts while a child's merge into it is pending (#86)",
+     'service.py before_run() `_refuse_pending_merge(state, branch_for_task(repo, task))`', 'parent-session',
+     'ChildReachesDefault',
+     'lockP = None /\\ ~cIntent.open', 'lockP = None'),
+    ('the dependency check refuses the merge the child itself made (#87)',
+     "service.py _integrate() dependency loop `continue` for the parent under the child's merge intent",
+     'parent-dependency', 'ChildReachesDefault',
+     'pHead # pAcc /\\ ~cIntent.open', 'pHead # pAcc'),
     ('the parent finish ignores a pending child merge',
      'service.py finish() `_refuse_pending_merge(state, branch)`', 'parent-finish',
      'ChildCheckedInParent',

@@ -35,21 +35,21 @@ Sync commit: the last commit that changed this skill folder, as `sync` above fin
 
 | Code at the sync commit (`service.py` unless named) | Model |
 | --- | --- |
-| `finish()` intent and resume decisions: merge intent vs saved record, finish intent, `--revise-plan-head`, `_acceptance_holds` (lines 988-1072) | `FinEnter` |
-| `finish()` candidate skips `_validate` (1147-1150) | `FinValidate` |
-| `finish()` `_push` of the topic (1165) | `FinPush` |
-| `finish()` saves candidate or acceptance, pops the intent (1166-1186) | `FinRecord` |
-| `_integrate()` state read and `checks.verify` outside the state lock; `withdraw()` before a refusal (1603-1631); `checks.py` `verify()` (192-199) | `IntVerify` |
-| `_integrate()` identity and proof checks, `_refuse_pending_merge`, target synchronization, merge intent save (1632-1721) | `IntLock` |
-| `_integrate()` fast-forward or merge into the default checkout (1722-1779) | `IntMerge` |
-| `_integrate()` validation in the target; `_withdraw` on failure (1795-1808) | `IntValidate` |
-| `_integrate()` return `prepared` without check evidence, or record the evidence (1812-1819) | `IntGate` |
-| `_integrate()` candidate becomes acceptance (1820-1824) | `IntAccept` |
-| `_integrate()` `_push` of the default checkout (1825) | `IntPush` |
-| `_integrate()` save `integrated`, pop the intent (1826-1837) | `IntRecord` |
-| `finish()` wait, reuse or `_withdraw_prepared` (1187-1202); `_await_checks()` (1449-1469) | `Await` |
-| `_withdraw()` remote check and `git checkout -B` (1558-1584) | `Withdraw` |
-| `_withdraw()` pops the intent (1585) | `WithdrawPop` |
+| `finish()` intent and resume decisions: merge intent vs saved record, finish intent, `--revise-plan-head`, `_acceptance_holds` (lines 990-1074) | `FinEnter` |
+| `finish()` candidate skips `_validate` (1149-1152) | `FinValidate` |
+| `finish()` `_push` of the topic (1167) | `FinPush` |
+| `finish()` saves candidate or acceptance, pops the intent (1168-1188) | `FinRecord` |
+| `_integrate()` state read and `checks.verify` outside the state lock; `withdraw()` before a refusal (1605-1633); `checks.py` `verify()` (192-199) | `IntVerify` |
+| `_integrate()` identity and proof checks, `_refuse_pending_merge`, target synchronization, merge intent save (1634-1726) | `IntLock` |
+| `_integrate()` fast-forward or merge into the default checkout (1727-1784) | `IntMerge` |
+| `_integrate()` validation in the target; `_withdraw` on failure (1800-1813) | `IntValidate` |
+| `_integrate()` return `prepared` without check evidence, or record the evidence (1817-1824) | `IntGate` |
+| `_integrate()` candidate becomes acceptance (1825-1829) | `IntAccept` |
+| `_integrate()` `_push` of the default checkout (1830) | `IntPush` |
+| `_integrate()` save `integrated`, pop the intent (1831-1842) | `IntRecord` |
+| `finish()` wait, reuse or `_withdraw_prepared` (1189-1204); `_await_checks()` (1451-1471) | `Await` |
+| `_withdraw()` remote check and `git checkout -B` (1560-1586) | `Withdraw` |
+| `_withdraw()` pops the intent (1587) | `WithdrawPop` |
 | another task's `_integrate()` into the same default checkout | `OtherIntegrates` |
 | process killed; leases and locks drop, the state file stays | `Kill` |
 

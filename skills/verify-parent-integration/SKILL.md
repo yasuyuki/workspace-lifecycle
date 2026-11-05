@@ -36,16 +36,16 @@ Sync commit: the last commit that changed this skill folder, as `sync` above fin
 
 | Code at the sync commit (`service.py`) | Model |
 | --- | --- |
-| `_edge_leases()` (lines 1539-1548): the child's lease and the parent's, the parent without `allow_use` | `CStart` takes `lockP` |
-| `_integrate()` source and dependency checks (1632-1651), existing record (1666-1669), pending intent identity (1671-1674), `if parent and target_head != parent['acceptance']['commit']` (1693), merge intent save (1715-1721) | `CLock` |
-| target HEAD checks, fast-forward or `--no-ff` merge committed at once (1729-1779) | `CMerge`, `CMerged` |
-| child and parent validation in the parent checkout, HEAD unchanged (1795-1811) | `CValidate` |
-| `_push(target_worktree, ...)` of the parent branch (1825) | `CPush` |
-| child `integrated` and parent `acceptance` in one save, intent popped (1826-1837) | `CRecord` |
-| `result['parent'] = _integrate(repo, direction['task'], ...)` (1839-1840) | the child process continues with `PStart` |
-| `finish()` `_refuse_pending_merge(state, branch)` (986); a pending merge intent needs HEAD at the accepted commit (1040-1044); a new HEAD accepted (verify-validation-update) | `FStart`, `FEnter` |
-| the parent's own `_integrate()` into the default branch: source HEAD (1643-1644), existing record, pending intent identity (1674), intent save, merge, validation, push, record | `PStart`, `PLock`, `PMerge`, `PPush`, `PRecord` |
-| `run()` in the parent checkout, refused only while a lifecycle mutation holds the parent's lease | `SessionCommits` |
+| `_edge_leases()` (lines 1541-1550): the child's lease and the parent's, the parent without `allow_use` | `CStart` takes `lockP` |
+| `_integrate()` source and dependency checks, skipped for the parent while the child's own merge intent is pending (1634-1654), existing record (1670-1673), pending intent identity (1675-1678), `_refuse_pending_merge(state, target_branch, direction.get('task'))` refusing the parent's pending integration (1685), `if parent and target_head != parent['acceptance']['commit']` (1698), merge intent save (1720-1726) | `CLock` |
+| target HEAD checks, fast-forward or `--no-ff` merge committed at once (1734-1784) | `CMerge`, `CMerged` |
+| child and parent validation in the parent checkout, HEAD unchanged (1800-1816) | `CValidate` |
+| `_push(target_worktree, ...)` of the parent branch (1830) | `CPush` |
+| child `integrated` and parent `acceptance` in one save, intent popped (1831-1842) | `CRecord` |
+| `result['parent'] = _integrate(repo, direction['task'], ...)` (1844-1845) | the child process continues with `PStart` |
+| `finish()` `_refuse_pending_merge(state, branch)` (988); a pending merge intent needs HEAD at the accepted commit (1042-1046); a new HEAD accepted (verify-validation-update) | `FStart`, `FEnter` |
+| the parent's own `_integrate()` into the default branch: source HEAD (1645-1646), existing record, pending intent identity (1678), `_refuse_pending_merge(state, source_branch)` refusing a pending child merge (1686), intent save, merge, validation, push, record | `PStart`, `PLock`, `PMerge`, `PPush`, `PRecord` |
+| `run()` in the parent checkout, refused while a lifecycle mutation holds the parent's lease, and by `before_run()` while a merge into the parent's branch is pending (2455) | `SessionCommits` |
 | process killed; the OS drops its leases | `Kill` |
 
 ## Run
@@ -66,15 +66,13 @@ Each output line is JSON. The script checks five configurations in `model/`. Eac
 | --- | --- | --- |
 | `child-only` | only the child's `finish` runs; kills anywhere | every rule holds |
 | `parent-finish` | the parent's `finish` also runs; no kill inside the parent's edge to the default branch | every rule holds |
-| `parent-session` | as `parent-finish`, and the parent's session commits once while no lifecycle process holds the parent | `ChildReachesDefault` breaks: after a kill between the child's merge and its record, the session's commit makes the child's `finish` refuse (`target moved outside the recorded normal merge`) and the parent's `finish` refuse (`pending integration of c holds ...`). Known bug #86 |
-| `parent-edge-kill` | as `parent-finish`, with kills inside the parent's edge | `ChildReachesDefault` breaks: the parent's merge intent for its old accepted commit stays, the child moves the parent's acceptance, and every parent edge refuses (`pending integration identity differs`). Known bug #85 |
-| `parent-dependency` | as `child-only`, and the child also names the parent with `--dependency` | `ChildReachesDefault` breaks: after a kill between the child's merge and its record, the dependency check refuses (`dependency changed after acceptance: p`). Known bug #87 |
-
-Every invariant holds in every configuration; only the liveness property breaks where the table says.
+| `parent-session` | as `parent-finish`, and the parent's session commits once through `run` | every rule holds; `before_run()` refuses the parent's run while the child's merge into it is pending (#86) |
+| `parent-edge-kill` | as `parent-finish`, with kills inside the parent's edge | every rule holds; neither edge starts while the other's merge intent is pending, so a pending intent is always resumed by its own task's `finish` (#85) |
+| `parent-dependency` | as `child-only`, and the child also names the parent with `--dependency` | every rule holds; the dependency check accepts the parent's HEAD while the child's own merge intent is pending (#87) |
 
 `ChildReachesDefault` is checked under the fairness in `Spec`: the child's owner keeps running the child's `finish` (`CStart` is strongly fair), the parent's owner keeps running the parent's `finish` when that process exists, and a running process keeps going. A temporal violation is reported as `ChildReachesDefault`.
 
-With `--mutants`, it also breaks one check at a time in a copy of the model and requires each break to be caught by its rule. The mutants stand for: the child merging onto a parent HEAD the parent did not accept, the parent's `finish` ignoring a pending child merge, the child's record not moving the parent's acceptance, and the record saved before the push.
+With `--mutants`, it also breaks one check at a time in a copy of the model and requires each break to be caught by its rule. The mutants stand for: the child merging onto a parent HEAD the parent did not accept; the child edge ignoring the parent's pending integration, and the parent edge ignoring a pending child merge (#85); the parent's run ignoring a pending child merge (#86); the dependency check refusing the child's own merge (#87); the parent's `finish` ignoring a pending child merge; the child's record not moving the parent's acceptance; and the record saved before the push.
 
 ## Read a result
 
@@ -88,7 +86,7 @@ A `match: false` line or a mutant with `caught: false` needs a decision:
 
 ## Change the model with the code
 
-When a change to covered code is intended, update the action that the Coverage table names, so that one action is still one saved state change, one Git effect or one lease decision. Update the table's line numbers and the mutant text if they moved. A configuration that is known to break gets the rule name in `EXPECTED` in `scripts/check.py`, next to the Issue that tracks it. When #85, #86 or #87 is fixed, its configuration must hold: change its `EXPECTED` entry to `None` and model the new check or recovery that the fix adds.
+When a change to covered code is intended, update the action that the Coverage table names, so that one action is still one saved state change, one Git effect or one lease decision. Update the table's line numbers and the mutant text if they moved. A configuration that is known to break gets the rule name in `EXPECTED` in `scripts/check.py`, next to the Issue that tracks it.
 
 To prove that the check still catches a break after you change it, break the real code on a scratch copy, for example delete `_refuse_pending_merge(state, branch)` in `finish()`. Make the same edit to the matching action (`FEnter` replaces `IF cIntent.open \/ (dIntent` with `IF FALSE \/ (dIntent`) and run the script. It must report a mismatch. Then undo both edits and confirm that the script exits 0 again.
 

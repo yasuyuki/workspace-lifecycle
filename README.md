@@ -290,7 +290,11 @@ checkout, resolve any conflicts, and run the same finish again. It commits the
 merge you started as before. The same finish also closes a task whose accepted commit already
 reached the remote default some other way, after its required checks and the
 target's validation, without a new commit. A parent task's checkout keeps
-treating ignored data as dirt.
+treating ignored data as dirt. While a child's integration into its parent is
+pending, the parent's own integration and `run` in the parent's checkout are
+refused; while the parent's integration is pending, a child's integration into
+it is refused. The refusal names the task whose `finish` resumes the pending
+integration.
 
 A repository that relies on remote CI declares the checks every task's
 integration needs in a tracked `.github/required-checks.json` on its remote

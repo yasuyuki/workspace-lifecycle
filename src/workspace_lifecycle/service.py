@@ -952,10 +952,12 @@ def _acceptance_holds(repo, task, branch, identity, plan_digest, result_ref):
     return tip.split() == [accepted['commit'], 'refs/heads/' + branch]
 
 
-def _refuse_pending_merge(state, branch):
+def _refuse_pending_merge(state, branch, owner=None):
+    """Refuse while an integration into ``branch``, or the task ``owner`` integrating ``branch``, is pending."""
     for other, operation in state['intents'].items():
-        if operation.get('kind') == 'merge' and operation['target'] == branch:
-            raise LifecycleError('pending integration of ' + other + ' holds ' + branch)
+        if operation.get('kind') == 'merge' and (operation['target'] == branch or other == owner):
+            raise LifecycleError('pending integration of ' + other + ' holds ' + branch,
+                                 'run finish --task %s again; it resumes that integration' % other)
 
 
 @operation()
@@ -1646,6 +1648,8 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                 required = _task(state, dependency)
                 if required.get('hold') or not required.get('acceptance'):
                     raise LifecycleError('dependency is held or not accepted: ' + dependency)
+                if dependency == direction.get('task') and state['intents'].get(task_id, {}).get('kind') == 'merge':
+                    continue  # this task's own merge moved the parent; the merge checks below verify its HEAD
                 if head(repo, 'refs/heads/' + branch_for_task(repo, dependency, bindings)) != required['acceptance']['commit']:
                     raise LifecycleError('dependency changed after acceptance: ' + dependency)
             parent = None
@@ -1678,7 +1682,8 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                             or [{'app': c['app'], 'name': c['name']} for c in proof['checks']] != gated_checks):
                         raise LifecycleError('required check evidence does not match the exact accepted commit and remote')
                 if not intent:
-                    _refuse_pending_merge(state, target_branch)
+                    _refuse_pending_merge(state, target_branch, direction.get('task'))
+                    _refuse_pending_merge(state, source_branch)
                     holder = item.get('integration_synchronization', {})
                     pending = holder.get('synchronization')
                     if pending and pending.get('commit') == head(target_worktree):
@@ -2447,6 +2452,7 @@ def before_run(repo, task: str, cwd=None, lexical_cwd=None) -> list[dict]:
                                  'inspect `status --task %s` and resolve its recorded retirement '
                                  'recovery before starting new use' % task)
         check_run_identity(repo, task)
+        _refuse_pending_merge(state, branch_for_task(repo, task))
         if item.get('hold'):
             return [{'task': task, 'hold': item['hold'],
                      'recovery': 'finish and sync stay refused until `release-hold --task %s '

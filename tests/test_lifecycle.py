@@ -296,6 +296,74 @@ class LifecycleTest(unittest.TestCase):
         self.assertTrue(retire(self.root, task="c", result_ref="i/c", users_released=True)["retired"])
         self.assertTrue(retire(self.root, task="p", result_ref="i/p", users_released=True)["retired"])
 
+    def _begin_parent(self):
+        base = Path(self.temp.name)
+        self.parent = base / "parent"; self.child = base / "child"
+        begin(self.root, task="p", request="i/p", remote="origin", branch="topic/p", worktree=str(self.parent),
+              validation=["git", "diff", "--check"], preflight=self.preflight)
+        (self.parent / "p.txt").write_text("p\n"); self.task = "p"
+        self.pplan = base / "p.json"; self.pplan.write_text(json.dumps(self.source_plan(self.parent, "p.txt")))
+
+    def _begin_child(self, dependencies=()):
+        base = Path(self.temp.name)
+        begin(self.root, task="c", request="i/c", remote="origin", branch="topic/c", worktree=str(self.child),
+              parent="p", dependencies=list(dependencies), validation=["git", "diff", "--check"], preflight=self.preflight)
+        (self.child / "c.txt").write_text("c\n"); self.task = "c"
+        self.cplan = base / "c.json"; self.cplan.write_text(json.dumps(self.source_plan(self.child, "c.txt")))
+
+    def _killed_push(self, branch, *, after):
+        from workspace_lifecycle import service
+        real = service._push
+        class Killed(Exception):
+            pass
+        def push(repo, preflight, expected_branch, *args, **kwargs):
+            if expected_branch != branch:
+                return real(repo, preflight, expected_branch, *args, **kwargs)
+            if after:
+                real(repo, preflight, expected_branch, *args, **kwargs)
+            raise Killed()
+        return patch.object(service, "_push", push), Killed
+
+    def _child_on_trunk(self):
+        run(self.root, "fetch", "origin")
+        return "c.txt" in run(self.root, "ls-tree", "--name-only", "origin/trunk").split()
+
+    def test_child_waits_for_the_parents_interrupted_integration(self):
+        self._begin_parent()
+        killed_push, Killed = self._killed_push("trunk", after=False)
+        with killed_push, self.assertRaises(Killed):
+            finish(self.parent, task="p", plan_path=str(self.pplan), result_ref="i/p")
+        self._begin_child()
+        with self.assertRaisesRegex(LifecycleError, "pending integration of p"):
+            finish(self.child, task="c", plan_path=str(self.cplan), result_ref="i/c")
+        finish(self.parent, task="p", plan_path=str(self.pplan), result_ref="i/p")
+        finish(self.child, task="c", plan_path=str(self.cplan), result_ref="i/c")
+        self.assertTrue(self._child_on_trunk())
+
+    def test_parent_run_waits_for_an_interrupted_child_merge(self):
+        from workspace_lifecycle.service import before_run
+        self._begin_parent()
+        finish(self.parent, task="p", plan_path=str(self.pplan), result_ref="i/p")
+        self._begin_child()
+        killed_push, Killed = self._killed_push("topic/p", after=True)
+        with killed_push, self.assertRaises(Killed):
+            finish(self.child, task="c", plan_path=str(self.cplan), result_ref="i/c")
+        with self.assertRaisesRegex(LifecycleError, "pending integration of c holds topic/p"):
+            before_run(self.parent, "p")
+        finish(self.child, task="c", plan_path=str(self.cplan), result_ref="i/c")
+        self.assertEqual(before_run(self.parent, "p"), [])
+        self.assertTrue(self._child_on_trunk())
+
+    def test_child_that_depends_on_its_parent_resumes_after_its_merge(self):
+        self._begin_parent()
+        finish(self.parent, task="p", plan_path=str(self.pplan), result_ref="i/p")
+        self._begin_child(dependencies=["p"])
+        killed_push, Killed = self._killed_push("topic/p", after=True)
+        with killed_push, self.assertRaises(Killed):
+            finish(self.child, task="c", plan_path=str(self.cplan), result_ref="i/c")
+        finish(self.child, task="c", plan_path=str(self.cplan), result_ref="i/c")
+        self.assertTrue(self._child_on_trunk())
+
     def test_push_hold_then_retry_uses_same_finish_intent(self):
         gate = Path(self.temp.name) / "allow-push"
         code = ("import json,pathlib,subprocess; g=pathlib.Path(" + repr(str(gate)) + "); "

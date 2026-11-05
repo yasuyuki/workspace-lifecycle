@@ -35,11 +35,11 @@ Sync commit: the last commit that changed this skill folder, as `sync` above fin
 
 | Code at the sync commit | Model |
 | --- | --- |
-| `service.py` `reclaim()` phase `requested`: capture compared with the receipt, phase `authorized` (lines 2301-2317) | `Auth` |
-| `reclaim()` manifest check of the recovery path before the rename (2318-2329) | `StageCheck` |
-| `reclaim()` `recovery.rename(staging)` (2323) | `StageRename` |
-| `reclaim()` identity and manifest check of staging, phase `renamed` (2330-2339) | `StagedCheck` |
-| `reclaim()` phase `payload-removed` (2347-2348) | `Finish` |
+| `service.py` `reclaim()` phase `requested`: capture compared with the receipt, phase `authorized` (lines 2306-2322) | `Auth` |
+| `reclaim()` manifest check of the recovery path before the rename (2323-2334) | `StageCheck` |
+| `reclaim()` `recovery.rename(staging)` (2328) | `StageRename` |
+| `reclaim()` identity and manifest check of staging, phase `renamed` (2335-2344) | `StagedCheck` |
+| `reclaim()` phase `payload-removed` (2352-2353) | `Finish` |
 | `reclamation.py` `remove_tree()` root already gone (603-618), `_remove_tree_windows()` (480-486) | `Remove` |
 | `remove_tree()` root rename intent and `os.rename` to the root quarantine name (619-631) | `RootIntent`, `RootRename` |
 | `remove_tree()` capture or `_validate_resuming_names` (633-637) | `Scan` |

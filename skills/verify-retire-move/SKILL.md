@@ -35,16 +35,16 @@ Sync commit: the last commit that changed this skill folder, as `sync` above fin
 
 | Code at the sync commit (`service.py` unless named) | Model |
 | --- | --- |
-| `retire(request_only=True)` under `_lease(repo, task, allow_use=True)` (lines 1991-2078), called by `finish --users-released` inside the worktree | `AskInside` |
-| `_lease(repo, task)` without `allow_use` (1991); `leases.py` `guard()` refusal `if uses:` (164-177) | `Start` requires no active run and takes `lock` |
-| accepted result, integration and `head(repo, 'refs/heads/' + branch) != expected` (1996-2021); the new request with phase `requested` and `persist()` (2031-2068) | `Enter` |
-| payload still at the original path: registered worktree, branch, HEAD, admin and pointer checks; `_retirement_contents()` in phase `requested`; phase `moving` (2095-2109); `_retirement_contents()` (1844-1879) | `Check` |
-| `git worktree move` (2110): Git renames the directory, then writes the new path into the admin `gitdir` | `Rename`, `Pointer` |
-| recovery registered at the accepted HEAD, phases `recovery-held` and `archiving-admin` (2111-2124) | `Held` |
-| `admin.rename(archive)` (2125) | `Archive` |
-| archived pointer, neither path registered (`_retirement_record`), branch at the accepted commit, binding unset (2128-2140) | `Unbind` |
-| manifests, retired receipt, task and intent removed, one `persist()` (2141-2166) | `Receipt` |
-| `before_run()` refusal of a task with a retirement request (2436-2454), `check_run_identity()`; the shared use lock in `leases.py` `run()` (421-448) | `RunStarts` |
+| `retire(request_only=True)` under `_lease(repo, task, allow_use=True)` (lines 1996-2083), called by `finish --users-released` inside the worktree | `AskInside` |
+| `_lease(repo, task)` without `allow_use` (1996); `leases.py` `guard()` refusal `if uses:` (164-177) | `Start` requires no active run and takes `lock` |
+| accepted result, integration and `head(repo, 'refs/heads/' + branch) != expected` (2001-2026); the new request with phase `requested` and `persist()` (2036-2073) | `Enter` |
+| payload still at the original path: registered worktree, branch, HEAD, admin and pointer checks; `_retirement_contents()` in phase `requested`; phase `moving` (2100-2114); `_retirement_contents()` (1849-1884) | `Check` |
+| `git worktree move` (2115): Git renames the directory, then writes the new path into the admin `gitdir` | `Rename`, `Pointer` |
+| recovery registered at the accepted HEAD, phases `recovery-held` and `archiving-admin` (2116-2129) | `Held` |
+| `admin.rename(archive)` (2130) | `Archive` |
+| archived pointer, neither path registered (`_retirement_record`), branch at the accepted commit, binding unset (2133-2145) | `Unbind` |
+| manifests, retired receipt, task and intent removed, one `persist()` (2146-2171) | `Receipt` |
+| `before_run()` refusal of a task with a retirement request (2441-2460), `check_run_identity()`; the shared use lock in `leases.py` `run()` (421-448) | `RunStarts` |
 | process killed; the OS drops its lease | `Kill` |
 | `begin()` of another task whose `--worktree` is the freed original path (199-286) | `OtherBegins` |
 
