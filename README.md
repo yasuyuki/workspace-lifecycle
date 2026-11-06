@@ -850,6 +850,18 @@ is unchanged. A rollback to 0.8.22 allows those orders again, and an
 integration stuck in one of them stays refused until its intent is resolved
 by hand.
 
+Version 0.8.24 runs every validation with `PYTHONDONTWRITEBYTECODE=1`, and
+removes after each validation run the new ignored files that match the
+task's declared `--validation-outputs-json`; a refusal names the files the
+validation created (#38, #89). finish refuses a required-check declaration
+the task omits before its plan restores, archives or commits anything (#67).
+`finish --wait-checks` refuses at once a required check that the commit's
+finished workflow runs lack, saying to merge the remote default branch, and
+at its limit says to start a workflow for a commit that has none instead of
+to keep waiting (#73). A rollback to 0.8.23 ignores the declared outputs, so
+finish refuses them again, and waits again until the limit for a check that
+cannot appear.
+
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
 default branch carries the accepted commit's SHA. `integration_checks` counts
