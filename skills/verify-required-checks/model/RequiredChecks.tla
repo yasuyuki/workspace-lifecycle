@@ -12,9 +12,11 @@
 
    Between runs of finish the owner does what the refusal says: it requires the
    declared checks with update-required-checks when finish says they are
-   omitted, and runs the same finish again when the wait timed out. It may
-   also merge the default branch into the topic, or start the workflow again
-   by another push, but no message tells it to. *)
+   omitted; merges the remote default branch into the topic when finish says
+   the checks cannot appear on the commit; starts the commit's workflow again
+   when finish says no run exists; and runs the same finish again when the
+   wait timed out on running checks. It may also merge or start the workflow
+   at other times. *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Evolves,     \* subset of BOOLEAN: another task adds "x" to the default branch
@@ -38,7 +40,7 @@ VARIABLES pc,         \* step of the running finish; "idle" between runs
           runs,       \* check -> "none" | "pending" | "success" on the pushed commit
           lost,
           policy,     \* the default branch declaration the last policy check read
-          refused,    \* "none", "omit" or "pending": what the last refusal said
+          refused,    \* "none", "omit", "absent", "norun" or "pending": what the last refusal said
           omitAtStart,\* the declaration already named checks the task omits when finish started
           restored,   \* this finish ran the plan's restore entries
           lateRefusal,\* a refusal known at the start came after the restore
@@ -138,13 +140,25 @@ Integrate ==
   /\ UNCHANGED <<evolves, own, defDecl, defJobs, head, headJobs, headDecl, required, pushed, runs,
                  lost, omitAtStart, restored, integrated, gateHeld>>
 
-\* _await_checks() -> checks.wait(): success once every gated check succeeded;
-\* a missing or unfinished check is pending until the timeout, whose recovery
-\* is "run the same finish again to keep waiting".
+\* The commit's workflow runs (one check suite of the app) exist and all finished.
+SuitesCompleted == (\E c \in headJobs : runs[c] # "none") /\ (\A c \in headJobs : runs[c] # "pending")
+
+\* No workflow run of the commit exists.
+NoRun == \A c \in Checks : runs[c] = "none"
+
+\* _await_checks() -> checks.wait(): success once every gated check succeeded.
+\* checks.watch(absent=True) ends at once when a missing check's app has only
+\* finished suites ("cannot appear": merge the remote default branch). At the
+\* timeout, missing checks without any run of their app name starting the
+\* workflow again; otherwise the recovery is "keep waiting".
 Wait ==
   /\ pc = "wait"
   /\ IF Gate \subseteq Succeeded
        THEN pc' = "final" /\ UNCHANGED <<refused, lateRefusal>>
+     ELSE IF \E c \in Gate : runs[c] = "none" /\ SuitesCompleted
+       THEN Refuse("absent")
+     ELSE IF NoRun
+       THEN Refuse("norun")
        ELSE Refuse("pending")
   /\ UNCHANGED <<evolves, own, defDecl, defJobs, head, headJobs, headDecl, required, pushed, runs,
                  lost, policy, omitAtStart, restored, integrated, gateHeld>>
@@ -174,15 +188,22 @@ Evolve ==
 \* The owner does what the refusal says.
 Recover ==
   /\ pc = "idle" /\ refused # "none"
+  /\ refused' = "none"
   \* "required checks omit ...; require them with update-required-checks"
   /\ required' = IF refused = "omit" THEN required \cup defDecl ELSE required
-  \* update_required_checks() drops a candidate, not an acceptance.
-  /\ refused' = "none"
-  \* "the accepted commit is kept; run the same finish again to keep waiting"
-  /\ UNCHANGED <<pc, evolves, own, defDecl, defJobs, head, headJobs, headDecl, pushed, runs,
+  \* "merge the remote default branch into the task ... then run finish again"
+  /\ IF refused = "absent"
+       THEN head' = head + 1 /\ headJobs' = defJobs \cup Own /\ headDecl' = defDecl \cup Own
+       ELSE UNCHANGED <<head, headJobs, headDecl>>
+  \* "no workflow run exists for it, so start one for this commit"
+  /\ runs' = IF refused = "norun"
+               THEN [c \in Checks |-> IF c \in headJobs /\ runs[c] = "none" THEN "pending" ELSE runs[c]]
+               ELSE runs
+  \* "pending": "run the same finish again to keep waiting"
+  /\ UNCHANGED <<pc, evolves, own, defDecl, defJobs, pushed,
                  lost, policy, omitAtStart, restored, lateRefusal, integrated, gateHeld>>
 
-\* The owner merges the remote default branch into the topic. No message says to.
+\* The owner merges the remote default branch into the topic on its own.
 Sync ==
   /\ pc = "idle" /\ refused = "none" /\ ~integrated /\ head < MaxCommits
   /\ head' = head + 1
@@ -190,8 +211,8 @@ Sync ==
   /\ UNCHANGED <<pc, evolves, own, defDecl, defJobs, required, pushed, runs,
                  lost, policy, refused, omitAtStart, restored, lateRefusal, integrated, gateHeld>>
 
-\* The owner starts the pushed commit's workflow again, for example by pushing
-\* it to another ref. No message says to.
+\* The owner starts the pushed commit's workflow again on its own, for example
+\* by pushing it to another ref.
 Retrigger ==
   /\ pc = "idle" /\ refused = "none" /\ pushed = head /\ ~integrated
   /\ \E c \in headJobs : runs[c] = "none"
@@ -206,7 +227,7 @@ FinishSteps == Start \/ Pre \/ Resolve \/ Push \/ Integrate \/ Wait \/ Final
 Next == FinishSteps \/ Ci \/ Evolve \/ Recover \/ Sync \/ Retrigger \/ Done
 
 \* The owner keeps running finish and following its refusals; CI finishes the
-\* runs it started; nothing makes the owner merge or start a workflow again.
+\* runs it started; nothing else makes the owner merge or start a workflow again.
 Spec == Init /\ [][Next]_vars /\ WF_vars(FinishSteps) /\ WF_vars(Recover) /\ WF_vars(Ci)
 
 ------------------------------------------------------------------------------

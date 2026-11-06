@@ -371,6 +371,14 @@ It asks GitHub every 30 seconds and stops as soon as any required check
 completes without success, naming each failed check with its state, run ID and
 GitHub URL. Missing, queued and running checks keep it waiting until SECONDS
 have passed; the default, 21600, is GitHub Actions' default job timeout.
+While a check is missing, finish also reads the commit's check suites of that
+check's app. When they have all completed, the commit's workflow runs finished
+without the check, so it cannot appear: finish refuses at once and says to
+merge the remote default branch into the task, or add the job, before running
+finish again (#73). When SECONDS pass with only missing checks and no run of
+their app exists, GitHub started no workflow for the commit, and the refusal
+says to start one for it, for example by pushing it to a new branch, instead
+of to keep waiting.
 A query that GitHub answers with a server error or an empty body, or that
 times out, is asked again at the next poll, and refuses only if GitHub still
 cannot answer when SECONDS have passed. Any other query failure, such as

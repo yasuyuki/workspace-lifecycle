@@ -21,9 +21,9 @@ TLC_VERSION = 'TLC2 Version 2.19 of 08 August 2024'
 # as violated, a finding about the current code filed as the Issue in the comment.
 EXPECTED = {
     'steady': None,
-    'default-adds-check': 'FinishCompletes',            # workspace-lifecycle#73
+    'default-adds-check': None,
     'default-adds-check-effects': None,
-    'lost-event': 'FinishCompletes',                    # workspace-lifecycle#73
+    'lost-event': None,
 }
 
 # (name, code it stands for, configuration, rule, model text, broken text)
@@ -43,6 +43,16 @@ MUTANTS = [
      'NoEffectBeforeKnownRefusal',
      '     ELSE IF ~(defDecl \\subseteq required) THEN Refuse("omit")\n',
      ''),
+    ('the wait keeps polling a check the finished workflow runs lack',
+     'checks.watch(absent=True) and _absence(); checks.wait() "cannot appear"', 'default-adds-check',
+     'FinishCompletes',
+     '     ELSE IF \\E c \\in Gate : runs[c] = "none" /\\ SuitesCompleted\n       THEN Refuse("absent")\n',
+     ''),
+    ('the timeout without any workflow run says to keep waiting',
+     'checks.wait() `unstarted` recovery', 'lost-event',
+     'FinishCompletes',
+     'THEN Refuse("norun")',
+     'THEN Refuse("pending")'),
     ('the wait counts a missing check as done',
      'checks.watch() `unmet` and PENDING', 'lost-event',
      'GateHolds',

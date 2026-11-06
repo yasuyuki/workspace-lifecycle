@@ -32,7 +32,7 @@ class FakeGitHub:
     """
 
     def __init__(self, trunk):
-        self.runs = {}; self.queries = []; self.suite_queries = []; self.trunk = trunk
+        self.runs = {}; self.queries = []; self.suite_queries = []; self.trunk = trunk; self.completed = set(); self.suite_ids = {}
         self.unavailable = False; self.denied = False
 
     def answer(self):
@@ -45,25 +45,36 @@ class FakeGitHub:
     def add(self, repository, commit, check, status="completed", conclusion="success", app=None, url=None,
             branch=None):
         branch = branch or ("trunk" if commit == self.trunk() else "topic")
+        app = app or check["app"]
+        suite = self.suite_ids.setdefault((branch, app), 1 + len(self.suite_ids))
         rows = self.runs.setdefault((repository, commit, check["name"]), [])
         rows.append({"id": 1000 + sum(map(len, self.runs.values())), "name": check["name"],
                      "head_sha": commit, "status": status,
                      "conclusion": conclusion if status == "completed" else None,
-                     "app": app or check["app"], "html_url": url, "suite": self.suite(branch)})
-
-    @staticmethod
-    def suite(branch):
-        return 1 + sum(map(ord, branch))
+                     "app": app, "html_url": url, "suite": suite})
 
     def __call__(self, repository, commit, name):
         self.queries.append((repository, commit, name))
         self.answer()
         return list(self.runs.get((repository, commit, name), []))
 
+    def complete(self, commit, branch="topic"):
+        """Every workflow run of ``commit`` on ``branch`` finished."""
+        self.completed.add((commit, branch))
+
     def suites(self, repository, commit):
+        """One suite per branch and app with runs on ``commit``; in progress until complete()."""
         self.suite_queries.append((repository, commit))
         self.answer()
-        return {self.suite(branch): branch for branch in ("trunk", "topic")}
+        owners = {suite: key for key, suite in self.suite_ids.items()}
+        found = {}
+        for (_, sha, _), rows in self.runs.items():
+            for row in rows:
+                if sha == commit:
+                    branch, app = owners[row["suite"]]
+                    found[row["suite"]] = {"id": row["suite"], "head_branch": branch, "head_sha": commit, "app": app,
+                                           "status": "completed" if (commit, branch) in self.completed else "in_progress"}
+        return found
 
 
 class FakeClock:
@@ -610,7 +621,8 @@ class RequiredChecksTest(unittest.TestCase):
         self.github.add("example/repo", commit, TEST, app="other-app")
         self.github.add("example/repo", commit, {"app": "github-actions", "name": "native-e2e"})
         error, clock = self.waiting_refused("foreign-wait", "did not finish within 90", seconds=90)
-        self.assertEqual(self.reported(error), [{**TEST, "state": "missing"}])
+        self.assertEqual(self.reported(error), [{**TEST, "state": "missing", "suites": "running"}],
+                         "native-e2e keeps the github-actions suite running")
         self.assertEqual(clock.sleeps, [30, 30, 30])
         self.assertIn("finish again", error.recovery)
         self.github.add("example/repo", commit, TEST)
@@ -618,6 +630,34 @@ class RequiredChecksTest(unittest.TestCase):
         error, clock = self.waiting_refused("foreign-wait", "did not finish within 45", seconds=45)
         self.assertEqual([c["state"] for c in self.reported(error)], ["in_progress"])
         self.assertEqual(clock.sleeps, [30, 15])
+
+    def test_wait_refuses_at_once_a_check_the_finished_workflow_runs_lack(self):
+        self.start("absent", required=(TEST, LINT))
+        self.refused("absent", "missing")
+        commit = self.pushed("absent")
+        self.github.add("example/repo", commit, LINT)
+        error, clock = self.waiting_refused("absent", "did not finish within 30", seconds=30)
+        self.assertIn("keep waiting", error.recovery, "a suite still running may add the check")
+        self.github.complete(commit)
+        error, clock = self.waiting_refused("absent", "cannot appear")
+        self.assertEqual(clock.sleeps, [], "no wait for a check the finished runs lack")
+        self.assertEqual(json.loads(str(error).split("without them: ", 1)[1]),
+                         [{**TEST, "state": "missing", "suites": "completed"}])
+        self.assertIn("merge the remote default branch", error.recovery)
+        self.assertEqual(self.pushed("absent"), commit)
+
+    def test_wait_without_any_run_names_starting_the_workflow(self):
+        self.start("unstarted")
+        self.refused("unstarted", "missing")
+        error, clock = self.waiting_refused("unstarted", "did not finish within 60", seconds=60)
+        self.assertEqual(clock.sleeps, [30, 30])
+        self.assertIn("no workflow run exists", error.recovery)
+        commit = self.pushed("unstarted")
+        self.github.add("example/repo", commit, TEST, "in_progress", None)
+        error, _ = self.waiting_refused("unstarted", "did not finish within 60", seconds=60)
+        self.assertIn("keep waiting", error.recovery)
+        self.github.add("example/repo", commit, TEST)
+        self.assertEqual(self.waiting("unstarted")[0]["integration"]["destination"], "trunk")
 
     def test_wait_without_required_checks_queries_nothing(self):
         self.start("plain-wait", required=())

@@ -38,13 +38,14 @@ Sync commit: the last commit that changed this skill folder, as `sync` above fin
 | `service.py` `finish()` early refusals before any effect, ending with `checks.require(checks.current(...), required_checks)` (1194-1211) | `Pre`, `"omit"` |
 | `service.py` `finish()` `_resolve_files()` runs the plan's restore entries (1216) | `Resolve`, `restored` |
 | `service.py` `finish()` `candidate` from `_gated_checks()` (1239, 1537-1547); `_push()` and the acceptance or candidate record (1263) | `Push` |
-| `checks.py` `_states()`: a check is `missing` until a run of its name exists on the commit (173-189) | `runs`, `Push` |
+| `checks.py` `_states()`: a check is `missing` until a run of its name exists on the commit (184-200); `_suites()` and `_absence()` read the commit's check suites of the check's app: `none`, `completed` or `running` (143-162) | `runs`, `Push`, `SuitesCompleted`, `NoRun` |
 | `service.py` `finish()` `_integrate(prepare=True)` (1288); `_check_policy()` with `checks.current()` and `checks.require()` (1531-1534, `checks.py` 73-77, 104-109), which refuses a declaration the default branch gained after finish started; `gated_checks` with `checks.source()` `added` (1723, `checks.py` 80-101); `checks.verify()` (1729) | `Integrate`, `Added`, `Gate` |
-| `service.py` `_await_checks()` (1550-1570); `checks.watch()` treats `missing` as pending until the deadline and `checks.wait()` answers "the accepted commit is kept; run the same finish again to keep waiting" (`checks.py` 202-245); `_withdraw_prepared()` (1296) | `Wait` |
+| `service.py` `_await_checks()` (1550-1570); `checks.watch(absent=True)` ends at once when a missing check's app has only finished suites, and `checks.wait()` refuses it as `cannot appear` with "merge the remote default branch into the task"; at the deadline it says "no workflow run exists for it, so start one" when no run of the app exists, else "run the same finish again to keep waiting" (`checks.py` 213-279); `_withdraw_prepared()` (1296) | `Wait` |
 | `service.py` `_integrate(reuse=...)` pushes to the default branch | `Final`, `gateHeld` |
 | `service.py` `update_required_checks()`: the new set must include the current declaration (458) and a candidate is dropped (460) | `Recover` after `"omit"` |
+| the owner merges the remote default branch into the topic after `cannot appear`, or starts the commit's workflow again (for example by pushing it to a new branch) after `no workflow run exists` | `Recover` after `"absent"` and `"norun"` |
 | another task's integration adds a job and its declaration to the default branch | `Evolve` |
-| the owner merges the remote default branch into the topic, or starts the workflow again by another push | `Sync`, `Retrigger` (no fairness: no message says to) |
+| the owner merges or starts the workflow on its own at other times | `Sync`, `Retrigger` (no fairness) |
 
 ## Run
 
@@ -63,28 +64,23 @@ Each output line is JSON, one per configuration in `model/`:
 | Configuration | Default branch | Push events | Expected at the sync commit |
 | --- | --- | --- | --- |
 | `steady` | unchanged | all arrive | every rule holds, with or without the task's own declaration |
-| `default-adds-check` | gains `x` | all arrive | `FinishCompletes` breaks (#73) |
+| `default-adds-check` | gains `x` | all arrive | every rule holds (#73 fixed) |
 | `default-adds-check-effects` | gains `x` | all arrive | every rule holds (#67 fixed) |
-| `lost-event` | unchanged | one is lost | `FinishCompletes` breaks (#73) |
+| `lost-event` | unchanged | one is lost | every rule holds (#73 fixed) |
 
-With `--mutants`, it also breaks one check at a time in a copy of the model and requires its rule to catch each: integration without `checks.require()`, integration without the commit's `added` checks, and a wait that counts a missing check as done (`GateHolds`); finish running the plan before its early declaration check (`NoEffectBeforeKnownRefusal`).
+With `--mutants`, it also breaks one check at a time in a copy of the model and requires its rule to catch each: integration without `checks.require()`, integration without the commit's `added` checks, and a wait that counts a missing check as done (`GateHolds`); finish running the plan before its early declaration check (`NoEffectBeforeKnownRefusal`); a wait that keeps polling a check the finished workflow runs lack, and a timeout without any run that says to keep waiting (`FinishCompletes`, the two #73 dead ends).
 
 ## Read a result
 
-Read every result with the `/statechart` skill, with `model/RequiredChecks.tla`, `model/chart.cfg` and the view `model/chart.mjs`. It tells each invariant violation as its shortest path in plain words and charts how a task moves between work, refusal, waiting and integration; the `FinishCompletes` dead end shows as the loop from "requires a check this commit cannot show" through the timeout back to itself, whose only exit is the merge no message names. For a `FinishCompletes` violation, read TLC's lasso in the check output.
+Read every result with the `/statechart` skill, with `model/RequiredChecks.tla`, `model/chart.cfg` and the view `model/chart.mjs`. It tells each invariant violation as its shortest path in plain words and charts how a task moves between work, refusal, waiting and integration. For a `FinishCompletes` violation, read TLC's lasso in the check output.
 
-The findings at the sync commit, as steps in the code's words:
-
-- **#73, `default-adds-check`.** Another task adds a job and its declaration to the default branch. finish pushes the task's commit, then `_check_policy()` refuses with `required checks omit [x]`. The owner runs `update-required-checks` as told. The next finish resumes the acceptance and `checks.wait()` polls `x`, which the commit's workflow never runs, until the timeout, and says to run the same finish again to keep waiting. Every rerun does the same. Only merging the default branch into the topic, which no message names, leads out.
-- **#73, `lost-event`.** GitHub never turns the topic push into a workflow run, so every required check stays `missing`; the timeout says to keep waiting, and the same finish never pushes again. Only starting the workflow again by another push leads out (seen on 2026-11-06 for `validation-outputs-38`).
+At the sync commit every rule holds in every configuration. Before the fixes, `default-adds-check` and `lost-event` broke `FinishCompletes` (#73), and `default-adds-check-effects` broke `NoEffectBeforeKnownRefusal` (#67).
 
 A `match: false` line or a mutant with `caught: false` needs a decision:
 
-1. **A real bug.** Replay the path against the real code. `RequiredChecksTest` in `tests/test_required_checks.py` drives finish against a fake GitHub (`FakeGitHub`) whose check runs you set per commit; `test_declaration_added_after_begin_closes_the_gate_until_updated` starts from a declaration added after `begin`. Call `finish()` once per `Start`, `update_required_checks()` for `Recover` after `"omit"`, and leave a check without runs for a lost push. If the replay reaches the end state, it is a bug. File it as an Issue with the path and the replay, and add the rule to `EXPECTED` with the Issue number. Do not weaken a rule or the model to make it pass.
+1. **A real bug.** Replay the path against the real code. `RequiredChecksTest` in `tests/test_required_checks.py` drives finish against a fake GitHub (`FakeGitHub`) whose check runs you set per commit; `test_declaration_added_after_begin_closes_the_gate_until_updated` starts from a declaration added after `begin`. Call `finish()` once per `Start`, `update_required_checks()` for `Recover` after `"omit"`; leave a check without runs for a lost push, and call `FakeGitHub.complete()` for finished workflow runs. If the replay reaches the end state, it is a bug. File it as an Issue with the path and the replay, and add the rule to `EXPECTED` with the Issue number. Do not weaken a rule or the model to make it pass.
 2. **A modeling error.** If the replay cannot reach the end state, the model allows a step the code does not have. Find the action that differs from the code and fix it against the Coverage table.
 3. **A mutant that is no longer caught.** Either the model lost the check that the mutant removes, or `MUTANTS` in `scripts/check.py` no longer matches the model text, which the script reports as `model text not found once`.
-
-When a fix for #73 lands, the configuration's expected value changes to `None` in the same change, and the model gains the step the fix adds (for example a refusal that names the merge or the workflow restart).
 
 ## Change the model with the code
 
@@ -96,6 +92,7 @@ To prove that the check still catches a break after you change it, break the rea
 
 - Bounds: three check names, two topic commits, at most one lost push event; CI runs end in success.
 - Failed checks, reruns of a failed check and `required checks failed` are not modeled; nor are GitHub's API errors (`ChecksUnavailable`).
+- One workflow per app: the check suites of the check's app finish together. A suite that stays queued without running reads as `running`, so the wait keeps waiting, as before the fix.
 - Which events branch protection counts (#52) is GitHub's rule, not the code's; the model takes every run on the commit as counted.
 - `checks.source()` is taken as `added = the commit's declaration minus the task's checks`; the merge-base comparison only matters when the commit inherits a declaration, and then this set is empty.
 - After `update-required-checks` drops a candidate, the real finish pushes the same commit again; GitHub starts no workflow for an unchanged ref, so the model keeps the old runs.

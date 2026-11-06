@@ -140,15 +140,26 @@ def _runs(repository: str, commit: str, name: str) -> list[dict]:
     return _api(argv)
 
 
-def _suites(repository: str, commit: str) -> dict[int, str | None]:
-    """The branch each check suite on ``commit`` was created for."""
+def _suites(repository: str, commit: str) -> dict[int, dict]:
+    """Each check suite on ``commit``: the branch it was created for, its app and status."""
     argv = ['gh', 'api', '--hostname', 'github.com', '--paginate', '-X', 'GET',
             f'repos/{repository}/commits/{commit}/check-suites', '-f', 'per_page=100',
-            '--jq', '.check_suites[] | {id, head_branch, head_sha}']
+            '--jq', '.check_suites[] | {id, head_branch, head_sha, status, app: .app.slug}']
     suites = _api(argv)
     if any(suite.get('head_sha') != commit or not isinstance(suite.get('id'), int) for suite in suites):
         raise LifecycleError('required check response is not bound to the requested commit')
-    return {suite['id']: suite.get('head_branch') for suite in suites}
+    return {suite['id']: suite for suite in suites}
+
+
+def _absence(repository: str, commit: str, missing: list[dict]) -> None:
+    """Mark each missing check with what the suites of its app on ``commit`` say:
+    ``none`` when no run of that app exists, ``completed`` when all its runs
+    finished without the check, which then cannot appear, else ``running``."""
+    suites = list(_suites(repository, commit).values())
+    for entry in missing:
+        own = [suite for suite in suites if suite.get('app') == entry['app']]
+        entry['suites'] = ('none' if not own else
+                           'completed' if all(suite.get('status') == 'completed' for suite in own) else 'running')
 
 
 def _api(argv: list[str]) -> list[dict]:
@@ -178,7 +189,7 @@ def _states(repository: str, commit: str, required: list[dict], branch: str | No
         if any(run.get('head_sha') != commit or not isinstance(run.get('id'), int) for run in runs):
             raise LifecycleError('required check response is not bound to the requested commit')
         if branch:
-            runs = [run for run in runs if suites.get(run.get('suite')) == branch]
+            runs = [run for run in runs if (suites.get(run.get('suite')) or {}).get('head_branch') == branch]
         latest = max(runs, key=lambda run: run['id'], default=None)
         state = ('missing' if latest is None else
                  latest.get('status') if latest.get('status') != 'completed' else
@@ -200,11 +211,14 @@ def verify(repository: str, commit: str, required: list[dict]) -> dict:
 
 
 def watch(repository: str, commit: str, required: list[dict], seconds: float,
-          branch: str | None = None) -> tuple[str, list[dict]]:
+          branch: str | None = None, absent: bool = False) -> tuple[str, list[dict]]:
     """Poll the checks on ``commit``, from runs on ``branch`` when given:
     ``success`` once every one succeeded, ``failed`` at the first failed one,
     or ``pending`` when ``seconds`` run out. A query GitHub could not answer
-    is asked again at the next poll, and refuses only when ``seconds`` run out."""
+    is asked again at the next poll, and refuses only when ``seconds`` run out.
+
+    With ``absent``, each missing check is marked by _absence(), and the
+    watch ends ``absent`` as soon as one cannot appear (#73)."""
     deadline = time.monotonic() + seconds; reported = None
     while True:
         try:
@@ -219,6 +233,14 @@ def watch(repository: str, commit: str, required: list[dict], seconds: float,
             unmet = [entry for entry in results if entry['state'] != 'success']
             if not unmet:
                 return 'success', results
+            missing = [entry for entry in unmet if entry['state'] == 'missing']
+            if absent and missing:
+                try:
+                    _absence(repository, commit, missing)
+                except ChecksUnavailable:
+                    pass  # unmarked, so neither absent nor unstarted; the next poll asks again
+                if any(entry.get('suites') == 'completed' for entry in missing):
+                    return 'absent', results
             if time.monotonic() >= deadline:
                 return 'pending', results
             states = 'waiting for required checks on ' + commit + ': ' + json.dumps(
@@ -232,14 +254,26 @@ def watch(repository: str, commit: str, required: list[dict], seconds: float,
 def wait(repository: str, commit: str, required: list[dict], seconds: float) -> None:
     """Return once every required check succeeded on ``commit``; refuse at the
     first failed one, or with the unfinished ones when ``seconds`` run out."""
-    outcome, results = watch(repository, commit, required, seconds)
+    outcome, results = watch(repository, commit, required, seconds, absent=True)
     if outcome == 'failed':
         failed = [entry for entry in results if entry['state'] not in PENDING | {'success'}]
         raise LifecycleError('required checks failed for ' + repository + '@' + commit + ': '
                              + json.dumps(failed, sort_keys=True),
                              'the accepted commit is kept; rerun the failed check or commit a fix, then run finish again')
+    unmet = [entry for entry in results if entry['state'] != 'success']
+    if outcome == 'absent':
+        absent = [entry for entry in unmet if entry.get('suites') == 'completed']
+        raise LifecycleError('required checks cannot appear on ' + repository + '@' + commit
+                             + ': its workflow runs finished without them: ' + json.dumps(absent, sort_keys=True),
+                             'the accepted commit is kept; merge the remote default branch into the task, or add '
+                             'the missing jobs to its workflow, commit, then run finish again')
     if outcome == 'pending':
-        unmet = [entry for entry in results if entry['state'] != 'success']
+        # Only missing checks whose app has no run at all: GitHub started no
+        # workflow for this commit, and waiting longer will not start one.
+        unstarted = all(entry['state'] == 'missing' and entry.get('suites') == 'none' for entry in unmet)
         raise LifecycleError('required checks did not finish within ' + str(seconds) + ' seconds for '
                              + repository + '@' + commit + ': ' + json.dumps(unmet, sort_keys=True),
+                             'the accepted commit is kept; no workflow run exists for it, so start one for this '
+                             'commit, for example by pushing it to a new branch, then run the same finish again'
+                             if unstarted else
                              'the accepted commit is kept; run the same finish again to keep waiting')
