@@ -326,7 +326,10 @@ refused. The task records the declaration's commit, blob and checks as
 
 Before creating an integration merge, finish reads the declaration again from
 the remote default branch. A check declared since the task began refuses
-integration until `update-required-checks` adds it; a removed declaration
+integration until `update-required-checks` adds it. A finish that has not yet
+accepted the current HEAD makes this refusal before the plan's restore, archive
+or commit and before validation and push, so the same plan can run again after
+the update; a removed declaration
 leaves the task's recorded requirement in place until an update removes it.
 `update-required-checks` applies the same rule against the current declaration
 and records it with the change. When the accepted commit itself changes the

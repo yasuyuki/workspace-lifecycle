@@ -1198,6 +1198,13 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
                     target_dirt = _initial_target_dirt(repo, state, task, source_head)
                     if target_dirt:
                         early = LifecycleError('integration target has unrelated dirty or merge state: ' + _preview(target_dirt))
+                if not early:
+                    # _integrate() refuses the same omission, but only after the
+                    # plan's restore entries deleted their files (#67).
+                    try:
+                        checks.require(checks.current(repo, task['remote']), task.get('required_checks', []))
+                    except LifecycleError as exc:
+                        early = exc
                 if early:
                     if entry_intent is None:
                         state['intents'].pop(task_id); save_state(directory, state)

@@ -92,12 +92,16 @@ Start ==
                  lost, policy, refused, lateRefusal, integrated, gateHeld>>
 
 \* finish(): a task whose acceptance or candidate is the current HEAD resumes at
-\* _integrate(); otherwise the plan, validation and push run first.
+\* _integrate(). Otherwise the early refusals run before any effect, ending with
+\* checks.require() of the remote default declaration; then the plan,
+\* validation and push.
 Pre ==
   /\ pc = "pre"
-  /\ pc' = IF pushed = head THEN "integrate" ELSE "resolve"
+  /\ IF pushed = head THEN pc' = "integrate" /\ UNCHANGED <<refused, lateRefusal>>
+     ELSE IF ~(defDecl \subseteq required) THEN Refuse("omit")
+     ELSE pc' = "resolve" /\ UNCHANGED <<refused, lateRefusal>>
   /\ UNCHANGED <<evolves, own, defDecl, defJobs, head, headJobs, headDecl, required, pushed, runs,
-                 lost, policy, refused, omitAtStart, restored, lateRefusal, integrated, gateHeld>>
+                 lost, policy, omitAtStart, restored, integrated, gateHeld>>
 
 \* _resolve_files(): the plan's restore entries delete their files.
 Resolve ==

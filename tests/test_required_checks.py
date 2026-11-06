@@ -1334,8 +1334,30 @@ class RequiredChecksTest(unittest.TestCase):
         record = status(self.topic, "legacy")
         self.assertEqual(record["required_checks_policy"]["commit"], declared_at)
         self.assertEqual(record["required_checks_updates"][-1]["policy"]["checks"], [TEST])
+        self.refused("legacy", "missing")
         self.github.add("example/repo", self.pushed("legacy"), TEST)
         self.assertEqual(self.finish("legacy")["integration"]["destination"], "trunk")
+
+    def test_an_omitted_declaration_refuses_before_the_plan_deletes_files(self):
+        import hashlib
+        self.start("early", required=None)
+        generated = self.topic / "generated.out"; generated.write_text("generated\n")
+        plan = json.loads(self.plan.read_text())
+        plan["restore"] = [{"path": "generated.out", "classification": "reproducible", "owner": "early",
+                            "evidence": "written by this test", "regeneration": {"evidence": "the test writes it again"},
+                            "sha256": hashlib.sha256(generated.read_bytes()).hexdigest()}]
+        self.plan.write_text(json.dumps(plan))
+        self.declare([TEST])
+        self.refused("early", "omit")
+        self.assertTrue(generated.exists())
+        record = status(self.topic, "early")
+        self.assertNotIn("acceptance", record); self.assertNotIn("candidate", record)
+        self.assertEqual(self.github.queries, [])
+        update_required_checks(self.root, task="early", expected=[], required_checks=[TEST], evidence="issue/67")
+        self.refused("early", "missing")
+        self.assertFalse(generated.exists())
+        self.github.add("example/repo", self.pushed("early"), TEST)
+        self.assertEqual(self.finish("early")["integration"]["destination"], "trunk")
 
     def test_removed_declaration_keeps_the_task_requirement_until_updated(self):
         self.declare([TEST])

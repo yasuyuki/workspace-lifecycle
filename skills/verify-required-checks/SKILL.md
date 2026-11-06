@@ -34,12 +34,13 @@ Sync commit: the last commit that changed this skill folder, as `sync` above fin
 | Code at the sync commit | Model |
 | --- | --- |
 | `service.py` `begin()`: `checks.current()` and `checks.select()` take the default branch declaration (245-246) | `Init`, `required` |
-| `service.py` `finish()` resumes an acceptance or candidate of the current HEAD at `_integrate()` | `Pre` |
-| `service.py` `finish()` `_resolve_files()` runs the plan's restore entries (1209) before any required-check decision | `Resolve`, `restored` |
-| `service.py` `finish()` `candidate` from `_gated_checks()` (1232, 1530-1540), which reads `[]` when the policy refuses; `_push()` and the acceptance or candidate record (1256) | `Push` |
+| `service.py` `finish()` resumes an acceptance or candidate of the current HEAD at `_integrate()` | `Pre`, `pushed = head` |
+| `service.py` `finish()` early refusals before any effect, ending with `checks.require(checks.current(...), required_checks)` (1194-1211) | `Pre`, `"omit"` |
+| `service.py` `finish()` `_resolve_files()` runs the plan's restore entries (1216) | `Resolve`, `restored` |
+| `service.py` `finish()` `candidate` from `_gated_checks()` (1239, 1537-1547); `_push()` and the acceptance or candidate record (1263) | `Push` |
 | `checks.py` `_states()`: a check is `missing` until a run of its name exists on the commit (173-189) | `runs`, `Push` |
-| `service.py` `finish()` `_integrate(prepare=True)` (1281); `_check_policy()` with `checks.current()` and `checks.require()` (1524-1527, `checks.py` 73-77, 104-109); `gated_checks` with `checks.source()` `added` (1716, `checks.py` 80-101); `checks.verify()` (1722) | `Integrate`, `Added`, `Gate` |
-| `service.py` `_await_checks()` (1543-1563); `checks.watch()` treats `missing` as pending until the deadline and `checks.wait()` answers "the accepted commit is kept; run the same finish again to keep waiting" (`checks.py` 202-245); `_withdraw_prepared()` (1289) | `Wait` |
+| `service.py` `finish()` `_integrate(prepare=True)` (1288); `_check_policy()` with `checks.current()` and `checks.require()` (1531-1534, `checks.py` 73-77, 104-109), which refuses a declaration the default branch gained after finish started; `gated_checks` with `checks.source()` `added` (1723, `checks.py` 80-101); `checks.verify()` (1729) | `Integrate`, `Added`, `Gate` |
+| `service.py` `_await_checks()` (1550-1570); `checks.watch()` treats `missing` as pending until the deadline and `checks.wait()` answers "the accepted commit is kept; run the same finish again to keep waiting" (`checks.py` 202-245); `_withdraw_prepared()` (1296) | `Wait` |
 | `service.py` `_integrate(reuse=...)` pushes to the default branch | `Final`, `gateHeld` |
 | `service.py` `update_required_checks()`: the new set must include the current declaration (458) and a candidate is dropped (460) | `Recover` after `"omit"` |
 | another task's integration adds a job and its declaration to the default branch | `Evolve` |
@@ -63,10 +64,10 @@ Each output line is JSON, one per configuration in `model/`:
 | --- | --- | --- | --- |
 | `steady` | unchanged | all arrive | every rule holds, with or without the task's own declaration |
 | `default-adds-check` | gains `x` | all arrive | `FinishCompletes` breaks (#73) |
-| `default-adds-check-effects` | gains `x` | all arrive | `NoEffectBeforeKnownRefusal` breaks (#67) |
+| `default-adds-check-effects` | gains `x` | all arrive | every rule holds (#67 fixed) |
 | `lost-event` | unchanged | one is lost | `FinishCompletes` breaks (#73) |
 
-With `--mutants`, it also breaks one check at a time in a copy of the model and requires `GateHolds` to catch each: integration without `checks.require()`; integration without the commit's `added` checks; a wait that counts a missing check as done.
+With `--mutants`, it also breaks one check at a time in a copy of the model and requires its rule to catch each: integration without `checks.require()`, integration without the commit's `added` checks, and a wait that counts a missing check as done (`GateHolds`); finish running the plan before its early declaration check (`NoEffectBeforeKnownRefusal`).
 
 ## Read a result
 
@@ -76,7 +77,6 @@ The findings at the sync commit, as steps in the code's words:
 
 - **#73, `default-adds-check`.** Another task adds a job and its declaration to the default branch. finish pushes the task's commit, then `_check_policy()` refuses with `required checks omit [x]`. The owner runs `update-required-checks` as told. The next finish resumes the acceptance and `checks.wait()` polls `x`, which the commit's workflow never runs, until the timeout, and says to run the same finish again to keep waiting. Every rerun does the same. Only merging the default branch into the topic, which no message names, leads out.
 - **#73, `lost-event`.** GitHub never turns the topic push into a workflow run, so every required check stays `missing`; the timeout says to keep waiting, and the same finish never pushes again. Only starting the workflow again by another push leads out (seen on 2026-11-06 for `validation-outputs-38`).
-- **#67, `default-adds-check-effects`.** The default branch already declares `x` when finish starts, so `_check_policy()` would refuse; finish still runs `_resolve_files()`, which deletes the restore entries' files, and refuses only in `_integrate()`.
 
 A `match: false` line or a mutant with `caught: false` needs a decision:
 
@@ -84,7 +84,7 @@ A `match: false` line or a mutant with `caught: false` needs a decision:
 2. **A modeling error.** If the replay cannot reach the end state, the model allows a step the code does not have. Find the action that differs from the code and fix it against the Coverage table.
 3. **A mutant that is no longer caught.** Either the model lost the check that the mutant removes, or `MUTANTS` in `scripts/check.py` no longer matches the model text, which the script reports as `model text not found once`.
 
-When a fix for #73 or #67 lands, the configuration's expected value changes to `None` in the same change, and the model gains the step the fix adds (for example a refusal that names the merge, or a policy check before `Resolve`).
+When a fix for #73 lands, the configuration's expected value changes to `None` in the same change, and the model gains the step the fix adds (for example a refusal that names the merge or the workflow restart).
 
 ## Change the model with the code
 

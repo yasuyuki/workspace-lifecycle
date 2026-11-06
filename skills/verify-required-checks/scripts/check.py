@@ -22,7 +22,7 @@ TLC_VERSION = 'TLC2 Version 2.19 of 08 August 2024'
 EXPECTED = {
     'steady': None,
     'default-adds-check': 'FinishCompletes',            # workspace-lifecycle#73
-    'default-adds-check-effects': 'NoEffectBeforeKnownRefusal',  # workspace-lifecycle#67
+    'default-adds-check-effects': None,
     'lost-event': 'FinishCompletes',                    # workspace-lifecycle#73
 }
 
@@ -38,6 +38,11 @@ MUTANTS = [
      'GateHolds',
      'Gate == required \\cup Added',
      'Gate == required'),
+    ('finish runs the plan before the declaration check',
+     'service.py finish() checks.require() among the early refusals', 'default-adds-check-effects',
+     'NoEffectBeforeKnownRefusal',
+     '     ELSE IF ~(defDecl \\subseteq required) THEN Refuse("omit")\n',
+     ''),
     ('the wait counts a missing check as done',
      'checks.watch() `unmet` and PENDING', 'lost-event',
      'GateHolds',
