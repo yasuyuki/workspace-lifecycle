@@ -1,6 +1,6 @@
 ---
 name: verify-validation-update
-description: Model-check that update-validation never releases a finish intent whose restore or commit already happened, and that a finish stopped by a failing validator or a kill always reaches its acceptance through update-validation and the same finish. Use when a change touches update_validation(), _effectless_finish(), _recorded_finish(), _resolve_files() restore actions, or the intent, commit and validation steps of finish() in src/workspace_lifecycle/service.py.
+description: Model-check that update-validation and update-preflight never release a finish intent whose restore or commit already happened, and that a finish stopped by a failing validator, a failing preflight or a kill always reaches its acceptance through those corrections and the same finish. Use when a change touches update_validation(), update_preflight(), _correctable_finish(), _effectless_finish(), _recorded_finish(), _resolve_files() restore actions, or the intent, commit, validation and push steps of finish() in src/workspace_lifecycle/service.py.
 license: MIT
 ---
 
@@ -9,11 +9,11 @@ license: MIT
 **Rules.**
 
 - `NoUnrecordedEffect`: until the acceptance, a file the finish removed and a commit the finish made stay recorded by its intent.
-- `FinishCompletes` (a liveness property): if the owner keeps running finish, and runs `update-validation` whenever it would succeed, the task is accepted.
+- `FinishCompletes` (a liveness property): if the owner keeps running finish, and runs `update-validation` and `update-preflight` whenever they would succeed, the task is accepted.
 
-**Harm when they break.** `update-validation` drops a finish that already removed a generated file or made its commit, so the next finish no longer knows about that effect; or a task whose validator was wrong can never be finished without hand repair of the state.
+**Harm when they break.** A correction drops a finish that already removed a generated file or made its commit, so the next finish no longer knows about that effect; or a task whose validator or preflight was wrong can never be finished without hand repair of the state (#31, #69).
 
-`update-preflight` and `update-required-checks` refuse while any intent is pending, so they cannot interleave with a finish; this model leaves them out. `tests/test_validation_update.py` drives fixed orders. `model/ValidationUpdate.tla` is a TLA+ model of the task checkout part of `finish()`, one plan restore action, the commit, validation with a failing validator, and `update_validation()`. TLC checks every order with up to two kills of the finish process at any step.
+`update-required-checks` refuses while any intent is pending, so it cannot interleave with a finish; this model leaves it out. `tests/test_validation_update.py` and `tests/test_preflight_update.py` drive fixed orders. `model/ValidationUpdate.tla` is a TLA+ model of the task checkout part of `finish()`, one plan restore action, the commit, validation with a failing validator, the push with a failing preflight, `update_validation()` and `update_preflight()`. Each run starts with the validator and the preflight each right or wrong. TLC checks every order with up to two kills of the finish process at any step.
 
 ## When to use
 
@@ -21,7 +21,7 @@ Run the check when a diff touches any covered code below. To see what changed si
 
 ```sh
 sync=$(git log -1 --format=%H -- skills/verify-validation-update)
-git diff $sync -- src/workspace_lifecycle/service.py | grep -nE "^@@|def update_validation|_effectless_finish|_recorded_finish|_FINISH_INTENT_FIELDS|commit_tree|committed|initial_head|'restoring'|'resolved'|_index_paths"
+git diff $sync -- src/workspace_lifecycle/service.py | grep -nE "^@@|def update_validation|def update_preflight|_correctable_finish|_effectless_finish|_recorded_finish|_FINISH_INTENT_FIELDS|commit_tree|committed|initial_head|'restoring'|'resolved'|_index_paths|_push\("
 ```
 
 Empty output means the model still describes the code.
@@ -32,15 +32,17 @@ Sync commit: the last commit that changed this skill folder, as `sync` above fin
 
 | Code at the sync commit (`service.py`) | Model |
 | --- | --- |
-| `finish()` opens the intent, or adopts a commit that matches `commit_tree` (lines 1070-1087) | `Enter` |
-| `_resolve_files()` restore: phase `restoring` saved, file restored or removed, phase `resolved` saved (826-849) | `RestoreIntent`, `RestoreEffect`, `RestoreDone` |
-| `finish()` `git add` of the commit paths (1135-1136) | `Stage` |
-| `finish()` `commit_tree` saved (1140) | `Tree` |
-| `finish()` `git commit` (1143) | `Commit` |
-| `finish()` `committed` saved (1148) | `Committed` |
-| `finish()` `_validate`; a failure keeps the intent (1152) | `Validate` |
-| `finish()` push and acceptance, intent dropped (1167-1188) | `Record` |
-| `update_validation()` (354-384), `_effectless_finish()` (391-398), `_recorded_finish()` (401-419), the index check (377-378) | `UpdateValidation`, `Effectless`, `Recorded` |
+| `finish()` opens the intent, or adopts a commit that matches `commit_tree` (lines 1179-1197) | `Enter` |
+| `_resolve_files()` restore: phase `restoring` saved, file restored or removed, phase `resolved` saved (950-958) | `RestoreIntent`, `RestoreEffect`, `RestoreDone` |
+| `finish()` `git add` of the commit paths (1252-1253); an empty commit plan goes straight to validation | `Stage` |
+| `finish()` `commit_tree` saved (1257) | `Tree` |
+| `finish()` `git commit` (1260) | `Commit` |
+| `finish()` `committed` saved (1265) | `Committed` |
+| `finish()` `_run_validation`; a failure keeps the intent (1269-1270) | `Validate` |
+| `finish()` `_push()` runs the preflight; a refusal keeps the intent (1291) | `Push` |
+| `finish()` acceptance saved, intent dropped (1292-1312) | `Record` |
+| `update_validation()` (374-435), `_effectless_finish()` (440-447), `_recorded_finish()` (450-468), the index check | `UpdateValidation`, `Effectless`, `Recorded` |
+| `update_preflight()` (321-350) and `_correctable_finish()` (353-371) | `UpdatePreflight` |
 | process killed; the state file stays | `Kill` |
 
 ## Run
@@ -55,19 +57,19 @@ python -B skills/verify-validation-update/scripts/check.py --mutants --java JAVA
 
 `--java` and `--tla2tools` fall back to the `JAVA` and `TLA2TOOLS` environment variables. It takes about 6 seconds. Exit 0 means every result matched; 1 means a mismatch; 2 means TLC could not run.
 
-Each output line is JSON. The script checks two configurations in `model/`, a plan with a restore entry (`with-restore`) and one with only commit entries (`commit-only`); both rules hold in each. `FinishCompletes` is checked under the fairness in `Spec`: the finish steps are weakly fair and `UpdateValidation`, which is enabled only when it would succeed, is strongly fair. A temporal violation is reported as `FinishCompletes`.
+Each output line is JSON. The script checks three configurations in `model/`, a plan with a restore entry (`with-restore`), one with only commit entries (`commit-only`) and an empty plan (`empty-plan`); both rules hold in each. `FinishCompletes` is checked under the fairness in `Spec`: the finish steps are weakly fair, and `UpdateValidation` and `UpdatePreflight`, each enabled only when it would succeed, are strongly fair. A temporal violation is reported as `FinishCompletes`.
 
-With `--mutants`, it also breaks one check at a time in a copy of the model and requires each break to be caught by its rule. The mutants stand for: `_effectless_finish` ignoring recorded actions, the restore phase saved after the file is removed, a failed validation dropping the intent, finish not adopting its own commit that matches `commit_tree`, and `_recorded_finish` refusing a recorded commit.
+With `--mutants`, it also breaks one check at a time in a copy of the model and requires each break to be caught by its rule. The mutants stand for: `_effectless_finish` ignoring recorded actions, the restore phase saved after the file is removed, a failed validation dropping the intent, finish not adopting its own commit that matches `commit_tree`, `_recorded_finish` refusing a recorded commit, `update_preflight` refusing every pending finish as it did before #69, and `_correctable_finish` releasing a finish whose commit is recorded.
 
 `_effectless_finish`'s `commit_tree` test, `_recorded_finish`'s `commit_tree` test without `committed`, and the index check each back up the others: a kill between `git add` and `git commit` leaves the index staged or HEAD moved, which the other checks see. So no mutant stands for any one of them.
 
 ## Read a result
 
-Read every result with the `/statechart` skill, with `model/ValidationUpdate.tla` and the configuration in question. For a chart in the reader's words, give it `model/chart.cfg` (commit only, one kill, no liveness property) and the view `model/chart.mjs`; the view draws every running step as one state. `/statechart` tells each invariant violation as its shortest path in plain words; for a `FinishCompletes` violation read TLC's lasso in `tlc.out`, whose `Back to state` line marks the loop that never reaches the acceptance.
+Read every result with the `/statechart` skill, with `model/ValidationUpdate.tla` and the configuration in question. For a chart in the reader's words, give it `model/chart.cfg` (commit only, one kill, no liveness property) and the view `model/chart.mjs`; the view draws every running step as one state, splits stopped finishes into those with and without a recorded effect, and marks a wrong preflight. A stopped state with a wrong preflight and no `update-preflight` arrow out is the #69 trap. `/statechart` tells each invariant violation as its shortest path in plain words; for a `FinishCompletes` violation read TLC's lasso in `tlc.out`, whose `Back to state` line marks the loop that never reaches the acceptance.
 
 A `match: false` line or a mutant with `caught: false` needs a decision:
 
-1. **A real bug.** Replay the path against the real code with the fixtures of `tests/test_validation_update.py`: patch the function an action names to raise where the path has `Kill`, call `finish()` or `update_validation()` again for each later step, and compare the saved state with the rule. If the replay reaches the end state, it is a bug. File it as an Issue with the path and the replay. Do not weaken the rule or the model to make it pass.
+1. **A real bug.** Replay the path against the real code with the fixtures of `tests/test_validation_update.py` or `tests/test_preflight_update.py`: patch the function an action names to raise where the path has `Kill`, call `finish()`, `update_validation()` or `update_preflight()` again for each later step, and compare the saved state with the rule. If the replay reaches the end state, it is a bug. File it as an Issue with the path and the replay. Do not weaken the rule or the model to make it pass.
 2. **A modeling error.** If the replay cannot reach the end state, the model allows a step the code does not have. Find the action that differs from the code and fix it against the Coverage table.
 3. **A mutant that is no longer caught.** Either the model lost the check that the mutant removes, or `MUTANTS` in `scripts/check.py` no longer matches the model text, which the script reports as `model text not found once`.
 
@@ -79,8 +81,9 @@ To prove that the check still catches a break after you change it, break the rea
 
 ## What the model leaves out
 
-- Bounds: one restore entry, one commit, one validator correction, up to two kills.
+- Bounds: one restore entry, one commit, one validator correction, one preflight correction, up to two kills.
 - Archive entries, `--revise-plan-evidence`, `--revise-plan-head` (`head_revision`), synchronization, plan exceptions and dirt checks are not modeled.
-- The owner supplies the current HEAD to `update-validation`; a wrong `--expected-head` is refused and changes nothing.
+- The owner supplies the current HEAD to `update-validation`; a wrong `--expected-head` is refused and changes nothing. `update-preflight` reads HEAD itself.
+- A preflight that decides `hold` or `ask`, and a push that fails after the preflight allowed it, are modeled like a preflight that cannot start: nothing is recorded and the intent stays.
 - The integration after the acceptance is the subject of `verify-finish-integration`.
 - A pass covers this model under these bounds, not the whole lifecycle.

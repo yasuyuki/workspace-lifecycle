@@ -21,7 +21,7 @@ _Avoid_: install の path、固定した python、外部 runtime の interpreter
 _Avoid_: branch、worktree、install
 
 **Preflight replacement**:
-一つの現在の task について、いま保持しているコマンドそのもの、新しいコマンド、根拠を示して preflight を取り替えること。受け入れ済みでも取り替えられる。退役を始めている task は取り替えられない。複数 task の一括移行ではない。
+一つの現在の task について、いま保持しているコマンドそのもの、新しいコマンド、根拠を示して preflight を取り替えること。受け入れ済みでも取り替えられる。push の前で止まった finish があっても取り替えられ、その finish は新しいコマンドで続く。退役を始めている task は取り替えられない。複数 task の一括移行ではない。
 _Avoid_: migration、一括更新、validation の変更
 
 **Running lifecycle**:

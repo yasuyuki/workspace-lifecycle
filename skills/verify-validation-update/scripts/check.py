@@ -22,6 +22,7 @@ TLC_VERSION = 'TLC2 Version 2.19 of 08 August 2024'
 EXPECTED = {
     'with-restore': None,
     'commit-only': None,
+    'empty-plan': None,
 }
 
 # (name, code it stands for, configuration, rule, model text, broken text)
@@ -39,8 +40,8 @@ MUTANTS = [
     ('a failed validation drops the finish intent',
      'service.py finish() keeps the intent when _validate raises', 'commit-only',
      'NoUnrecordedEffect',
-     '/\\ pc\' = IF validator = "good" THEN "record" ELSE "idle"\n  /\\ UNCHANGED <<head, staged, restored, validator, intent, accepted, kills>>',
-     '/\\ pc\' = IF validator = "good" THEN "record" ELSE "idle"\n  /\\ intent\' = IF validator = "good" THEN intent ELSE NoIntent\n  /\\ UNCHANGED <<head, staged, restored, validator, accepted, kills>>'),
+     '/\\ pc\' = IF validator = "good" THEN "push" ELSE "idle"\n  /\\ UNCHANGED <<head, staged, restored, validator, preflight, intent, accepted, kills>>',
+     '/\\ pc\' = IF validator = "good" THEN "push" ELSE "idle"\n  /\\ intent\' = IF validator = "good" THEN intent ELSE NoIntent\n  /\\ UNCHANGED <<head, staged, restored, validator, preflight, accepted, kills>>'),
     ('finish does not adopt its own unrecorded commit',
      'service.py finish() `intent[\'committed\'] = head(repo)` after a matching commit_tree', 'commit-only',
      'FinishCompletes',
@@ -50,6 +51,16 @@ MUTANTS = [
      'service.py _recorded_finish() `committed` branch', 'commit-only',
      'FinishCompletes',
      'ELSE head = "c1" /\\ intent.initial = "c0"', 'ELSE FALSE'),
+    ('update-preflight refuses every pending finish (#69)',
+     'service.py update_preflight() calling _correctable_finish()', 'empty-plan',
+     'FinishCompletes',
+     '/\\ preflight\' = "good"',
+     '/\\ intent.kind = None /\\ preflight\' = "good"'),
+    ('update-preflight releases a finish whose commit is recorded',
+     'service.py _correctable_finish() releasing a finish that _recorded_finish() keeps', 'commit-only',
+     'NoUnrecordedEffect',
+     '/\\ preflight\' = "good"\n  /\\ intent\' = IF Effectless THEN NoIntent ELSE intent',
+     '/\\ preflight\' = "good"\n  /\\ intent\' = NoIntent'),
 ]
 
 

@@ -131,7 +131,11 @@ decision or stdout is not one decision object.
 adopting it again. Supply `--task`, the exact saved argv as
 `--expected-preflight-json`, a nonempty `--preflight-json` containing literal
 `{repo}`, and a durable `--evidence` reference. The command rejects stale argv,
-active use leases and pending operations. It records the latest from/to argv and
+active use leases and pending operations, except a finish stopped before its
+push, such as by a preflight that cannot start. Run it from the bound task
+checkout in that case: a finish that recorded no effect is released into
+`finish_receipts`, and one whose commit is recorded stays for the next `finish`,
+which resumes with the new argv. It records the latest from/to argv and
 evidence while preserving acceptance, holds, dirty baseline, Git identity and
 all other task fields. Compare old and new policy decisions in the task checkout
 before a migration; this command does not run either preflight or push.

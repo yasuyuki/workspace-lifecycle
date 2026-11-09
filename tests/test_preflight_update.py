@@ -89,6 +89,52 @@ class PreflightUpdateTests(unittest.TestCase):
                              preflight=self.new, evidence='issue/16')
         self.assertEqual(status(self.f.topic, 'current')['preflight'], self.old)
 
+    def failed_push(self, commit):
+        """Leave the finish intent a preflight whose executable is gone stops at the push (#69)."""
+        broken = [str(Path(self.f.temp.name) / 'gone' / 'python'), '-m', 'workspace_lifecycle.push', '{repo}']
+        update_preflight(self.f.topic, task='current', expected_preflight=self.old,
+                         preflight=broken, evidence='issue/69 broken')
+        (self.f.topic / 'dirty.txt').unlink()
+        (self.f.topic / 'feature.txt').write_text('done\n')
+        self.f.task = 'current'
+        plan = self.f.topic.parent / 'preflight-plan.json'
+        if commit:
+            plan.write_text(json.dumps(self.f.source_plan(self.f.topic, 'feature.txt')))
+        else:
+            subprocess.run(['git', 'add', 'feature.txt'], cwd=self.f.topic, check=True)
+            subprocess.run(['git', 'commit', '-qm', 'feature'], cwd=self.f.topic, check=True)
+            plan.write_text('{}')
+        with self.assertRaises(LifecycleError):
+            finish(self.f.topic, task='current', plan_path=str(plan), result_ref='issue/69')
+        intent = status(self.f.topic, 'current')['intent']
+        self.assertEqual(intent['kind'], 'finish')
+        return broken, plan, intent
+
+    def correct_and_complete(self, broken, plan):
+        update_preflight(self.f.topic, task='current', expected_preflight=broken,
+                         preflight=self.old, evidence='issue/69 correction')
+        current = status(self.f.topic, 'current')
+        result = finish(self.f.topic, task='current', plan_path=str(plan), result_ref='issue/69')
+        self.assertTrue(result['accepted'])
+        self.assertEqual((self.f.root / 'feature.txt').read_text(), 'done\n')
+        self.assertTrue(retire(self.f.root, task='current', result_ref='issue/69', users_released=True)['retired'])
+        return current
+
+    def test_effectless_finish_stopped_by_preflight_is_released(self):
+        broken, plan, intent = self.failed_push(commit=False)
+        self.assertNotIn('committed', intent)
+        current = self.correct_and_complete(broken, plan)
+        self.assertNotIn('intent', current)
+        released = current['finish_receipts'][-1]
+        self.assertEqual({k: released[k] for k in intent}, intent)
+        self.assertEqual(released['preflight_update']['to'], self.old)
+
+    def test_committed_finish_stopped_by_preflight_is_kept_and_resumed(self):
+        broken, plan, intent = self.failed_push(commit=True)
+        self.assertIn('committed', intent)
+        current = self.correct_and_complete(broken, plan)
+        self.assertEqual(current['intent'], intent)
+
     def test_accepted_held_task_keeps_receipts_and_retired_task_is_refused(self):
         (self.f.topic / 'dirty.txt').unlink()
         feature = self.f.topic / 'feature.txt'

@@ -1,14 +1,16 @@
 ---------------------------- MODULE ValidationUpdate ----------------------------
-(* The task checkout part of service.py finish() and update_validation().
-   finish opens an intent, runs one plan restore action, stages and commits
-   the plan's source, validates and pushes; it can be killed at any step.
-   update_validation replaces a validator that fails, and releases the finish
-   intent only when it recorded no effect. One action is one saved state
-   change or one Git or filesystem effect. *)
+(* The task checkout part of service.py finish(), update_validation() and
+   update_preflight(). finish opens an intent, runs one plan restore action,
+   stages and commits the plan's source, validates and pushes through the
+   task's preflight; it can be killed at any step. update_validation replaces
+   a validator that fails and update_preflight a preflight that fails; each
+   releases the finish intent only when it recorded no effect. One action is
+   one saved state change or one Git or filesystem effect. *)
 EXTENDS Naturals
 
 CONSTANTS
-  Restore,   \* the plan has a restore entry (_resolve_files)
+  Restore,     \* the plan has a restore entry (_resolve_files)
+  CommitPlan,  \* the plan has commit entries
   MaxKills
 
 None == "none"
@@ -19,15 +21,17 @@ VARIABLES
   staged,     \* the plan's source is in the index
   restored,   \* the restore entry's file is gone (_resolve_files removed it)
   validator,  \* the task's validation argv: bad (fails) or good
+  preflight,  \* the task's preflight argv: bad (fails before any push) or good
   intent,     \* state['intents'][task]: initial_head, restore action phase, commit_tree, committed
   accepted,   \* task['acceptance'] saved
   pc,
   kills
 
-vars == <<head, staged, restored, validator, intent, accepted, pc, kills>>
+vars == <<head, staged, restored, validator, preflight, intent, accepted, pc, kills>>
 
 Init ==
-  /\ head = "c0" /\ staged = FALSE /\ restored = FALSE /\ validator = "bad"
+  /\ head = "c0" /\ staged = FALSE /\ restored = FALSE
+  /\ validator \in {"bad", "good"} /\ preflight \in {"bad", "good"}
   /\ intent = NoIntent /\ accepted = FALSE /\ pc = "idle" /\ kills = 0
 
 ----------------------------------------------------------------------------
@@ -36,9 +40,9 @@ Init ==
 Start ==
   /\ pc = "idle" /\ ~accepted
   /\ pc' = "enter"
-  /\ UNCHANGED <<head, staged, restored, validator, intent, accepted, kills>>
+  /\ UNCHANGED <<head, staged, restored, validator, preflight, intent, accepted, kills>>
 
-\* Lines 1070-1087: open the intent, or adopt a commit that matches commit_tree.
+\* Lines 1179-1197: open the intent, or adopt a commit that matches commit_tree.
 Enter ==
   /\ pc = "enter"
   /\ CASE intent.kind = None ->
@@ -48,7 +52,7 @@ Enter ==
        [] intent.tree /\ head = "c1" /\ intent.initial = "c0" ->
             intent' = [intent EXCEPT !.committed = TRUE] /\ pc' = "restore"
        [] OTHER -> pc' = "idle" /\ UNCHANGED intent
-  /\ UNCHANGED <<head, staged, restored, validator, accepted, kills>>
+  /\ UNCHANGED <<head, staged, restored, validator, preflight, accepted, kills>>
 
 \* _resolve_files: the action phase is saved before and after its effect.
 RestoreIntent ==
@@ -56,62 +60,69 @@ RestoreIntent ==
   /\ IF ~Restore \/ intent.phase = "resolved" THEN pc' = "stage" /\ UNCHANGED intent
      ELSE IF intent.phase = "restoring" THEN pc' = "restoreEffect" /\ UNCHANGED intent
      ELSE intent' = [intent EXCEPT !.phase = "restoring"] /\ pc' = "restoreEffect"
-  /\ UNCHANGED <<head, staged, restored, validator, accepted, kills>>
+  /\ UNCHANGED <<head, staged, restored, validator, preflight, accepted, kills>>
 
 RestoreEffect ==
   /\ pc = "restoreEffect"
   /\ restored' = TRUE /\ pc' = "restoreDone"
-  /\ UNCHANGED <<head, staged, validator, intent, accepted, kills>>
+  /\ UNCHANGED <<head, staged, validator, preflight, intent, accepted, kills>>
 
 RestoreDone ==
   /\ pc = "restoreDone"
   /\ intent' = [intent EXCEPT !.phase = "resolved"] /\ pc' = "stage"
-  /\ UNCHANGED <<head, staged, restored, validator, accepted, kills>>
+  /\ UNCHANGED <<head, staged, restored, validator, preflight, accepted, kills>>
 
-\* Lines 1135-1136: git add of the commit paths.
+\* Lines 1252-1253: git add of the commit paths.
 Stage ==
   /\ pc = "stage"
-  /\ IF intent.committed THEN pc' = "validate" /\ UNCHANGED staged
+  /\ IF ~CommitPlan \/ intent.committed THEN pc' = "validate" /\ UNCHANGED staged
      ELSE staged' = TRUE /\ pc' = "tree"
-  /\ UNCHANGED <<head, restored, validator, intent, accepted, kills>>
+  /\ UNCHANGED <<head, restored, validator, preflight, intent, accepted, kills>>
 
-\* Line 1140: commit_tree saved.
+\* Line 1257: commit_tree saved.
 Tree ==
   /\ pc = "tree"
   /\ intent' = [intent EXCEPT !.tree = TRUE] /\ pc' = "commit"
-  /\ UNCHANGED <<head, staged, restored, validator, accepted, kills>>
+  /\ UNCHANGED <<head, staged, restored, validator, preflight, accepted, kills>>
 
-\* Line 1143: git commit.
+\* Line 1260: git commit.
 Commit ==
   /\ pc = "commit"
   /\ head' = "c1" /\ staged' = FALSE /\ pc' = "committed"
-  /\ UNCHANGED <<restored, validator, intent, accepted, kills>>
+  /\ UNCHANGED <<restored, validator, preflight, intent, accepted, kills>>
 
-\* Line 1148: committed saved.
+\* Line 1265: committed saved.
 Committed ==
   /\ pc = "committed"
   /\ intent' = [intent EXCEPT !.committed = TRUE] /\ pc' = "validate"
-  /\ UNCHANGED <<head, staged, restored, validator, accepted, kills>>
+  /\ UNCHANGED <<head, staged, restored, validator, preflight, accepted, kills>>
 
-\* Line 1152: a failing validator leaves the intent for update-validation.
+\* Lines 1269-1270: a failing validator leaves the intent for update-validation.
 Validate ==
   /\ pc = "validate"
-  /\ pc' = IF validator = "good" THEN "record" ELSE "idle"
-  /\ UNCHANGED <<head, staged, restored, validator, intent, accepted, kills>>
+  /\ pc' = IF validator = "good" THEN "push" ELSE "idle"
+  /\ UNCHANGED <<head, staged, restored, validator, preflight, intent, accepted, kills>>
 
-\* Lines 1167-1188: push and save the acceptance, dropping the intent.
+\* Line 1291, _push(): a preflight that fails pushes nothing and leaves the
+\* intent for update-preflight.
+Push ==
+  /\ pc = "push"
+  /\ pc' = IF preflight = "good" THEN "record" ELSE "idle"
+  /\ UNCHANGED <<head, staged, restored, validator, preflight, intent, accepted, kills>>
+
+\* Lines 1292-1312: save the acceptance, dropping the intent.
 Record ==
   /\ pc = "record"
   /\ accepted' = TRUE /\ intent' = NoIntent /\ pc' = "idle"
-  /\ UNCHANGED <<head, staged, restored, validator, kills>>
+  /\ UNCHANGED <<head, staged, restored, validator, preflight, kills>>
 
 Kill ==
   /\ pc # "idle" /\ kills < MaxKills
   /\ pc' = "idle" /\ kills' = kills + 1
-  /\ UNCHANGED <<head, staged, restored, validator, intent, accepted>>
+  /\ UNCHANGED <<head, staged, restored, validator, preflight, intent, accepted>>
 
 ----------------------------------------------------------------------------
-(* update_validation(), lines 354-384, with the owner's current HEAD *)
+(* The corrections, with the owner's current HEAD *)
 
 \* _effectless_finish: a finish intent that recorded no effect at this HEAD.
 Effectless ==
@@ -124,13 +135,21 @@ Recorded ==
   /\ IF ~intent.committed THEN ~intent.tree /\ intent.initial = head
      ELSE head = "c1" /\ intent.initial = "c0"
 
-\* Enabled only when the update succeeds; a refusal changes nothing.
+\* update_validation(); enabled only when the update succeeds, a refusal changes nothing.
 UpdateValidation ==
   /\ pc = "idle" /\ ~accepted /\ validator = "bad"
   /\ intent.kind = None \/ ((Effectless \/ Recorded) /\ ~staged)
   /\ validator' = "good"
   /\ intent' = IF Effectless THEN NoIntent ELSE intent
-  /\ UNCHANGED <<head, staged, restored, accepted, pc, kills>>
+  /\ UNCHANGED <<head, staged, restored, preflight, accepted, pc, kills>>
+
+\* update_preflight() and _correctable_finish(); enabled only when the update succeeds.
+UpdatePreflight ==
+  /\ pc = "idle" /\ preflight = "bad"
+  /\ intent.kind = None \/ ((Effectless \/ Recorded) /\ ~staged)
+  /\ preflight' = "good"
+  /\ intent' = IF Effectless THEN NoIntent ELSE intent
+  /\ UNCHANGED <<head, staged, restored, validator, accepted, pc, kills>>
 
 Done ==
   /\ pc = "idle" /\ accepted
@@ -138,24 +157,25 @@ Done ==
 
 Progress ==
   \/ Start \/ Enter \/ RestoreIntent \/ RestoreEffect \/ RestoreDone \/ Stage
-  \/ Tree \/ Commit \/ Committed \/ Validate \/ Record
+  \/ Tree \/ Commit \/ Committed \/ Validate \/ Push \/ Record
 
-Next == Progress \/ Kill \/ UpdateValidation \/ Done
+Next == Progress \/ Kill \/ UpdateValidation \/ UpdatePreflight \/ Done
 
-\* The owner keeps running finish, and runs update-validation whenever it can succeed.
-Spec == Init /\ [][Next]_vars /\ WF_vars(Progress) /\ SF_vars(UpdateValidation)
+\* The owner keeps running finish, and runs each correction whenever it can succeed.
+Spec == Init /\ [][Next]_vars /\ WF_vars(Progress)
+        /\ SF_vars(UpdateValidation) /\ SF_vars(UpdatePreflight)
 
 ----------------------------------------------------------------------------
 (* Rules *)
 
 \* A file the finish removed and a commit the finish made stay recorded by its
-\* intent until the acceptance, so no update drops a finish that left an effect.
+\* intent until the acceptance, so no correction drops a finish that left an effect.
 NoUnrecordedEffect ==
   ~accepted =>
     /\ restored => intent.phase \in {"restoring", "resolved"}
     /\ head = "c1" => intent.tree
 
-\* After a validation failure, update-validation and the same finish always
-\* reach the acceptance.
+\* After a validation or preflight failure, the corrections and the same finish
+\* always reach the acceptance.
 FinishCompletes == <>accepted
 =============================================================================

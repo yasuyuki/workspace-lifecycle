@@ -331,15 +331,43 @@ def update_preflight(repo, *, task: str, expected_preflight: list[str],
     with _lease(repo, task):
         with locked_state(repo) as (directory, state):
             item = _task(state, task)
-            if task in state.get('intents', {}) or item.get('retire'):
+            intent = state['intents'].get(task)
+            if item.get('retire'):
                 raise LifecycleError('pending task operation prevents preflight update')
+            # The push runs last, so a finish stopped by a failing preflight left
+            # either no effect or only recorded ones (#69).
+            effectless = intent is not None and _correctable_finish(repo, task, intent, 'preflight update')
             if item.get('preflight') != expected_preflight:
                 raise LifecycleError('preflight CAS mismatch')
+            receipt = {'from': list(expected_preflight), 'to': list(preflight),
+                       'evidence': evidence, 'at': _now()}
             item['preflight'] = list(preflight)
-            item['preflight_update'] = {'from': list(expected_preflight), 'to': list(preflight),
-                                        'evidence': evidence, 'at': _now()}
+            item['preflight_update'] = receipt
+            if effectless:
+                item.setdefault('finish_receipts', []).append({**intent, 'preflight_update': receipt})
+                state['intents'].pop(task)
             save_state(directory, state)
     return {'task': task, 'preflight': list(preflight)}
+
+
+def _correctable_finish(repo, task, intent, operation):
+    """Whether a correction releases a pending finish intent that recorded no effect.
+
+    False keeps a finish whose every effect completed and is recorded, for the
+    same finish to resume; any other pending operation is refused."""
+    if intent.get('kind') != 'finish':
+        raise LifecycleError('pending task operation prevents ' + operation)
+    checkout = top(repo)
+    branch = branch_for_task(checkout, task)
+    identity, current_head = _finish_checkpoint(checkout, task, branch)
+    _operation_check(checkout, operation)
+    effectless = _effectless_finish(intent, identity, current_head)
+    if ((not effectless and not _recorded_finish(checkout, intent, identity, current_head))
+            or _index_paths(checkout)):
+        raise LifecycleError('pending task operation prevents ' + operation)
+    if _finish_checkpoint(checkout, task, branch) != (identity, current_head):
+        raise LifecycleError('HEAD or identity changed during ' + operation)
+    return effectless
 
 
 @operation()
