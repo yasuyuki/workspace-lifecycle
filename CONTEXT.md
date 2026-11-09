@@ -43,7 +43,7 @@ _Avoid_: tree hash、同じ commit
 _Avoid_: cache、省略された validation、検証済み tree
 
 **Prepared integration**:
-受入 commit の required check が成功する前に、統合先 checkout で fast-forward または merge を行い validation まで済ませた、まだ push していない統合。check が成功すれば同じ finish がそれを push し、失敗・期限切れ・拒否なら統合先を準備前の HEAD に戻して取り下げる。統合済みではない。
+受入 commit の required check が成功する前に、統合先 checkout で fast-forward または merge を行い validation まで済ませた、まだ push していない統合。check が成功すれば同じ finish がそれを push し、失敗・期限切れ・拒否なら統合先を準備前の HEAD に戻して取り下げる。finish が強制終了されて残ったものは、修正 commit のあとの finish が取り下げる。統合済みではない。
 _Avoid_: 先行 push、仮統合、統合済み
 
 **Candidate**:

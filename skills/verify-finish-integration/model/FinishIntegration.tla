@@ -31,10 +31,11 @@ VARIABLES
   pc,          \* where the finish process is
   mode,        \* how the owner ran finish: plain, wait (--wait-checks), revise (--revise-plan-head)
   prep,        \* the running _integrate was called with prepare=True
-  gate         \* the running _integrate read every check as succeeded (checks.verify)
+  gate,        \* the running _integrate read every check as succeeded (checks.verify)
+  fixRefused   \* a finish refused the task HEAD over an unpushed integration prepared for an older HEAD
 
 vars == <<head, fixed, valid, validT, ci, topic, rec, integrated, intent,
-          tLocal, tRemote, otherDone, pc, mode, prep, gate>>
+          tLocal, tRemote, otherDone, pc, mode, prep, gate, fixRefused>>
 task == <<head, fixed, valid, validT>>
 
 Candidate == Gated /\ integrated # head
@@ -49,7 +50,7 @@ Init ==
   /\ ci = [c \in TaskCommits |-> None]
   /\ topic = None /\ rec = NoRecord /\ integrated = None /\ intent = NoIntent
   /\ tLocal = {"base"} /\ tRemote = {"base"} /\ otherDone = FALSE
-  /\ pc = "idle" /\ mode = "plain" /\ prep = FALSE /\ gate = FALSE
+  /\ pc = "idle" /\ mode = "plain" /\ prep = FALSE /\ gate = FALSE /\ fixRefused = FALSE
 
 ----------------------------------------------------------------------------
 (* finish(): the locked block before _integrate *)
@@ -58,21 +59,28 @@ Init ==
 Start(m) ==
   /\ pc = "idle" /\ (integrated # head \/ intent.kind # None)
   /\ pc' = "enter" /\ mode' = m /\ prep' = (m = "wait")
-  /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, gate>>
 
 \* finish() lines 990-1074: resume a pending merge or accepted record, or open a finish intent.
 FinEnter ==
   /\ pc = "enter"
-  /\ CASE intent.kind = "merge" ->
+  /\ CASE Deferred /\ intent.src # head ->
+            \* finish() before its lease: _withdraw_prepared() of an integration
+            \* prepared for an older HEAD, then the same finish goes on (#80)
+            pc' = "withdraw" /\ UNCHANGED <<intent, fixRefused>>
+       [] intent.kind = "merge" ->
             \* `intent['kind'] != 'finish'`: the saved record must be HEAD
             /\ pc' = IF mode # "revise" /\ rec.commit = head THEN "integrate" ELSE "idle"
+            /\ fixRefused' = (fixRefused \/ (Deferred /\ intent.src # head))
             /\ UNCHANGED intent
        [] intent.kind = "finish" ->
+            UNCHANGED fixRefused /\
             IF head = intent.src THEN pc' = "validate" /\ UNCHANGED intent
             ELSE IF mode = "revise"
                  THEN intent' = [intent EXCEPT !.src = head] /\ pc' = "validate"
                  ELSE pc' = "idle" /\ UNCHANGED intent  \* HEAD changed outside this finish intent
        [] OTHER ->
+            UNCHANGED fixRefused /\
             IF mode # "revise" /\ rec.kind # None /\ rec.commit = head /\ topic = head
             THEN pc' = "integrate" /\ UNCHANGED intent  \* _acceptance_holds
             ELSE IF mode = "revise" THEN pc' = "idle" /\ UNCHANGED intent
@@ -83,7 +91,7 @@ FinEnter ==
 FinValidate ==
   /\ pc = "validate"
   /\ pc' = IF Candidate \/ valid[head] THEN "push" ELSE "idle"
-  /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
 
 \* finish() line 1167: _push of the topic; CI starts on the pushed commit.
 FinPush ==
@@ -91,7 +99,7 @@ FinPush ==
   /\ topic' = head
   /\ ci' = IF Gated /\ ci[head] = None THEN [ci EXCEPT ![head] = "pending"] ELSE ci
   /\ pc' = "record"
-  /\ UNCHANGED <<task, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
+  /\ UNCHANGED <<task, fixRefused, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
 
 \* finish() lines 1171-1188: save the candidate or acceptance and drop the finish intent.
 FinRecord ==
@@ -99,7 +107,7 @@ FinRecord ==
   /\ rec' = [kind |-> IF Candidate THEN "candidate" ELSE "acceptance", commit |-> head]
   /\ intent' = NoIntent
   /\ pc' = "integrate"
-  /\ UNCHANGED <<task, ci, topic, integrated, tLocal, tRemote, otherDone, mode, prep, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, integrated, tLocal, tRemote, otherDone, mode, prep, gate>>
 
 ----------------------------------------------------------------------------
 (* _integrate() *)
@@ -114,7 +122,7 @@ IntVerify ==
         THEN /\ gate' = g
              /\ pc' = IF g \/ prep THEN "lock" ELSE IF Deferred THEN "withdraw" ELSE "idle"
         ELSE gate' = FALSE /\ pc' = "lock"
-  /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep>>
 
 \* Lines 1634-1726: identity and proof checks, synchronize the target with the
 \* remote, and save the merge intent.
@@ -132,20 +140,20 @@ IntLock ==
                /\ intent' = [kind |-> "merge", src |-> src, before |-> synced,
                              deferred |-> Gated /\ ~gate, checks |-> Gated /\ gate]
                /\ pc' = "merge"
-  /\ UNCHANGED <<task, ci, topic, rec, integrated, tRemote, otherDone, mode, prep, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, integrated, tRemote, otherDone, mode, prep, gate>>
 
 \* Lines 1734-1784: fast-forward or merge the source into the default checkout.
 IntMerge ==
   /\ pc = "merge"
   /\ tLocal' = tLocal \cup {intent.src}
   /\ pc' = "validateTarget"
-  /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tRemote, otherDone, mode, prep, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, integrated, intent, tRemote, otherDone, mode, prep, gate>>
 
 \* Lines 1800-1813: validate in the target; a failure withdraws a deferred merge.
 IntValidate ==
   /\ pc = "validateTarget"
   /\ pc' = IF validT[intent.src] THEN "gate" ELSE "withdraw"
-  /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
 
 \* Lines 1817-1824: without check evidence return the prepared integration.
 IntGate ==
@@ -154,28 +162,28 @@ IntGate ==
      THEN IF ~gate THEN pc' = "await" /\ UNCHANGED intent
           ELSE intent' = [intent EXCEPT !.checks = TRUE] /\ pc' = "accept"
      ELSE pc' = "accept" /\ UNCHANGED intent
-  /\ UNCHANGED <<task, ci, topic, rec, integrated, tLocal, tRemote, otherDone, mode, prep, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, integrated, tLocal, tRemote, otherDone, mode, prep, gate>>
 
 \* Lines 1825-1829: a candidate becomes the acceptance.
 IntAccept ==
   /\ pc = "accept"
   /\ rec' = [rec EXCEPT !.kind = "acceptance"]
   /\ pc' = "pushTarget"
-  /\ UNCHANGED <<task, ci, topic, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
 
 \* Line 1830: _push of the default checkout.
 IntPush ==
   /\ pc = "pushTarget"
   /\ tRemote' = tLocal
   /\ pc' = "record2"
-  /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, otherDone, mode, prep, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, integrated, intent, tLocal, otherDone, mode, prep, gate>>
 
 \* Lines 1831-1842: save the integration and drop the merge intent.
 IntRecord ==
   /\ pc = "record2"
   /\ integrated' = intent.src /\ intent' = NoIntent
   /\ pc' = "idle"
-  /\ UNCHANGED <<task, ci, topic, rec, tLocal, tRemote, otherDone, mode, prep, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, tLocal, tRemote, otherDone, mode, prep, gate>>
 
 ----------------------------------------------------------------------------
 (* finish() lines 1193-1204: wait for the checks, then push or withdraw *)
@@ -186,7 +194,7 @@ Await ==
   /\ IF ci[rec.commit] = "success"
      THEN pc' = "integrate" /\ prep' = FALSE   \* _integrate(reuse=prepared)
      ELSE pc' = "withdraw" /\ UNCHANGED prep    \* _withdraw_prepared
-  /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, gate>>
 
 \* _withdraw() lines 1560-1584: return the default checkout to its HEAD before the merge.
 Withdraw ==
@@ -195,13 +203,14 @@ Withdraw ==
      ELSE IF tLocal = intent.before THEN pc' = "withdrawPop" /\ UNCHANGED tLocal
      ELSE IF tLocal \subseteq tRemote THEN pc' = "idle" /\ UNCHANGED tLocal  \* may already be on the remote
      ELSE tLocal' = intent.before /\ pc' = "withdrawPop"                    \* git checkout -B
+  /\ fixRefused' = (fixRefused \/ (pc' = "idle" /\ intent.src # head))
   /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tRemote, otherDone, mode, prep, gate>>
 
 \* _withdraw() line 1587: drop the merge intent.
 WithdrawPop ==
   /\ pc = "withdrawPop"
-  /\ intent' = NoIntent /\ pc' = "idle"
-  /\ UNCHANGED <<task, ci, topic, rec, integrated, tLocal, tRemote, otherDone, mode, prep, gate>>
+  /\ intent' = NoIntent /\ pc' = IF intent.src # head THEN "enter" ELSE "idle"
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, integrated, tLocal, tRemote, otherDone, mode, prep, gate>>
 
 ----------------------------------------------------------------------------
 (* Everything else *)
@@ -210,23 +219,23 @@ WithdrawPop ==
 Kill ==
   /\ Kills /\ pc # "idle"
   /\ pc' = "idle"
-  /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, mode, prep, gate>>
 
 \* The owner commits a fix while no finish runs.
 OwnerFix ==
   /\ pc = "idle" /\ ~fixed /\ integrated = None
   /\ head' = "c2" /\ fixed' = TRUE
-  /\ UNCHANGED <<valid, validT, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, pc, mode, prep, gate>>
+  /\ UNCHANGED <<valid, validT, ci, topic, rec, integrated, intent, tLocal, tRemote, otherDone, pc, mode, prep, gate, fixRefused>>
 
 CiCompletes ==
   \E c \in TaskCommits, r \in {"success", "failure"} :
     /\ ci[c] = "pending" /\ ci' = [ci EXCEPT ![c] = r]
-    /\ UNCHANGED <<task, topic, rec, integrated, intent, tLocal, tRemote, otherDone, pc, mode, prep, gate>>
+    /\ UNCHANGED <<task, fixRefused, topic, rec, integrated, intent, tLocal, tRemote, otherDone, pc, mode, prep, gate>>
 
 CiRerun ==
   \E c \in TaskCommits :
     /\ ci[c] = "failure" /\ ci' = [ci EXCEPT ![c] = "pending"]
-    /\ UNCHANGED <<task, topic, rec, integrated, intent, tLocal, tRemote, otherDone, pc, mode, prep, gate>>
+    /\ UNCHANGED <<task, fixRefused, topic, rec, integrated, intent, tLocal, tRemote, otherDone, pc, mode, prep, gate>>
 
 \* Another task's _integrate into the same default checkout: it takes the
 \* @default lease, refuses while a merge intent targets the branch
@@ -235,7 +244,7 @@ OtherIntegrates ==
   /\ ~otherDone /\ pc \notin EdgeLeased /\ intent.kind # "merge"
   /\ LET t == tLocal \cup tRemote \cup {"o"} IN tLocal' = t /\ tRemote' = t
   /\ otherDone' = TRUE
-  /\ UNCHANGED <<task, ci, topic, rec, integrated, intent, pc, mode, prep, gate>>
+  /\ UNCHANGED <<task, fixRefused, ci, topic, rec, integrated, intent, pc, mode, prep, gate>>
 
 Done ==
   /\ pc = "idle" /\ integrated = head /\ intent.kind = None
@@ -269,7 +278,7 @@ NoForgottenPreparedMerge ==
 \* A recorded integration is on the remote default branch.
 IntegratedIsPushed == integrated # None => integrated \in tRemote
 
-\* A prepared integration never outlives the task HEAD it was prepared for, so
-\* after a fix commit finish can start again.
-FixCanFinish == Deferred => head = intent.src
+\* finish never refuses a fix commit because of an integration that was
+\* prepared for an older HEAD and never pushed.
+FixCanFinish == ~fixRefused
 =============================================================================

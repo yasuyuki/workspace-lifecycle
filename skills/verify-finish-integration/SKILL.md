@@ -1,6 +1,6 @@
 ---
 name: verify-finish-integration
-description: Model-check that finish and its integration into the default branch push only work whose validations and required checks succeeded, never leave an unpushed integration that no intent records, and can resume after a kill at any step. Use when a change touches finish(), _integrate(), _await_checks(), _withdraw() or _withdraw_prepared() in src/workspace_lifecycle/service.py, or verify() in checks.py.
+description: Model-check that finish and its integration into the default branch push only work whose validations and required checks succeeded, never leave an unpushed integration that no intent records, can resume after a kill at any step, and never refuse a fix commit over an unpushed integration prepared for an older HEAD. Use when a change touches finish(), _integrate(), _await_checks(), _withdraw(), _withdraw_prepared() or _withdraw_stale_preparation() in src/workspace_lifecycle/service.py, or verify() in checks.py.
 license: MIT
 ---
 
@@ -11,7 +11,7 @@ license: MIT
 - `OnlyCheckedWorkReachesDefault`: a task commit reaches the remote default branch only after the validation in the default checkout passed on it, and either its required checks succeeded on that exact commit (gated task) or the validation in the task checkout passed (task without required checks).
 - `NoForgottenPreparedMerge`: the default branch checkout never holds an unpushed task commit that no pending merge intent records.
 - `IntegratedIsPushed`: a recorded integration is on the remote default branch.
-- `FixCanFinish`: an integration prepared ahead of its checks never outlives the task HEAD it was prepared for, so finish can start again after a fix commit.
+- `FixCanFinish`: finish never refuses a fix commit because of an integration that was prepared for an older HEAD and never pushed (#80). The model records such a refusal in `fixRefused`, the only variable that is not code state.
 
 **Harm when they break.** Unchecked work lands on `main` and turns it red for everyone; a forgotten local merge is pushed unchecked by the next task that integrates; the state claims an integration that `main` lacks; or an agent's fix can never be finished.
 
@@ -35,21 +35,21 @@ Sync commit: the last commit that changed this skill folder, as `sync` above fin
 
 | Code at the sync commit (`service.py` unless named) | Model |
 | --- | --- |
-| `finish()` intent and resume decisions: merge intent vs saved record, finish intent, `--revise-plan-head`, `_acceptance_holds` (lines 990-1074) | `FinEnter` |
-| `finish()` candidate skips `_validate` (1149-1152) | `FinValidate` |
-| `finish()` `_push` of the topic (1167) | `FinPush` |
-| `finish()` saves candidate or acceptance, pops the intent (1168-1188) | `FinRecord` |
-| `_integrate()` state read and `checks.verify` outside the state lock; `withdraw()` before a refusal (1605-1633); `checks.py` `verify()` (192-199) | `IntVerify` |
-| `_integrate()` identity and proof checks, `_refuse_pending_merge`, target synchronization, merge intent save (1634-1726) | `IntLock` |
-| `_integrate()` fast-forward or merge into the default checkout (1727-1784) | `IntMerge` |
-| `_integrate()` validation in the target; `_withdraw` on failure (1800-1813) | `IntValidate` |
-| `_integrate()` return `prepared` without check evidence, or record the evidence (1817-1824) | `IntGate` |
-| `_integrate()` candidate becomes acceptance (1825-1829) | `IntAccept` |
-| `_integrate()` `_push` of the default checkout (1830) | `IntPush` |
-| `_integrate()` save `integrated`, pop the intent (1831-1842) | `IntRecord` |
-| `finish()` wait, reuse or `_withdraw_prepared` (1189-1204); `_await_checks()` (1451-1471) | `Await` |
-| `_withdraw()` remote check and `git checkout -B` (1560-1586) | `Withdraw` |
-| `_withdraw()` pops the intent (1587) | `WithdrawPop` |
+| `finish()` `_withdraw_stale_preparation()` before its lease (line 1090, function 1723-1735); intent and resume decisions: merge intent vs saved record, finish intent, `--revise-plan-head`, `_acceptance_holds` (1091-1184) | `FinEnter` |
+| `finish()` candidate skips `_run_validation` (1268-1271) | `FinValidate` |
+| `finish()` `_push` of the topic (1292) | `FinPush` |
+| `finish()` saves candidate or acceptance, pops the intent (1293-1313) | `FinRecord` |
+| `_integrate()` state read and `checks.verify` outside the state lock; `withdraw()` before a refusal (1738-1776); `checks.py` `verify()` (203-210) | `IntVerify` |
+| `_integrate()` identity and proof checks, `_refuse_pending_merge`, target synchronization, merge intent save (1777-1869) | `IntLock` |
+| `_integrate()` fast-forward or merge into the default checkout (1870-1928) | `IntMerge` |
+| `_integrate()` validation in the target; `_withdraw` on failure (1940-1958) | `IntValidate` |
+| `_integrate()` return `prepared` without check evidence, or record the evidence (1966-1976) | `IntGate` |
+| `_integrate()` candidate becomes acceptance (1977-1981) | `IntAccept` |
+| `_integrate()` `_push` of the default checkout (1982) | `IntPush` |
+| `_integrate()` save `integrated`, pop the intent (1983-1994) | `IntRecord` |
+| `finish()` wait, reuse or `_withdraw_prepared` (1314-1329); `_await_checks()` (1579-1599) | `Await` |
+| `_withdraw()` remote check and `git checkout -B` (1680-1714) | `Withdraw` |
+| `_withdraw()` pops the intent (1715); a withdrawal at the entry of finish goes on into it | `WithdrawPop` |
 | another task's `_integrate()` into the same default checkout | `OtherIntegrates` |
 | process killed; leases and locks drop, the state file stays | `Kill` |
 
@@ -65,22 +65,15 @@ python -B skills/verify-finish-integration/scripts/check.py --mutants --java JAV
 
 `--java` and `--tla2tools` fall back to the `JAVA` and `TLA2TOOLS` environment variables. It takes about 15 seconds. Exit 0 means every result matched; 1 means a mismatch; 2 means TLC could not run.
 
-Each output line is JSON. The script checks four configurations in `model/`:
+Each output line is JSON. The script checks two configurations in `model/`, `gated` (required checks) and `ungated` (none), each with kills and another task; all four rules hold in both.
 
-| Configuration | Meaning | Expected |
-| --- | --- | --- |
-| `gated` | required checks, kills, another task | the first three rules hold |
-| `ungated` | no required checks, kills, another task | all four rules hold |
-| `gated-fix-no-kill` | required checks, no kills | `FixCanFinish` holds |
-| `gated-fix-after-kill` | required checks, kills | `FixCanFinish` breaks: #80 |
-
-With `--mutants`, it also breaks one check at a time in a copy of the model and requires each break to be caught by its rule. The mutants stand for: `checks.verify` accepting unsucceeded checks, `_integrate` pushing a prepared integration without check evidence, `_withdraw` dropping the intent without `git checkout -B`, another task skipping `_refuse_pending_merge`, finish skipping the task checkout validation without required checks, `_integrate` skipping the validation in the target, and `integrated` saved before the push.
+With `--mutants`, it also breaks one check at a time in a copy of the model and requires each break to be caught by its rule. The mutants stand for: finish not withdrawing an integration prepared for an older HEAD (#80), `checks.verify` accepting unsucceeded checks, `_integrate` pushing a prepared integration without check evidence, `_withdraw` dropping the intent without `git checkout -B`, another task skipping `_refuse_pending_merge`, finish skipping the task checkout validation without required checks, `_integrate` skipping the validation in the target, and `integrated` saved before the push.
 
 The proof check in `_integrate` ("required check evidence does not match") and the refusal after `checks.verify` in the same function back each other up: removing either one alone breaks no rule in the model, because the task lease keeps the accepted commit from changing between them. So no mutant stands for either one alone.
 
 ## Read a result
 
-Read every result with the `/statechart` skill, with `model/FinishIntegration.tla` and the configuration in question. For a chart in the reader's words, give it `model/FinishChart.tla` with `model/chart.cfg` (no kills) or `model/chart-kill.cfg` (kills, which shows the #80 path), and the view `model/chart.mjs`. `/statechart` tells each violation as its shortest path in plain words.
+Read every result with the `/statechart` skill, with `model/FinishIntegration.tla` and the configuration in question. For a chart in the reader's words, give it `model/FinishChart.tla` with `model/chart.cfg` (no kills) or `model/chart-fix.cfg` (`finish --wait-checks` killed while it waits, then a fix commit; it shows the withdrawal of the stale preparation), and the view `model/chart.mjs`. `/statechart` tells each violation as its shortest path in plain words.
 
 A `match: false` line or a mutant with `caught: false` needs a decision:
 
@@ -90,7 +83,7 @@ A `match: false` line or a mutant with `caught: false` needs a decision:
 
 ## Change the model with the code
 
-When a change to covered code is intended, update the action that the Coverage table names, so that one action is still one saved state change, one Git effect or one remote event. Update the table's line numbers and the mutant text if they moved. A configuration that is known to break gets the rule name in `EXPECTED` in `scripts/check.py`, next to the Issue that tracks it. When #80 is fixed, `gated-fix-after-kill` must hold: change its `EXPECTED` entry to `None`.
+When a change to covered code is intended, update the action that the Coverage table names, so that one action is still one saved state change, one Git effect or one remote event. Update the table's line numbers and the mutant text if they moved. A configuration that is known to break gets the rule name in `EXPECTED` in `scripts/check.py`, next to the Issue that tracks it.
 
 To prove that the check still catches a break after you change it, break the real code on a scratch copy, for example delete `_refuse_pending_merge(state, target_branch)` in `_integrate()`. Make the same edit to the matching action (`OtherIntegrates` drops `/\ intent.kind # "merge"`) and run the script. It must report a mismatch. Then undo both edits and confirm that the script exits 0 again.
 
@@ -102,4 +95,5 @@ To prove that the check still catches a break after you change it, break the rea
 - A validation result depends only on the source commit. Reuse of the prepared validation is not modeled; the model validates again.
 - The task's own commit by finish (plan `commit` entries), plan preservation actions, `_acceptance_holds` beyond the HEAD, record and topic tip, and the checks after integration (`_await_integration_checks`) are not modeled.
 - `checks.verify`, `checks.wait` and GitHub's answers are assumed correct: a check result is one of pending, success and failure, and success is final.
+- `FixCanFinish` covers only an integration that was prepared and never pushed. After a kill once the checks were recorded (`remote_checks`), a fix commit is still refused until HEAD returns to the accepted commit; TLC shows it when the rule also counts that refusal (#93).
 - A pass covers this model under these bounds, not the whole lifecycle.

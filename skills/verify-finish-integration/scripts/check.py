@@ -21,14 +21,14 @@ TLC_VERSION = 'TLC2 Version 2.19 of 08 August 2024'
 EXPECTED = {
     'gated': None,
     'ungated': None,
-    'gated-fix-no-kill': None,
-    # Known: a killed `finish --wait-checks` leaves a prepared merge intent that
-    # refuses every finish of a later fix commit (#80).
-    'gated-fix-after-kill': 'FixCanFinish',
 }
 
 # (name, code it stands for, configuration, rule, model text, broken text)
 MUTANTS = [
+    ('finish keeps an integration prepared for an older HEAD',
+     'service.py finish() `_withdraw_prepared()` before its lease (#80)', 'gated',
+     'FixCanFinish',
+     'CASE Deferred /\\ intent.src # head ->', 'CASE FALSE ->'),
     ('checks.verify accepts checks that have not succeeded',
      'checks.py verify() `if unmet: raise`', 'gated',
      'OnlyCheckedWorkReachesDefault',
@@ -58,8 +58,8 @@ MUTANTS = [
     ('the integration is recorded before its push',
      'service.py _integrate() order of _push and `item[\'integrated\'] = record`', 'ungated',
      'IntegratedIsPushed',
-     'pc = "accept"\n  /\\ rec\' = [rec EXCEPT !.kind = "acceptance"]\n  /\\ pc\' = "pushTarget"\n  /\\ UNCHANGED <<task, ci, topic, integrated,',
-     'pc = "accept"\n  /\\ rec\' = [rec EXCEPT !.kind = "acceptance"] /\\ integrated\' = intent.src\n  /\\ pc\' = "pushTarget"\n  /\\ UNCHANGED <<task, ci, topic,'),
+     'pc = "accept"\n  /\\ rec\' = [rec EXCEPT !.kind = "acceptance"]\n  /\\ pc\' = "pushTarget"\n  /\\ UNCHANGED <<task, fixRefused, ci, topic, integrated,',
+     'pc = "accept"\n  /\\ rec\' = [rec EXCEPT !.kind = "acceptance"] /\\ integrated\' = intent.src\n  /\\ pc\' = "pushTarget"\n  /\\ UNCHANGED <<task, fixRefused, ci, topic,'),
 ]
 
 

@@ -14,6 +14,7 @@ stateDiagram-v2
   Waiting --> Prepared : 統合先で ff または merge し検証（push しない）
   Prepared --> Integrated : 全 required check が成功、push
   Prepared --> Candidate : check 失敗・期限切れ・取得不能・中断で統合先を元の HEAD へ戻す
+  Prepared --> Working : 強制終了のあと修正 commit、次の finish が統合先を元の HEAD へ戻して新しい HEAD を進める
   Candidate --> Integrated : 再実行、check 成功済みなら統合先で検証し push
   Candidate --> Working : 修正 commit（新しい HEAD は自分の check が要る）
   Candidate --> Working : update-required-checks が候補を捨てる

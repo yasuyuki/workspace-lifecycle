@@ -548,6 +548,24 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertEqual(validations(self.root), before + 1, "another finish validates again")
         self.assertNotIn("reused", status(self.topic, "interrupted")["integrated"]["validation"])
 
+    def test_a_fix_after_a_killed_wait_withdraws_the_stale_preparation(self):
+        self.start("killed")
+        self.refused("killed", "missing")
+        candidate = self.pushed("killed"); base = self.trunk()
+        service._integrate(self.topic, "killed", "issue/killed", prepare=True)
+        self.assertEqual(run(self.root, "rev-parse", "HEAD"), candidate, "the killed wait left its preparation")
+        self.github.add("example/repo", candidate, TEST, "completed", "failure")
+        (self.topic / "feature.txt").write_text("fixed\n")
+        run(self.topic, "commit", "-qam", "fix")
+        fix = run(self.topic, "rev-parse", "HEAD")
+        self.plan.write_text("{}")
+        self.refused("killed", "missing")
+        self.assertEqual(run(self.root, "rev-parse", "HEAD"), base)
+        self.assertEqual(self.pushed("killed"), fix)
+        self.github.add("example/repo", fix, TEST)
+        result, _ = self.waiting("killed")
+        self.assertEqual((result["integration"]["commit"], self.trunk()), (fix, fix))
+
     def test_only_a_prepared_integration_is_withdrawn(self):
         from workspace_lifecycle.state import locked_state, save_state
         self.start("legacy")

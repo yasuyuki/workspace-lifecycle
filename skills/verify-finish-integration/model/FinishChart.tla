@@ -14,4 +14,15 @@ ChartNext ==
   \/ Kill \/ OwnerFix \/ CiCompletes \/ CiRerun \/ Done
 
 ChartSpec == ChartInit /\ [][ChartNext]_vars
+
+\* The #80 story alone: finish --wait-checks killed while it waits, and the fix after it.
+WaitKill == Kill /\ pc = "await"
+FixChartNext ==
+  \/ Start("wait")
+  \/ FinEnter \/ FinValidate \/ FinPush \/ FinRecord
+  \/ IntVerify \/ IntLock \/ IntMerge \/ IntValidate \/ IntGate \/ IntAccept \/ IntPush \/ IntRecord
+  \/ Await \/ Withdraw \/ WithdrawPop
+  \/ WaitKill \/ OwnerFix \/ CiCompletes \/ Done
+
+FixChartSpec == ChartInit /\ [][FixChartNext]_vars
 =============================================================================

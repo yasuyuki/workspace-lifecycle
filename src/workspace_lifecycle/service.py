@@ -1087,6 +1087,7 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
         raise LifecycleError('HEAD revision requires a full commit OID and durable evidence')
     plan_digest = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
     release_now = users_released and wait_checks is None
+    _withdraw_stale_preparation(repo, task_id)
     with _lease(repo, task_id, allow_use=True):
         with locked_state(repo) as (directory, state):
             task = _task(state, task_id); branch = branch_for_task(repo, task_id)
@@ -1717,6 +1718,21 @@ def _withdraw(repo: Path, task_id: str, state: dict, directory) -> None:
 def _withdraw_prepared(repo: Path, task_id: str) -> None:
     with _edge_leases(repo, task_id), locked_state(repo) as (directory, state):
         _withdraw(repo, task_id, state, directory)
+
+
+def _withdraw_stale_preparation(repo: Path, task_id: str) -> None:
+    """Withdraw an integration prepared ahead of its checks for a source that is no longer the task HEAD.
+
+    A killed ``finish --wait-checks`` leaves such a preparation; after the
+    owner commits a fix, no finish reaches it again, so every finish of the
+    new HEAD was refused (#80). It was never pushed, so withdrawing it is the
+    same step a failed or timed-out wait takes."""
+    with locked_state(repo) as (_, state):
+        intent = state['intents'].get(task_id)
+    if not intent or intent.get('kind') != 'merge' or not intent.get('deferred') or intent.get('remote_checks'):
+        return
+    if intent['source'] != head(repo, 'refs/heads/' + branch_for_task(repo, task_id)):
+        _withdraw_prepared(repo, task_id)
 
 
 def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = False, reuse: dict | None = None) -> dict:
