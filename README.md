@@ -399,7 +399,10 @@ candidate. A finish without the option withdraws such an interrupted
 integration when the checks have not succeeded, or pushes it after validating
 again when they have. A process killed while it waits cannot return the
 target itself; once a fix is committed, the next finish of either kind first
-withdraws that unpushed integration and then finishes the new HEAD. State changes are reported on
+withdraws that unpushed integration and then finishes the new HEAD. A kill
+after the checks were recorded is settled the same way, unless the target
+already reached the remote; then that finish first records the integration
+of the older commit. State changes are reported on
 stderr; stdout keeps the one final JSON result. Without the option finish
 refuses at once, as before. That retry reuses the saved candidate or acceptance and neither validates nor pushes
 the task checkout again when the checkout is completely clean and its HEAD,

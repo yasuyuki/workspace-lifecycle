@@ -1087,7 +1087,7 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
         raise LifecycleError('HEAD revision requires a full commit OID and durable evidence')
     plan_digest = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
     release_now = users_released and wait_checks is None
-    _withdraw_stale_preparation(repo, task_id)
+    _settle_stale_integration(repo, task_id)
     with _lease(repo, task_id, allow_use=True):
         with locked_state(repo) as (directory, state):
             task = _task(state, task_id); branch = branch_for_task(repo, task_id)
@@ -1677,17 +1677,22 @@ def _edge_leases(repo: Path, task_id: str):
         yield direction
 
 
-def _withdraw(repo: Path, task_id: str, state: dict, directory) -> None:
+def _withdraw(repo: Path, task_id: str, state: dict, directory, *, stale: bool = False) -> bool:
     """Return the target to its HEAD before an integration prepared ahead of
     its required checks; the caller holds the edge leases and the state lock.
 
     Such an integration is never pushed before its checks are recorded, so
     only the unpushed fast-forward or merge commit it recorded is undone. A
     merge still in progress may hold a resolution made by hand and is kept.
+
+    With ``stale``, any pending integration is withdrawn the same way, also
+    one that recorded its check evidence. When its target already reached the
+    remote it is kept instead and the result is True.
     """
     intent = state['intents'].get(task_id)
-    if not intent or not intent.get('deferred') or intent.get('remote_checks'):
-        return
+    if (not intent or intent.get('kind') != 'merge'
+            or not (stale or (intent.get('deferred') and not intent.get('remote_checks')))):
+        return False
     if intent.get('synchronization'):
         raise LifecycleError('a prepared integration that synchronized its target cannot be withdrawn; '
                              'resolve it in the target before integrating again')
@@ -1705,6 +1710,8 @@ def _withdraw(repo: Path, task_id: str, state: dict, directory) -> None:
         git(repo, 'fetch', item['remote'], 'refs/heads/' + intent['target'])
         reached = subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', current, 'FETCH_HEAD'],
                                  capture_output=True).returncode
+        if stale and reached == 0:
+            return True
         if reached != 1:
             raise LifecycleError('the prepared integration may already be on the remote; run the same finish again')
         _refuse_ignored_collisions(target, before, merge=False)
@@ -1713,6 +1720,7 @@ def _withdraw(repo: Path, task_id: str, state: dict, directory) -> None:
     if head(target) != before or _target_snapshot(target, parent):
         raise LifecycleError('target did not return to its HEAD before the prepared integration')
     state['intents'].pop(task_id); save_state(directory, state)
+    return False
 
 
 def _withdraw_prepared(repo: Path, task_id: str) -> None:
@@ -1720,22 +1728,29 @@ def _withdraw_prepared(repo: Path, task_id: str) -> None:
         _withdraw(repo, task_id, state, directory)
 
 
-def _withdraw_stale_preparation(repo: Path, task_id: str) -> None:
-    """Withdraw an integration prepared ahead of its checks for a source that is no longer the task HEAD.
+def _settle_stale_integration(repo: Path, task_id: str) -> None:
+    """Settle an integration pending for a source that is no longer the task HEAD.
 
-    A killed ``finish --wait-checks`` leaves such a preparation; after the
-    owner commits a fix, no finish reaches it again, so every finish of the
-    new HEAD was refused (#80). It was never pushed, so withdrawing it is the
-    same step a failed or timed-out wait takes."""
+    A killed finish leaves it; after the owner commits a fix, no finish
+    reached it again, so every finish of the new HEAD was refused (#80, #93).
+    Unless its target already reached the remote, it is withdrawn, the step a
+    failed or timed-out wait takes; the new HEAD goes through finish instead.
+    One already on the remote is completed and recorded."""
+    def stale(intent):
+        return (bool(intent) and intent.get('kind') == 'merge'
+                and intent['source'] != head(repo, 'refs/heads/' + branch_for_task(repo, task_id)))
     with locked_state(repo) as (_, state):
+        if not stale(state['intents'].get(task_id)):
+            return
+    with _edge_leases(repo, task_id), locked_state(repo) as (directory, state):
         intent = state['intents'].get(task_id)
-    if not intent or intent.get('kind') != 'merge' or not intent.get('deferred') or intent.get('remote_checks'):
-        return
-    if intent['source'] != head(repo, 'refs/heads/' + branch_for_task(repo, task_id)):
-        _withdraw_prepared(repo, task_id)
+        pushed = stale(intent) and _withdraw(repo, task_id, state, directory, stale=True)
+    if pushed:
+        _integrate(repo, task_id, intent['result_ref'], stale=True)
 
 
-def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = False, reuse: dict | None = None) -> dict:
+def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = False, reuse: dict | None = None,
+               stale: bool = False) -> dict:
     """Resume only the declared, accepted edge, then follow its parent to default.
 
     With ``prepare``, an edge whose required checks have not succeeded yet is
@@ -1743,7 +1758,8 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
     that ``prepared`` commit and its validation. A later call verifies the
     checks, reuses that validation as ``reuse`` when the target is unchanged,
     and pushes. Without ``prepare``, unsucceeded checks withdraw such a
-    preparation before refusing.
+    preparation before refusing. With ``stale``, the pending integration of
+    the accepted commit completes although the task HEAD moved past it.
     """
     with _edge_leases(repo, task_id) as direction:
         with locked_state(repo) as (_, state):
@@ -1785,7 +1801,8 @@ def _integrate(repo: Path, task_id: str, result_ref: str, *, prepare: bool = Fal
                 raise LifecycleError('a candidate needs required checks to be accepted; run finish again')
             bindings = task_bindings(repo)
             source_branch = branch_for_task(repo, task_id, bindings)
-            if head(repo, 'refs/heads/' + source_branch) != source_commit:
+            if head(repo, 'refs/heads/' + source_branch) != source_commit and not (
+                    stale and state['intents'].get(task_id, {}).get('source') == source_commit):
                 raise LifecycleError('source HEAD differs from the exact accepted identity')
             for dependency in item['dependencies']:
                 required = _task(state, dependency)

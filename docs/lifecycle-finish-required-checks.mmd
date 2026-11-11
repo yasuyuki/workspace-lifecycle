@@ -3,6 +3,7 @@ stateDiagram-v2
   state "候補（topic push 済み）" as Candidate
   state "CI 待ち（lock・lease なし）" as Waiting
   state "統合準備済み（統合先で検証済み・未 push）" as Prepared
+  state "check 成功を記録（統合先で push 前）" as Pushing
   state "受入・統合済み" as Integrated
   state "統合後 check 待ち" as PostWait
   state "統合後 check 成功（退役へ進める）" as PostOk
@@ -12,10 +13,12 @@ stateDiagram-v2
   Candidate --> Candidate : --wait-checks なしで CI 未完了なら拒否（候補は残る）
   Candidate --> Waiting : finish --wait-checks
   Waiting --> Prepared : 統合先で ff または merge し検証（push しない）
-  Prepared --> Integrated : 全 required check が成功、push
+  Prepared --> Pushing : 全 required check が成功
   Prepared --> Candidate : check 失敗・期限切れ・取得不能・中断で統合先を元の HEAD へ戻す
   Prepared --> Working : 強制終了のあと修正 commit、次の finish が統合先を元の HEAD へ戻して新しい HEAD を進める
-  Candidate --> Integrated : 再実行、check 成功済みなら統合先で検証し push
+  Candidate --> Pushing : 再実行、check 成功済みなら統合先で検証
+  Pushing --> Integrated : push
+  Pushing --> Working : 強制終了のあと修正 commit、次の finish が未 push なら取り下げ、push 済みなら記録して新しい HEAD を進める
   Candidate --> Working : 修正 commit（新しい HEAD は自分の check が要る）
   Candidate --> Working : update-required-checks が候補を捨てる
   Integrated --> PostWait : --wait-checks で、受入 commit で検証済みでない check を default branch の run で待つ（merge commit は全件）

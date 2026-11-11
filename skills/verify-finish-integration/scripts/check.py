@@ -26,9 +26,17 @@ EXPECTED = {
 # (name, code it stands for, configuration, rule, model text, broken text)
 MUTANTS = [
     ('finish keeps an integration prepared for an older HEAD',
-     'service.py finish() `_withdraw_prepared()` before its lease (#80)', 'gated',
+     'service.py finish() `_settle_stale_integration()` before its lease (#80)', 'gated',
      'FixCanFinish',
-     'CASE Deferred /\\ intent.src # head ->', 'CASE FALSE ->'),
+     'CASE intent.kind = "merge" /\\ intent.src # head ->', 'CASE FALSE ->'),
+    ('finish settles only an integration prepared ahead of its checks',
+     'service.py `_settle_stale_integration()` for a merge intent with check evidence (#93)', 'gated',
+     'FixCanFinish',
+     'CASE intent.kind = "merge" /\\ intent.src # head ->', 'CASE Deferred /\\ intent.src # head ->'),
+    ('finish leaves an older integration whose target was pushed',
+     'service.py `_settle_stale_integration()` `_integrate(..., stale=True)` when `_withdraw()` finds it on the remote (#93)',
+     'gated', 'FixCanFinish',
+     'THEN pc\' = (IF stale THEN "integrate" ELSE "idle")', 'THEN pc\' = "idle"'),
     ('checks.verify accepts checks that have not succeeded',
      'checks.py verify() `if unmet: raise`', 'gated',
      'OnlyCheckedWorkReachesDefault',
@@ -58,8 +66,8 @@ MUTANTS = [
     ('the integration is recorded before its push',
      'service.py _integrate() order of _push and `item[\'integrated\'] = record`', 'ungated',
      'IntegratedIsPushed',
-     'pc = "accept"\n  /\\ rec\' = [rec EXCEPT !.kind = "acceptance"]\n  /\\ pc\' = "pushTarget"\n  /\\ UNCHANGED <<task, fixRefused, ci, topic, integrated,',
-     'pc = "accept"\n  /\\ rec\' = [rec EXCEPT !.kind = "acceptance"] /\\ integrated\' = intent.src\n  /\\ pc\' = "pushTarget"\n  /\\ UNCHANGED <<task, fixRefused, ci, topic,'),
+     'pc = "accept"\n  /\\ rec\' = [rec EXCEPT !.kind = "acceptance"]\n  /\\ pc\' = "pushTarget"\n  /\\ UNCHANGED <<task, ci, topic, integrated,',
+     'pc = "accept"\n  /\\ rec\' = [rec EXCEPT !.kind = "acceptance"] /\\ integrated\' = intent.src\n  /\\ pc\' = "pushTarget"\n  /\\ UNCHANGED <<task, ci, topic,'),
 ]
 
 

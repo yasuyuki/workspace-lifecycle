@@ -566,6 +566,53 @@ class RequiredChecksTest(unittest.TestCase):
         result, _ = self.waiting("killed")
         self.assertEqual((result["integration"]["commit"], self.trunk()), (fix, fix))
 
+    def killed_after_checks(self, task, *, pushed):
+        """finish recorded the check evidence and died at the push of trunk, before or after it; the owner commits a fix."""
+        self.start(task)
+        self.refused(task, "missing")
+        candidate = self.pushed(task); base = self.trunk()
+        self.github.add("example/repo", candidate, TEST)
+
+        class Killed(BaseException):
+            pass
+
+        def push(repo, *args, **kwargs):
+            if Path(repo).resolve() != self.root.resolve():
+                return real(repo, *args, **kwargs)
+            if pushed:
+                real(repo, *args, **kwargs)
+            raise Killed
+
+        real = service._push
+        with patch("workspace_lifecycle.service._push", push), self.assertRaises(Killed):
+            self.finish(task)
+        self.assertEqual(status(self.topic, task)["intent"]["remote_checks"]["commit"], candidate)
+        self.assertEqual(self.trunk(), candidate if pushed else base)
+        (self.topic / "feature.txt").write_text("fixed\n")
+        run(self.topic, "commit", "-qam", "fix")
+        self.plan.write_text("{}")
+        return candidate, base, run(self.topic, "rev-parse", "HEAD")
+
+    def test_a_fix_after_a_kill_before_the_push_withdraws_the_checked_integration(self):
+        candidate, base, fix = self.killed_after_checks("unpushed", pushed=False)
+        self.refused("unpushed", "missing")
+        self.assertEqual(run(self.root, "rev-parse", "HEAD"), base)
+        self.assertEqual(self.pushed("unpushed"), fix)
+        self.github.add("example/repo", fix, TEST)
+        result = self.finish("unpushed")
+        self.assertEqual((result["integration"]["commit"], self.trunk()), (fix, fix))
+
+    def test_a_fix_after_a_kill_after_the_push_records_the_pushed_integration(self):
+        candidate, base, fix = self.killed_after_checks("pushed", pushed=True)
+        with self.assertRaisesRegex(LifecycleError, "missing"):
+            self.finish("pushed")
+        self.assertEqual(status(self.topic, "pushed")["integrated"]["source"], candidate)
+        self.assertEqual(self.trunk(), candidate)
+        self.assertEqual(self.pushed("pushed"), fix)
+        self.github.add("example/repo", fix, TEST)
+        result = self.finish("pushed")
+        self.assertEqual((result["integration"]["commit"], self.trunk()), (fix, fix))
+
     def test_only_a_prepared_integration_is_withdrawn(self):
         from workspace_lifecycle.state import locked_state, save_state
         self.start("legacy")
