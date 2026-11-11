@@ -871,6 +871,16 @@ to keep waiting (#73). A rollback to 0.8.23 ignores the declared outputs, so
 finish refuses them again, and waits again until the limit for a check that
 cannot appear.
 
+Version 0.8.25 lets `update-preflight` release a finish intent that recorded
+no effect, so a finish whose preflight could not start can be corrected and
+run again (#69). finish settles a merge intent whose source is no longer the
+task HEAD before it starts: it withdraws an integration not yet on the remote
+and records one already pushed, then goes on with the new HEAD. A fix commit
+after a finish killed while it waited for its checks (#80), or after it
+recorded them (#93), no longer refuses every later finish. A rollback to
+0.8.24 refuses those again until HEAD returns to the accepted commit or the
+intent is resolved by hand.
+
 Version 0.8.7 fast-forwards an integration target that has not moved past the
 accepted commit instead of making a merge commit with the same tree, so the
 default branch carries the accepted commit's SHA. `integration_checks` counts
