@@ -17,6 +17,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parents[1]
+WINDOWS_TIMINGS = ROOT / "tests" / "windows-timings.json"
+# Against tests/windows-timings.json, CI runs of one module stayed under 1.9 times
+# the record once the record held 60 seconds, and a healthy Windows controller ran
+# at 1.1. A controller that a restart later cured ran at 3 to 4.6 (#95).
+COMPARABLE_SECONDS = 60
+SLOW_PACE = 2
 
 COLLECT = r"""
 import json, sys, unittest
@@ -112,6 +118,19 @@ def load_timings(path):
     return timings
 
 
+def pace(outcomes, timings):
+    """Compare the run's seconds with the recorded ones, so that a slow machine is not mistaken for slow tests."""
+    timed = [outcome for outcome in outcomes if outcome["id"] in timings]
+    recorded = sum(timings[outcome["id"]] for outcome in timed)
+    if recorded < COMPARABLE_SECONDS:
+        return ""
+    ratio = sum(outcome["seconds"] for outcome in timed) / recorded
+    if ratio < SLOW_PACE:
+        return f"; {ratio:.2f} times the recorded seconds"
+    return (f"; SLOW: {ratio:.2f} times the recorded seconds of {len(timed)} tests, where a healthy run stays "
+            f"under {SLOW_PACE}; suspect this machine's load or state before the tests")
+
+
 def shards(ids, count, timings):
     # An untimed test weighs as much as the slowest one, so a new test starts early
     # instead of extending a shard's tail.
@@ -133,7 +152,10 @@ def main(argv=None):
     parser.add_argument("--wheel", type=Path, help="install this wheel instead of importing the copied src")
     parser.add_argument("--shard", metavar="K/N", default="1/1",
                         help="run the Kth of N shards that together run the selection once (default: %(default)s)")
-    parser.add_argument("--timings", type=Path, help="JSON of test id to seconds that balances shards and order")
+    parser.add_argument("--timings", type=Path,
+                        default=WINDOWS_TIMINGS if os.name == "nt" and WINDOWS_TIMINGS.is_file() else None,
+                        help="JSON of test id to seconds that balances shards and order, and that the run's "
+                             "seconds are compared with (default on Windows: tests/windows-timings.json)")
     parser.add_argument("--report", type=Path, help="write the seconds of each test run here as JSON")
     arguments = parser.parse_args(argv)
     if arguments.wheel and not arguments.wheel.is_file():
@@ -172,7 +194,7 @@ def main(argv=None):
           f"{len(outcomes) - len(failed)} passed, {len(failed)} failed, "
           f"skipped={sum(outcome['skipped'] for outcome in outcomes)}, "
           f"expected failures={sum(outcome['expected_failures'] for outcome in outcomes)}; "
-          f"slowest {slowest['id']} {slowest['seconds']:.1f}s")
+          f"slowest {slowest['id']} {slowest['seconds']:.1f}s{pace(outcomes, timings)}")
     return 1 if failed else 0
 
 

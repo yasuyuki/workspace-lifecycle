@@ -69,6 +69,12 @@ selection once. `--timings` takes a JSON object of test ids to seconds: each
 test goes to the shard with the least time so far, longest first, and each
 shard starts its longest tests first. A test missing from the file counts as
 the slowest. `--report` writes the seconds of the tests it ran in the same form.
+When the tests it ran have at least 60 recorded seconds, the summary line ends
+with how many times the recorded seconds they took. From 2 times it says
+`SLOW`, which points at the machine's load or state rather than the tests: CI
+runs stayed under 1.9 and a healthy Windows controller runs at about 1.1 with
+the default `-j`. The exit code is unchanged. On Windows `--timings` defaults to
+`tests/windows-timings.json`, so a local run is compared without an argument.
 CI runs the same entry with `--wheel` on the built wheel, on Windows as eight
 shards whose `package (windows-latest, 3.14)` check succeeds only when all eight
 do. The Windows shards use `tests/windows-timings.json`, and each keeps its report
