@@ -893,6 +893,15 @@ to keep waiting (#73). A rollback to 0.8.23 ignores the declared outputs, so
 finish refuses them again, and waits again until the limit for a check that
 cannot appear.
 
+Version 0.8.26 adds `retire --abandon REASON` for a task that will not be
+integrated: it retires the task at its branch HEAD without acceptance, merge
+or push, and reclaim keeps the payload unless the branch still contains that
+commit (#46). `tests/run.py` marks a run several times slower than its
+`--timings` record as SLOW (#95). A rollback to 0.8.25 refuses `--abandon`
+and cannot resume an abandonment request already saved; its `finish` no
+longer refuses that task, and its reclaim keeps an abandoned payload because
+the commit is not on the remote default.
+
 Version 0.8.25 lets `update-preflight` release a finish intent that recorded
 no effect, so a finish whose preflight could not start can be corrected and
 run again (#69). finish settles a merge intent whose source is no longer the
