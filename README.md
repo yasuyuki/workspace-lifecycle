@@ -10,7 +10,8 @@ Start with `begin` for a new task or `adopt-existing` for a checkout already in
 use. Use `status` to inspect it and `run` to supervise a command. `finish`
 requires an explicit file-ownership plan and result reference; it can commit,
 push, and integrate the reviewed result. `retire` requires that accepted result
-and an explicit release from external users. See `workspace-lifecycle --help`
+and an explicit release from external users, or `--abandon` for a task that
+will not be integrated. See `workspace-lifecycle --help`
 and each subcommand's `--help` for the exact arguments.
 
 Retirement removes a linked checkout from Git's active worktree list while
@@ -551,6 +552,21 @@ store that evidence before external users are released. Acceptance and an
 explicit final-user release persist a pending request in the same state change,
 so interruption before the retirement callback does not lose the request.
 Retirement with preservation evidence immediately attempts reclamation.
+
+A task that will not be integrated, such as a disposable fixture or an
+investigation that changed nothing, retires with `retire --task T --result-ref
+DECISION --users-released --abandon REASON` from outside its worktree. The
+result reference names the durable decision not to integrate. Abandonment
+records the reason and the branch HEAD in the retirement request, then
+retires as above with that HEAD in place of the accepted commit. It accepts
+nothing and neither commits, merges nor pushes. A held task is refused until
+`release-hold` records the decision; a pending finish, an integrated task, a
+task with registered producer generations and a task other tasks depend on
+are refused. Once requested, `finish` is refused and `retire --task T
+--result-ref DECISION` or `retire --pending` resumes it. The branch stays and
+keeps the commit: reclaim of an abandoned payload requires that branch still
+to contain the recorded commit, in place of the remote default. Delete the
+branch with Git afterwards if the commit is not needed.
 
 `reclaim --pending` resumes only recorded requests; it neither discovers targets
 nor authorizes new deletions. The original retirement manifests and captured

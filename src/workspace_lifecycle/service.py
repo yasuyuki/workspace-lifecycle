@@ -1096,6 +1096,8 @@ def finish(repo, *, task: str, plan_path: str, result_ref: str, message: str = '
             _check_preserved_plan(task, plan)
             if task.get('hold'):
                 raise LifecycleError('task is held: ' + json.dumps(task['hold']))
+            if (task.get('retire') or {}).get('abandoned'):
+                raise LifecycleError('task was abandoned; `retire --task %s` resumes its retirement' % task_id)
             _refuse_pending_merge(state, branch)
             _index_protection(repo)
             intent = entry_intent = state['intents'].get(task_id)
@@ -2133,11 +2135,16 @@ def _retirement_transaction(repo, task):
 
 
 @operation()
-def retire(repo, *, task: str, result_ref: str, users_released: bool = False, request_only: bool = False, preservation_evidence: str | None = None) -> dict:
-    """End one active worktree while retaining its payload and Git admin entry."""
+def retire(repo, *, task: str, result_ref: str, users_released: bool = False, request_only: bool = False, preservation_evidence: str | None = None, abandon: str | None = None) -> dict:
+    """End one active worktree while retaining its payload and Git admin entry.
+
+    With abandon, the task ends at its branch HEAD without acceptance or integration.
+    """
     repo = Path(repo).resolve()
     incoming = _durable_preservation_evidence(preservation_evidence)
-    if users_released:
+    if abandon is not None and (not abandon.strip() or not users_released or request_only):
+        raise LifecycleError('abandonment requires a reason and released external users')
+    if users_released and abandon is None:
         owner_pending = False
         with _lease(repo, task, allow_use=request_only):
             with locked_state(repo) as (directory, state):
@@ -2170,21 +2177,40 @@ def retire(repo, *, task: str, result_ref: str, users_released: bool = False, re
                 item = _task(state, task); request = item.get('retire')
                 if item.get('adoption', {}).get('preserved_data'):
                     raise LifecycleError('checkout with foreign preserved data cannot retire')
-                acceptance = item.get('acceptance')
-                if item.get('hold') or not acceptance or acceptance.get('result_ref') != result_ref:
-                    raise LifecycleError('retire requires exact accepted result and no hold')
-                if any(record.get('phase') != 'completed' for record in item.get('owner_receipts', {}).values()):
-                    raise LifecycleError('retire waits for exact producer generations to finish reclaiming')
+                abandoned = request.get('abandoned') if request else None
+                if request and abandon is not None and not abandoned:
+                    raise LifecycleError('retirement was already requested for the accepted result')
+                if item.get('hold'):
+                    raise LifecycleError('task is held; release-hold records the decision before abandonment'
+                                         if abandon is not None or abandoned else
+                                         'retire requires exact accepted result and no hold')
+                if abandon is not None and not request:
+                    if task in state['intents'] or item.get('completion_release'):
+                        raise LifecycleError('abandonment refuses a pending finish; '
+                                             'complete or withdraw it with finish first')
+                    if item.get('integrated'):
+                        raise LifecycleError('an integrated task retires by its accepted result')
+                    if item.get('owner_receipts'):
+                        raise LifecycleError('abandonment refuses a task with registered producer generations')
+                    abandoned = {'reason': abandon, 'commit': head(repo, 'refs/heads/' + branch_for_task(repo, task))}
+                if abandoned:
+                    expected = abandoned['commit']
+                else:
+                    acceptance = item.get('acceptance')
+                    if not acceptance or acceptance.get('result_ref') != result_ref:
+                        raise LifecycleError('retire requires exact accepted result and no hold')
+                    if any(record.get('phase') != 'completed' for record in item.get('owner_receipts', {}).values()):
+                        raise LifecycleError('retire waits for exact producer generations to finish reclaiming')
+                    expected = acceptance['commit']
+                    integrated = item.get('integrated')
+                    if not integrated or integrated['source'] != expected:
+                        raise LifecycleError('retire requires exact accepted integration')
                 if not request and not users_released:
                     raise LifecycleError('retire requires explicit external-user release')
                 for other_id, other in state['tasks'].items():
                     if other_id != task and (task in other['dependencies'] or other['integration'].get('task') == task):
                         raise LifecycleError('another task still depends on this identity: ' + other_id)
-                expected = acceptance['commit']
-                integrated = item.get('integrated')
-                if not integrated or integrated['source'] != expected:
-                    raise LifecycleError('retire requires exact accepted integration')
-                if not request:
+                if not request and not abandoned:
                     default = remote_default(repo, item['remote'])
                     remote_tip = _remote_tip(repo, item['remote'], default)
                     git(repo, 'fetch', '--no-write-fetch-head', item['remote'], remote_tip)
@@ -2236,6 +2262,8 @@ def retire(repo, *, task: str, result_ref: str, users_released: bool = False, re
                                'admin_archive_path': str(admin_slot / 'admin'), 'admin_slot_identity': _retirement_identity(admin_slot),
                                'expected_head': expected, 'result_ref': result_ref,
                                'users_released': True, 'phase': 'requested', 'at': _now()}
+                    if abandoned:
+                        request['abandoned'] = abandoned
                     if bound:
                         request['preservation_evidence'] = bound
                     item.pop('preservation_evidence', None)
@@ -2332,6 +2360,8 @@ def retire(repo, *, task: str, result_ref: str, users_released: bool = False, re
                     'admin_progress': reclamation.capture(archive, admin_manifest, request['admin_identity'])}
                 if item.get('finish_receipts'):
                     receipt['finish_receipts'] = item['finish_receipts']
+                if request.get('abandoned'):
+                    receipt['abandoned'] = request['abandoned']
                 if request.get('preservation_evidence'):
                     receipt['preservation_evidence'] = request['preservation_evidence']
                     receipt['reclaim_phase'] = 'requested'
@@ -2462,13 +2492,18 @@ def reclaim(repo, *, task: str, result_ref: str, preservation_evidence: str) -> 
             if receipt.get('manifest_id', manifest_id) != manifest_id:
                 raise LifecycleError('retirement manifest identity changed')
             receipt['manifest_id'] = manifest_id
-            default = remote_default(repo, receipt['remote'])
-            remote_head = _remote_tip(repo, receipt['remote'], default)
-            # FETCH_HEAD is shared among tasks. Test ancestry against the exact
-            # observed remote object instead of a mutable fetch side effect.
-            git(repo, 'fetch', '--no-write-fetch-head', receipt['remote'], remote_head)
-            if git(repo, 'merge-base', '--is-ancestor', receipt['commit'], remote_head, optional=True) is None:
-                raise LifecycleError('retired commit is no longer on the remote default')
+            if receipt.get('abandoned'):
+                kept = git(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/' + receipt['branch'] + '^{commit}', optional=True)
+                if kept is None or git(repo, 'merge-base', '--is-ancestor', receipt['commit'], kept, optional=True) is None:
+                    raise LifecycleError('abandoned commit is no longer kept by its branch')
+            else:
+                default = remote_default(repo, receipt['remote'])
+                remote_head = _remote_tip(repo, receipt['remote'], default)
+                # FETCH_HEAD is shared among tasks. Test ancestry against the exact
+                # observed remote object instead of a mutable fetch side effect.
+                git(repo, 'fetch', '--no-write-fetch-head', receipt['remote'], remote_head)
+                if git(repo, 'merge-base', '--is-ancestor', receipt['commit'], remote_head, optional=True) is None:
+                    raise LifecycleError('retired commit is no longer on the remote default')
             recovery = Path(receipt['recovery_path'])
             archive = Path(receipt['admin_archive_path'])
             phase = receipt['reclaim_phase']

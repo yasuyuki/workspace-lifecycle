@@ -92,6 +92,10 @@ _Avoid_: main の CI 結果、統合の成否、受入 commit の check
 一回の操作が完了したか、保留か、失敗したかを示す結果。判断に必要な理由・次の操作・詳細な retirement receipt への参照を含む。
 _Avoid_: retirement receipt、詳細記録
 
+**Abandonment**:
+統合しないと決めた task を、受入も統合もせずに退役させる決定。理由と、決定を示す durable な参照と、その時点の branch HEAD を記録する。その HEAD が受入 commit の代わりに退役の対象になる。commit・merge・push は起きない。branch は残り、その commit を保持する。branch がその commit を含まなくなると、回収は payload を残す。
+_Avoid_: 取消し、失敗した finish、branch の削除
+
 **Retirement receipt**:
 退役時に保存した対象の同一性・内容と、その後の回収の進行を記録する証拠。Operation outcome とは別に保持され、回収後も残る。
 _Avoid_: 操作結果、出力全文
