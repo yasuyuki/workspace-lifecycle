@@ -896,6 +896,11 @@ to keep waiting (#73). A rollback to 0.8.23 ignores the declared outputs, so
 finish refuses them again, and waits again until the limit for a check that
 cannot appear.
 
+Version 0.8.27 stops `--wait-checks` at once on a check run that GitHub
+gave a conclusion and a completion time but never marked `completed`, and
+names the `gh run rerun --job` command for it (#97). A rollback to 0.8.26
+counts such a run as pending and waits on it until the limit.
+
 Version 0.8.26 adds `retire --abandon REASON` for a task that will not be
 integrated: it retires the task at its branch HEAD without acceptance, merge
 or push, and reclaim keeps the payload unless the branch still contains that
