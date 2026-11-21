@@ -43,14 +43,17 @@ class FakeGitHub:
             raise LifecycleError("required check status unavailable: HTTP 401: Bad credentials")
 
     def add(self, repository, commit, check, status="completed", conclusion="success", app=None, url=None,
-            branch=None):
+            branch=None, unfinalized=False):
+        """With ``unfinalized``, the run keeps ``conclusion`` and a completion time
+        although ``status`` is not completed, as GitHub left one in #97."""
         branch = branch or ("trunk" if commit == self.trunk() else "topic")
         app = app or check["app"]
         suite = self.suite_ids.setdefault((branch, app), 1 + len(self.suite_ids))
         rows = self.runs.setdefault((repository, commit, check["name"]), [])
         rows.append({"id": 1000 + sum(map(len, self.runs.values())), "name": check["name"],
                      "head_sha": commit, "status": status,
-                     "conclusion": conclusion if status == "completed" else None,
+                     "conclusion": conclusion if status == "completed" or unfinalized else None,
+                     "completed_at": "2026-11-20T23:29:51Z" if status == "completed" or unfinalized else None,
                      "app": app, "html_url": url, "suite": suite})
 
     def __call__(self, repository, commit, name):
@@ -723,6 +726,33 @@ class RequiredChecksTest(unittest.TestCase):
         self.assertIn("keep waiting", error.recovery)
         self.github.add("example/repo", commit, TEST)
         self.assertEqual(self.waiting("unstarted")[0]["integration"]["destination"], "trunk")
+
+    def test_wait_refuses_at_once_a_concluded_run_github_never_completed(self):
+        self.start("unfinalized", required=(TEST, LINT))
+        self.refused("unfinalized", "missing")
+        commit = self.pushed("unfinalized")
+        self.github.add("example/repo", commit, LINT)
+        self.github.add("example/repo", commit, TEST, "in_progress", "success", unfinalized=True)
+        error, clock = self.waiting_refused("unfinalized", "never marked them completed")
+        self.assertEqual(clock.sleeps, [], "no wait for a run that will not finish")
+        [stuck] = json.loads(str(error).split("will not finish: ", 1)[1])
+        self.assertEqual((stuck["name"], stuck["state"], stuck["conclusion"]),
+                         (TEST["name"], "unfinalized", "success"))
+        self.assertIn("gh run rerun -R example/repo --job " + str(stuck["run"]), error.recovery)
+        self.assertEqual(self.pushed("unfinalized"), commit)
+        self.github.add("example/repo", commit, TEST)
+        self.assertEqual(self.waiting("unfinalized")[0]["integration"]["destination"], "trunk")
+
+    def test_an_unfinalized_run_beside_a_failed_one_reports_the_failure(self):
+        self.start("mixed", required=(TEST, LINT))
+        self.refused("mixed", "missing")
+        commit = self.pushed("mixed")
+        self.github.add("example/repo", commit, LINT, conclusion="failure")
+        self.github.add("example/repo", commit, TEST, "in_progress", "success", unfinalized=True)
+        error, clock = self.waiting_refused("mixed", "required checks failed")
+        self.assertEqual(clock.sleeps, [])
+        self.assertEqual(sorted(c["state"] for c in json.loads(str(error).split(": ", 1)[1])),
+                         ["failure", "unfinalized"])
 
     def test_wait_without_required_checks_queries_nothing(self):
         self.start("plain-wait", required=())

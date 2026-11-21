@@ -353,6 +353,9 @@ refused. The merge intent and integration record keep it as
 keeps the decision it started with. Finish then asks GitHub through the `gh` CLI for those check runs on the exact
 accepted commit in the repository the remote pushes to. Only the latest run of
 each app and name counts, and only `completed` with conclusion `success` passes.
+A run that GitHub gave a conclusion and a completion time but left in another
+status is `unfinalized`. It will not finish by itself, so `--wait-checks` stops
+at once and names the `gh run rerun --job` command for each such run.
 Runs of one workflow for both `push` and `pull_request` on the same commit share
 that identity, so the newer one decides, as in GitHub branch protection. A remote
 with several push URLs is refused.

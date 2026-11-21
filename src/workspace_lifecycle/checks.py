@@ -6,7 +6,9 @@ that declared set. Only the latest GitHub check run of each required app and
 name on the exact commit counts, and only ``completed`` with conclusion
 ``success`` passes. Checks on a branch's commit count only runs pushed to that
 branch, since the same commit may also carry runs from another branch. Any other completed conclusion is a failure; a missing or
-unfinished check is pending.
+unfinished check is pending. A run that GitHub gave a conclusion and a
+completion time but never marked ``completed`` is ``unfinalized``: it will
+not finish by itself, so it stops the wait like a failure (#97).
 """
 from __future__ import annotations
 
@@ -136,7 +138,7 @@ def _runs(repository: str, commit: str, name: str) -> list[dict]:
     argv = ['gh', 'api', '--hostname', 'github.com', '--paginate', '-X', 'GET',
             f'repos/{repository}/commits/{commit}/check-runs',
             '-f', 'check_name=' + name, '-f', 'filter=all', '-f', 'per_page=100',
-            '--jq', '.check_runs[] | {id, name, head_sha, status, conclusion, html_url, app: .app.slug, suite: .check_suite.id}']
+            '--jq', '.check_runs[] | {id, name, head_sha, status, conclusion, completed_at, html_url, app: .app.slug, suite: .check_suite.id}']
     return _api(argv)
 
 
@@ -192,10 +194,12 @@ def _states(repository: str, commit: str, required: list[dict], branch: str | No
             runs = [run for run in runs if (suites.get(run.get('suite')) or {}).get('head_branch') == branch]
         latest = max(runs, key=lambda run: run['id'], default=None)
         state = ('missing' if latest is None else
-                 latest.get('status') if latest.get('status') != 'completed' else
-                 latest.get('conclusion') or 'unknown')
+                 latest.get('conclusion') or 'unknown' if latest.get('status') == 'completed' else
+                 'unfinalized' if latest.get('conclusion') and latest.get('completed_at') else
+                 latest.get('status'))
         url = latest.get('html_url') if latest else None
         results.append({**check, 'state': state, **({'run': latest['id']} if latest else {}),
+                        **({'conclusion': latest['conclusion']} if state == 'unfinalized' else {}),
                         **({'url': url} if isinstance(url, str) and url else {})})
     return results
 
@@ -257,6 +261,14 @@ def wait(repository: str, commit: str, required: list[dict], seconds: float) -> 
     outcome, results = watch(repository, commit, required, seconds, absent=True)
     if outcome == 'failed':
         failed = [entry for entry in results if entry['state'] not in PENDING | {'success'}]
+        if all(entry['state'] == 'unfinalized' for entry in failed):
+            raise LifecycleError('required checks on ' + repository + '@' + commit + ' have a conclusion '
+                                 'but GitHub never marked them completed, so they will not finish: '
+                                 + json.dumps(failed, sort_keys=True),
+                                 'the accepted commit is kept; rerun each such job ('
+                                 + '; '.join('gh run rerun -R ' + repository + ' --job ' + str(entry['run'])
+                                             for entry in failed)
+                                 + '), then run finish again')
         raise LifecycleError('required checks failed for ' + repository + '@' + commit + ': '
                              + json.dumps(failed, sort_keys=True),
                              'the accepted commit is kept; rerun the failed check or commit a fix, then run finish again')
